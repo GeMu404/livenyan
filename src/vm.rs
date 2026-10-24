@@ -426,9 +426,19 @@ impl Vm {
                     }
                 }
             }
-            for e in notifies {
-                let parts: Vec<Value> = e.split("\r\n").map(|x| Value::Str(x.to_string())).collect();
-                if !self.fire(&n, Prop::ONNOTIFY, parts) {
+            for raw in notifies {
+                let system = raw.starts_with('\x01');
+                let e = raw.trim_start_matches('\x01');
+                let parts: Vec<String> = e.split("\r\n").map(|x| x.to_string()).collect();
+                log::debug!("inline text event on {n}: {}{:?}", if system { "system " } else { "" }, parts.first());
+                if self.fire(&n, Prop::ONNOTIFY, parts.iter().map(|x| Value::Str(x.clone())).collect()) {
+                    continue;
+                }
+                // <EVENT VALUE="script\r\nargs..">: sin ONNOTIFY, el nombre es el script a ejecutar
+                if !system && !parts[0].trim().is_empty() {
+                    log::debug!("inline text event: calling script {:?} with {} args", parts[0], parts.len() - 1);
+                    self.queue.push_back(ObjEvent { obj: n.clone(), prop: Prop::ONNOTIFY, script: parts[0].clone(), params: parts[1..].iter().map(|x| Value::Str(x.clone())).collect() });
+                } else {
                     self.warn("notify-nohandler", "inline text event without ONNOTIFY handler");
                 }
             }
@@ -951,6 +961,13 @@ impl Vm {
                 if matches!(kind, CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
                     self.warn(&format!("unimpl:cmd {} (placeholder)", c.name()), &format!("{} only creates a placeholder object", c.name()));
                 }
+                if log::log_enabled!(log::Level::Debug) {
+                    for (p, v) in &props {
+                        if crate::lsb::prop_name(*p).starts_with("ON") {
+                            log::debug!("event prop: {} {name}.{} (id {}) = {:?}", c.name(), crate::lsb::prop_name(*p), p, v.as_str());
+                        }
+                    }
+                }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
                 self.object_defined(&name);
             }
@@ -1019,6 +1036,9 @@ impl Vm {
                 detail = format!("{obj:?}.{}", p.map(crate::lsb::prop_name).unwrap_or("?"));
                 match p {
                     Some(p) => {
+                        if crate::lsb::prop_name(p).starts_with("ON") {
+                            log::debug!("event prop: SetProp {obj}.{} (id {p}) = {:?}", crate::lsb::prop_name(p), v.as_str());
+                        }
                         if p == Prop::SOURCE
                             && let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
                                 self.assets.request(&n);
@@ -1283,6 +1303,8 @@ impl Vm {
             self.warn(&format!("mes:{target}"), &format!("TextIns into missing message object {target:?}; creating one"));
             self.scene.create(target, Kind::Message, HashMap::new());
             self.placeholders.insert(target.to_string());
+            let msgs: Vec<String> = self.scene.draw_order().into_iter().filter(|o| o.kind == Kind::Message).map(|o| o.name.clone()).collect();
+            log::debug!("TextIns target {target:?} missing; existing message objects: {msgs:?}");
         }
         self.ended_unnotified.remove(target);
         let mut plan: Vec<Pending> = vec![];
@@ -1317,7 +1339,7 @@ impl Vm {
                 },
                 Glyph::Event { event } => {
                     flush(&mut plan, &mut cur);
-                    plan.push(Pending::Notify(event.trim_start_matches('\x01').to_string()));
+                    plan.push(Pending::Notify(event.clone()));
                 }
                 Glyph::Img { .. } => self.warn("unimpl:TextIns inline image", "TextIns inline images are ignored"),
                 _ => {}
@@ -1442,7 +1464,8 @@ impl Vm {
                     return Some(format!("{n}.{}", crate::lsb::prop_name(p)));
                 }
             }
-            log::debug!("screen click: skip {n}: no ONLBTNUP/ONLBTNDOWN/ONPLAYEND handler");
+            let evs: Vec<String> = self.scene.get(&n).map(|o| o.props.iter().filter(|(p, _)| crate::lsb::prop_name(**p).starts_with("ON")).map(|(p, v)| format!("{}={:?}", crate::lsb::prop_name(*p), v.as_str())).collect()).unwrap_or_default();
+            log::debug!("screen click: skip {n}: no ONLBTNUP/ONLBTNDOWN/ONPLAYEND handler (kind {:?}, event props {evs:?})", self.scene.get(&n).map(|o| o.kind));
         }
         None
     }

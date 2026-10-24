@@ -122,7 +122,23 @@ fn stride(w: u32, bpp: u32) -> usize {
 }
 
 /// Desempaqueta bloques (BlockWidth/BlockHeight > 0).
-fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &Info) -> R<Vec<u8>> {
+/// Fuente de bloques de otros frames (referencias entre frames: animaciones que reutilizan
+/// bloques sin cambios). `alpha` elige el canal alfa en vez del color.
+#[derive(Clone, Copy)]
+struct Prev<'a> {
+    frames: &'a [Frame],
+    alpha: bool,
+}
+
+impl Prev<'_> {
+    fn block_src(&self, fr: i32, lr: i32) -> Option<&[u8]> {
+        let f = self.frames.get(usize::try_from(fr).ok()?)?;
+        let (_, d, a) = f.layers.get(usize::try_from(lr).ok()?)?;
+        if self.alpha { a.as_deref() } else { Some(d.as_slice()) }
+    }
+}
+
+fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &Info, prev: Prev) -> R<Vec<u8>> {
     let (bw, bh) = (info.block_w, info.block_h);
     if bw <= 0 || bh <= 0 {
         return Ok(packed.to_vec());
@@ -164,7 +180,19 @@ fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &
                         dst += stride;
                     }
                 }
-                _ => return err("cross-frame block references are not supported"),
+                _ => {
+                    // bloque igual al del frame `fr`, capa `lr`, misma posición
+                    let Some(src) = prev.block_src(fr, lr) else {
+                        return err(format!("block references frame {fr} layer {lr}, not available"));
+                    };
+                    for _ in 0..rh {
+                        if dst + chunk > src.len() {
+                            return err("cross-frame block out of range");
+                        }
+                        data[dst..dst + chunk].copy_from_slice(&src[dst..dst + chunk]);
+                        dst += stride;
+                    }
+                }
             }
             i += 1;
         }
@@ -172,8 +200,13 @@ fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &
     Ok(data)
 }
 
-fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32) -> R<Vec<u8>> {
+fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Frame]) -> R<Vec<u8>> {
+    let prev = Prev { frames: prev, alpha: false };
     let n = r.usize()?;
+    if info.compression == Some(0) {
+        let packed = zlib_block(r, n)?;
+        return unpack_blocks(&packed, w, h, bpp, stride(w, bpp), info, prev);
+    }
     let raw = r.take(n)?;
     let st = stride(w, bpp);
     match info.compression {
@@ -194,19 +227,68 @@ fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32) -> R<Vec<u8>
             }
             Ok(out)
         }
-        Some(0) => unpack_blocks(&inflate(raw)?, w, h, bpp, st, info),
-        _ => unpack_blocks(raw, w, h, bpp, st, info),
+        _ => unpack_blocks(raw, w, h, bpp, st, info, prev),
     }
 }
 
-fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32) -> R<Option<Vec<u8>>> {
+fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame]) -> R<Option<Vec<u8>>> {
     let n = r.usize()?;
     if n == 0 {
         return Ok(None);
     }
-    let raw = r.take(n)?;
+    let packed = zlib_block(r, n)?;
     let st = (w as usize + 3) & !3;
-    Ok(Some(unpack_blocks(&inflate(raw)?, w, h, 8, st, info)?))
+    Ok(Some(unpack_blocks(&packed, w, h, 8, st, info, Prev { frames: prev, alpha: true })?))
+}
+
+/// Bloque zlib de tamaño declarado `n`. Si ese tamaño no cuadra con el flujo (flujo
+/// incompleto: el campo de tamaño no cubre el flujo entero), se descomprime en modo
+/// streaming desde el inicio hasta el fin real del flujo y el lector avanza hasta ahí.
+fn zlib_block(r: &mut Rd, n: usize) -> R<Vec<u8>> {
+    let start = r.p;
+    if let Ok((out, used)) = inflate_stream(r.d.get(start..start + n).unwrap_or(&r.d[start..]))
+        && used <= n
+    {
+        r.p = start + n;
+        return Ok(out);
+    }
+    match inflate_stream(&r.d[start..]) {
+        Ok((out, used)) => {
+            log::debug!("GAL: zlib block declared {n} B, stream really {used} B; resyncing");
+            r.p = start + used.max(n.min(r.d.len() - start));
+            if used > n {
+                r.p = start + used;
+            }
+            Ok(out)
+        }
+        Err(e) => {
+            // último recurso: tolerante (salida parcial)
+            let raw = r.take(n)?;
+            inflate(raw).map_err(|e2| GalError(format!("{e2} (streaming: {e})")))
+        }
+    }
+}
+
+/// Descomprime un flujo zlib hasta su final real; devuelve (datos, bytes consumidos).
+fn inflate_stream(d: &[u8]) -> R<(Vec<u8>, usize)> {
+    let mut z = flate2::Decompress::new(true);
+    let mut out = Vec::with_capacity(d.len() * 4 + 1024);
+    loop {
+        if out.capacity() - out.len() < 4096 {
+            out.reserve(out.capacity().max(65536));
+        }
+        let before_in = z.total_in();
+        let before_out = z.total_out();
+        let st = z
+            .decompress_vec(&d[z.total_in() as usize..], &mut out, flate2::FlushDecompress::None)
+            .map_err(|e| GalError(format!("zlib: {e}")))?;
+        if st == flate2::Status::StreamEnd {
+            return Ok((out, z.total_in() as usize));
+        }
+        if z.total_in() == before_in && z.total_out() == before_out {
+            return err("zlib: incomplete deflate stream");
+        }
+    }
 }
 
 
@@ -254,7 +336,7 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut frames: Vec<Frame> = Vec::new();
     for i in 0..(frame_count as usize).min(max.max(1)) {
         if i == 0 {
-            frames.push(read_gale_frame(&mut r, &info, ver)?);
+            frames.push(read_gale_frame(&mut r, &info, ver, &[])?);
             continue;
         }
         // Los frames siguientes no siempre empiezan justo tras el anterior (hay datos
@@ -262,9 +344,10 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         // plausible (mismo tamaño que el frame 0) en los bytes siguientes.
         let (w0, h0) = (frames[0].w, frames[0].h);
         let mut found = None;
+        let mut last_err = String::from("no candidate header");
         for off in 0..65536usize {
             let p = r.p + off;
-            if p + 40 > d.len() {
+            if p + 24 > d.len() {
                 break;
             }
             if !frame_header_ok(d, p, w0, h0) {
@@ -272,9 +355,12 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
             }
             let mut t = r;
             t.p = p;
-            if let Ok(f) = read_gale_frame(&mut t, &info, ver) {
-                found = Some((f, t.p, off));
-                break;
+            match read_gale_frame(&mut t, &info, ver, &frames) {
+                Ok(f) => {
+                    found = Some((f, t.p, off));
+                    break;
+                }
+                Err(e) => last_err = format!("candidate at +{off}: {e}"),
             }
         }
         match found {
@@ -285,7 +371,7 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
                 r.p = np;
                 frames.push(f);
             }
-            None => return err(format!("frame {i}: no valid frame header found")),
+            None => return err(format!("frame {i}: no valid frame header found ({last_err})")),
         }
     }
     info.frames = frame_count as u32;
@@ -303,11 +389,12 @@ fn frame_header_ok(d: &[u8], p: usize, w0: u32, h0: u32) -> bool {
     }
     let q = p + 4 + nl as usize + 4 + 9;
     let (Some(lc), Some(w), Some(h), Some(bpp)) = (rd(q), rd(q + 4), rd(q + 8), rd(q + 12)) else { return false };
-    (1..=64).contains(&lc) && w as u32 == w0 && h as u32 == h0 && [4, 8, 16, 24, 32].contains(&bpp)
+    let sane = |v: i32, v0: u32| v as u32 == v0 || (1..=(v0.max(1) as i32 * 4).max(64)).contains(&v);
+    (1..=64).contains(&lc) && sane(w, w0) && sane(h, h0) && [1, 4, 8, 16, 24, 32].contains(&bpp)
 }
 
 /// Lee un frame Gale (cabecera + capas) en la posición actual.
-fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32) -> R<Frame> {
+fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame> {
     let nl = r.usize()?;
     let _name = cp932(r.take(nl)?);
     let hdr_start = r.p;
@@ -341,8 +428,8 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32) -> R<Frame> {
         if ver >= 107 {
             r.u8()?;
         }
-        let data = layer_payload(r, info, w, h, bpp)?;
-        let a = alpha_payload(r, info, w, h)?;
+        let data = layer_payload(r, info, w, h, bpp, prev)?;
+        let a = alpha_payload(r, info, w, h, prev)?;
         let a = if alpha_on { a } else { None };
         layers.push((Layer { left, top, visible, alpha, alpha_on }, data, a));
     }
@@ -475,8 +562,8 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
             alpha: geti(lt, "Alpha", 255) as i32,
             alpha_on: geti(lt, "AlphaOn", 0) != 0,
         };
-        let data = layer_payload(&mut r, &info, w, h, bpp)?;
-        let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h)? } else { None };
+        let data = layer_payload(&mut r, &info, w, h, bpp, &frames)?;
+        let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h, &frames)? } else { None };
         layers.push((l, data, a));
     }
     if layers.is_empty() {
@@ -514,6 +601,106 @@ pub fn quick_class(d: &[u8]) -> String {
             (if transparent { "all-transparent" } else { "all-black" }).into()
         }
     }
+}
+
+/// Estructura binaria de un Gale (solo offsets, tamaños y campos de cabecera; nada de
+/// píxeles): para diagnosticar formatos raros sin compartir la imagen.
+pub fn dump(d: &[u8]) -> String {
+    let mut o = String::new();
+    if d.starts_with(b"GaleX") {
+        return "GaleX (XML header): structure dump not implemented\n".into();
+    }
+    let rd = |p: usize| d.get(p..p + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+    let ver: u32 = d.get(4..7).and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+    o += &format!("dump: file {} B, version {ver}\n", d.len());
+    if ver <= 102 {
+        return o + "  (old Gale, not dumped)\n";
+    }
+    let hs = rd(7).unwrap_or(0).max(0) as usize;
+    let h = |off: usize| rd(11 + off).unwrap_or(-1);
+    o += &format!(
+        "  header @7 size {hs}: w {} h {} bpp {} frames {} randomized {} compression {} blocks {}x{}\n",
+        h(4), h(8), h(0xC), h(0x10), d.get(11 + 0x15).copied().unwrap_or(0), d.get(11 + 0x16).copied().unwrap_or(0), h(0x1C), h(0x20)
+    );
+    let comp = d.get(11 + 0x16).copied();
+    let frames = h(0x10).max(0) as usize;
+    let mut p = 11 + hs;
+    let mut f = 0;
+    'outer: while f < frames.min(64) && p < d.len() {
+        let start = p;
+        let Some(nl) = rd(p) else { break };
+        if !(0..=256).contains(&nl) {
+            o += &format!("  frame {f} @{p}: implausible name length {nl}; stopping walk\n");
+            break;
+        }
+        p += 4 + nl as usize;
+        let hdr: Vec<u8> = d.get(p..p + 13).map(|x| x.to_vec()).unwrap_or_default();
+        p += 13;
+        let (lc, w, hh, bpp) = (rd(p).unwrap_or(-1), rd(p + 4).unwrap_or(-1), rd(p + 8).unwrap_or(-1), rd(p + 12).unwrap_or(-1));
+        o += &format!("  frame {f} @{start}: name_len {nl} hdr {hdr:02x?} layers {lc} size {w}x{hh} bpp {bpp}\n");
+        p += 16;
+        if (1..=8).contains(&bpp) {
+            p += (1usize << bpp) * 4;
+        }
+        if !(1..=64).contains(&lc) {
+            break;
+        }
+        for li in 0..lc {
+            let ls = p;
+            let (left, top) = (rd(p).unwrap_or(0), rd(p + 4).unwrap_or(0));
+            let vis = d.get(p + 8).copied().unwrap_or(0);
+            let alpha_on = d.get(p + 17).copied().unwrap_or(0);
+            p += 18;
+            let lnl = rd(p).unwrap_or(0).max(0) as usize;
+            p += 4 + lnl + usize::from(ver >= 107);
+            for what in ["data", "alpha"] {
+                let Some(n) = rd(p) else { break 'outer };
+                let body = p + 4;
+                let mut extra = String::new();
+                if n > 0 && (comp == Some(0) || what == "alpha") {
+                    match inflate_stream(&d[body.min(d.len())..]) {
+                        Ok((out, used)) => extra = format!(" | zlib stream {used} B -> {} B{}", out.len(), if used as i64 != n as i64 { " (MISMATCH)" } else { "" }),
+                        Err(e) => extra = format!(" | zlib: {e}"),
+                    }
+                }
+                o += &format!("    layer {li} @{ls}: pos ({left},{top}) visible {vis} alpha_on {alpha_on} name_len {lnl} | {what} size @{p} = {n}{extra}\n");
+                if n < 0 {
+                    break 'outer;
+                }
+                p = body + n as usize;
+            }
+        }
+        o += &format!("  frame {f} ends @{p}\n");
+        // ¿empieza otro frame justo aquí? si no, candidatos cercanos
+        if f + 1 < frames {
+            let mut cands = vec![];
+            for off in 0..65536usize {
+                let q = p + off;
+                if q + 24 > d.len() || cands.len() >= 5 {
+                    break;
+                }
+                let Some(nl) = rd(q) else { break };
+                if !(0..=256).contains(&nl) {
+                    continue;
+                }
+                let r0 = q + 4 + nl as usize + 13;
+                let (Some(lc), Some(w2), Some(h2), Some(b2)) = (rd(r0), rd(r0 + 4), rd(r0 + 8), rd(r0 + 12)) else { continue };
+                if (1..=64).contains(&lc) && (1..=16384).contains(&w2) && (1..=16384).contains(&h2) && [1, 4, 8, 16, 24, 32].contains(&b2) {
+                    cands.push(format!("+{off} (name_len {nl} layers {lc} {w2}x{h2} bpp {b2})"));
+                }
+            }
+            o += &format!("  next-frame header candidates after @{p}: {}\n", if cands.is_empty() { "none".to_string() } else { cands.join(", ") });
+            if let Some(first) = cands.first()
+                && let Some(off) = first.strip_prefix('+').and_then(|x| x.split(' ').next()).and_then(|x| x.parse::<usize>().ok()) {
+                    p += off;
+                } else {
+                    break;
+                }
+        }
+        f += 1;
+    }
+    o += &format!("  walk stopped @{p} of {}\n", d.len());
+    o
 }
 
 pub fn stats(d: &[u8]) -> R<String> {
@@ -802,6 +989,62 @@ mod tests {
         assert_eq!(img.delays, vec![DEFAULT_FRAME_MS; 3]);
         assert!(stats(&d).unwrap().contains("frames 3 (parsed 3)"));
     }
+    /// Frames con bloques que referencian otro frame + tamaño zlib declarado demasiado corto.
+    #[test]
+    fn gale_cross_frame_blocks_and_short_zlib_size() {
+        use std::io::Write;
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let base = std::fs::read(dir.join("render2/pic.gal")).unwrap();
+        let hs = u32::from_le_bytes(base[7..11].try_into().unwrap()) as usize;
+        let mut hdr = base[11..11 + hs].to_vec();
+        hdr[0x10..0x14].copy_from_slice(&2u32.to_le_bytes());
+        hdr[0x1C..0x20].copy_from_slice(&8u32.to_le_bytes());
+        hdr[0x20..0x24].copy_from_slice(&8u32.to_le_bytes());
+        // 16x8, 24bpp, bloques 8x8 -> 2 bloques; fila de bloque = 24 B, stride 48
+        let frame = |refs: [(i32, i32); 2], fills: &[[u8; 3]], name: &str, short: bool| {
+            let mut packed = vec![];
+            for (a, b) in refs {
+                packed.extend(a.to_le_bytes());
+                packed.extend(b.to_le_bytes());
+            }
+            for c in fills {
+                packed.extend(c.iter().copied().cycle().take(24 * 8));
+            }
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            z.write_all(&packed).unwrap();
+            let z = z.finish().unwrap();
+            let mut f = vec![];
+            f.extend((name.len() as u32).to_le_bytes());
+            f.extend(name.as_bytes());
+            f.extend([0xffu8, 0xff, 0xff, 0xff, 0x43, 0, 0, 0, 2, 0, 0, 0, 0]);
+            for v in [1u32, 16, 8, 24] {
+                f.extend(v.to_le_bytes());
+            }
+            f.extend(0i32.to_le_bytes());
+            f.extend(0i32.to_le_bytes());
+            f.push(1);
+            f.extend((-1i32).to_le_bytes());
+            f.extend(255i32.to_le_bytes());
+            f.push(0);
+            f.extend(0u32.to_le_bytes());
+            f.extend((if short { 5 } else { z.len() } as u32).to_le_bytes());
+            f.extend(&z);
+            f.extend(0u32.to_le_bytes());
+            f
+        };
+        let mut d = b"Gale106".to_vec();
+        d.extend((hs as u32).to_le_bytes());
+        d.extend(&hdr);
+        d.extend(frame([(-1, 0), (-1, 0)], &[[0, 0, 255], [0, 255, 0]], "F0", false));
+        d.extend(frame([(0, 0), (-1, 0)], &[[255, 0, 0]], "F1", true));
+        let img = decode(&d).unwrap();
+        assert_eq!(img.frames.len(), 1);
+        // bloque izquierdo copiado del frame 0 (rojo), derecho nuevo (azul)
+        assert_eq!(&img.frames[0][0..4], &[255, 0, 0, 255]);
+        assert_eq!(&img.frames[0][8 * 4..8 * 4 + 4], &[0, 0, 255, 255]);
+        assert!(dump(&d).contains("(MISMATCH)"));
+    }
+
     #[test]
     fn truncated_zlib_tolerated() {
         use std::io::Write;

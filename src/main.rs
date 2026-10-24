@@ -121,10 +121,43 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     let assets = Arc::new(Assets::new(game.data.clone(), cfg.threads(), cfg.assets.cache_mb));
 
     if let Some(name) = &cli.gal_stats {
-        let n = game.data.resolve(name, livenyan::assets::IMAGE_EXTS).ok_or(format!("not in archive: {name}"))?;
+        let n = match game.data.resolve(name, livenyan::assets::IMAGE_EXTS) {
+            Some(n) => n,
+            None => {
+                // por sufijo / nombre base (sin carpetas, con o sin extensión)
+                let want = name.replace('/', "\\").to_lowercase();
+                let stem = want.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(want.clone());
+                let c: Vec<&String> = game
+                    .data
+                    .names()
+                    .iter()
+                    .filter(|f| {
+                        let l = f.to_lowercase();
+                        let ls = l.rsplit_once('.').map(|(a, _)| a).unwrap_or(&l);
+                        let tail = |x: &str, w: &str| x == w || x.ends_with(&format!("\\{w}"));
+                        tail(&l, &want) || (l.ends_with(".gal") && tail(ls, &stem))
+                    })
+                    .collect();
+                match c.len() {
+                    0 => return Err(format!("not in archive: {name}").into()),
+                    1 => c[0].clone(),
+                    _ => {
+                        eprintln!("ambiguous: {name} matches {} files:", c.len());
+                        for x in &c {
+                            eprintln!("  {x}");
+                        }
+                        return Err("ambiguous --gal-stats name; pass one of the paths above".into());
+                    }
+                }
+            }
+        };
         let d = game.data.read(&n).map_err(|e| e.to_string())?;
         println!("{n}: {} bytes", d.len());
-        print!("{}", livenyan::gal::stats(&d).map_err(|e| e.to_string())?);
+        match livenyan::gal::stats(&d) {
+            Ok(s) => print!("{s}"),
+            Err(e) => println!("stats error: {e}"),
+        }
+        print!("{}", livenyan::gal::dump(&d));
         return Ok(());
     }
     if cli.info {
