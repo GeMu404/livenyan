@@ -12,6 +12,10 @@ use crate::scene::{prop_of, Kind, Motion, Scene, TextItem};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Nombre de la capa raíz (pantalla) en LiveMaker: el carácter 0x01. Siempre existe;
+/// sus hijos son de nivel superior.
+pub const ROOT: &str = "\u{1}";
+
 /// Eventos hacia el host (audio, vídeo…).
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -80,6 +84,8 @@ pub struct Options {
     pub trace: bool,
     /// --trace-conds: valores de las condiciones If/Elseif/While en scripts de escenario.
     pub trace_conds: bool,
+    /// --trace --pick N: ítem a elegir en menús.
+    pub pick: Option<i64>,
     pub show_text: bool,
 }
 
@@ -105,6 +111,8 @@ pub struct Vm {
     pub unimpl: std::collections::BTreeMap<String, u64>,
     pub db: crate::db::Db,
     history_max: i64,
+    /// Propiedades de la capa raíz/pantalla ("\x01" en LiveMaker).
+    pub root_props: HashMap<u8, Value>,
     cabinets: HashMap<String, Vec<crate::scene::Obj>>,
     /// Temporizadores activos: objeto -> próximo disparo (ms).
     timers: HashMap<String, f64>,
@@ -154,6 +162,7 @@ impl Vm {
             unimpl: Default::default(),
             db: Default::default(),
             history_max: 0,
+            root_props: HashMap::new(),
             cabinets: HashMap::new(),
             timers: HashMap::new(),
             cinemas: HashMap::new(),
@@ -925,7 +934,10 @@ impl Vm {
                             && let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
                                 self.assets.request(&n);
                             }
-                        if !self.scene.set(&obj, p, v) && !obj.is_empty() {
+                        if obj == ROOT {
+                            log::debug!("SetProp on root layer: {} = {v:?}", crate::lsb::prop_name(p));
+                            self.root_props.insert(p, v);
+                        } else if !self.scene.set(&obj, p, v) && !obj.is_empty() {
                             self.warn(&format!("noobj:{obj}"), &format!("SetProp on missing object {obj:?}"));
                         } else if p == Prop::ONPLAYEND {
                             self.object_defined(&obj);
@@ -938,7 +950,7 @@ impl Vm {
                 let obj = self.eval(c.expr("ObjName")).as_str();
                 let pv = self.eval(c.expr("ObjProp"));
                 let var = c.str("VarName").unwrap_or("").to_string();
-                let v = prop_of(&pv).and_then(|p| self.scene.get(&obj).and_then(|o| o.get(p).cloned())).unwrap_or(Value::Int(0));
+                let v = prop_of(&pv).map(|p| self.get_prop(&obj, p)).unwrap_or(Value::Int(0));
                 detail = format!("{obj:?} -> {var}");
                 self.assign(&var, v);
             }
@@ -1251,6 +1263,34 @@ impl Vm {
         }
     }
 
+    /// GetProp con valores por defecto del tipo adecuado: cadena vacía para propiedades de
+    /// texto (PARENT, SOURCE, eventos...), VISIBLE/ALPHA/ZOOM por defecto si el objeto existe.
+    fn get_prop(&self, obj: &str, p: u8) -> Value {
+        let (exists, v) = if obj == ROOT {
+            (true, self.root_props.get(&p).cloned())
+        } else {
+            match self.scene.get(obj) {
+                Some(o) => (true, if p == Prop::NAME { Some(Value::Str(o.name.clone())) } else { o.get(p).cloned() }),
+                None => (false, None),
+            }
+        };
+        if let Some(v) = v {
+            return v;
+        }
+        let name = crate::lsb::prop_name(p);
+        if matches!(p, Prop::NAME | Prop::PARENT | Prop::SOURCE | Prop::TEXT | Prop::FONTNAME) || name.starts_with("ON") || name.ends_with("SOURCE") {
+            return Value::Str(String::new());
+        }
+        match p {
+            Prop::VISIBLE => Value::Bool(exists),
+            Prop::ALPHA if exists => Value::Int(255),
+            Prop::ZOOMX | Prop::ZOOMY if exists => Value::Int(100),
+            Prop::WIDTH if obj == ROOT => Value::Int(self.opts.screen.0 as i64),
+            Prop::HEIGHT if obj == ROOT => Value::Int(self.opts.screen.1 as i64),
+            _ => Value::Int(0),
+        }
+    }
+
     /// Variables de sistema que el motor original provee.
     fn system_var(&self, name: &str) -> Option<Value> {
         let (w, h) = self.opts.screen;
@@ -1284,12 +1324,20 @@ impl Vm {
         // menús primero (p.ej. PrevMenu del título): elegir el primer ítem habilitado
         let name = cands.iter().find(|c| self.scene.get(c).is_some_and(|o| o.kind == Kind::Menu)).cloned().unwrap_or_else(|| cands[n % cands.len()].clone());
         if self.scene.get(&name).is_some_and(|o| o.kind == Kind::Menu) {
-            let idx = (0..64).find(|i| *self.enabled.get(&(name.clone(), *i)).unwrap_or(&true)).unwrap_or(0);
+            let idx = match self.opts.pick {
+                Some(p) => p,
+                None => (0..64).find(|i| *self.enabled.get(&(name.clone(), *i)).unwrap_or(&true)).unwrap_or(0),
+            };
+            // el texto del ítem (si el menú lo tiene en PR_TEXT, una línea por ítem)
+            let item = self.scene.get(&name).map(|o| o.str(Prop::TEXT)).unwrap_or_default();
+            let item = item.lines().nth(idx.max(0) as usize).unwrap_or("").to_string();
             if let Some(o) = self.scene.get_mut(&name) {
                 o.props.insert(Prop::INDEX, Value::Int(idx));
+                o.props.insert(Prop::VALUE, Value::Int(idx));
             }
+            self.selected.insert((name.clone(), idx), true);
             for p in [Prop::ONSELECT, Prop::ONLBTNUP] {
-                if self.fire(&name, p, vec![Value::Int(idx)]) {
+                if self.fire(&name, p, vec![Value::Int(idx), Value::Str(item.clone())]) {
                     return Some(format!("{name}[{idx}]"));
                 }
             }
@@ -1333,10 +1381,14 @@ impl Env for Vm {
         Some(match f {
             Func::GETPROP => {
                 let p = prop_of(a.get(1)?)?;
-                self.scene.get(&s(0)).and_then(|o| o.get(p).cloned()).unwrap_or(Value::Int(0))
+                self.get_prop(&s(0), p)
             }
             Func::SETPROP => {
                 let p = prop_of(a.get(1)?)?;
+                if s(0) == ROOT {
+                    self.root_props.insert(p, a.get(2).cloned().unwrap_or_default());
+                    return Some(Value::Bool(true));
+                }
                 Value::Bool(self.scene.set(&s(0), p, a.get(2).cloned().unwrap_or_default()))
             }
             Func::EXISTS => Value::Bool(self.scene.get(&s(0)).is_some()),
@@ -1417,7 +1469,7 @@ mod tests {
         let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&p).unwrap();
         let assets = Arc::new(Assets::new(data, 2, 64));
-        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { trace_conds: false, screen: (800, 600), cinema_ms: 0.0, text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
+        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { pick: None, trace_conds: false, screen: (800, 600), cinema_ms: 0.0, text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
         let mut t = 0.0;
         for _ in 0..1000 {
             vm.update(t, 1000);

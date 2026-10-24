@@ -43,6 +43,7 @@ struct Drawn {
     rect: (f32, f32, f32, f32),
     alpha: u8,
     status: &'static str,
+    extra: String,
 }
 
 pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant, snapshot: Option<(u64, std::path::PathBuf)>) -> Result<(), String> {
@@ -63,7 +64,30 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
     if cfg.window.fullscreen {
         let _ = window.set_fullscreen(true);
     }
+    if !cfg.window.renderer.is_empty() {
+        // probar el driver antes: si no funciona en este sistema, avisar y usar el automático
+        let name = std::ffi::CString::new(cfg.window.renderer.as_str()).unwrap_or_default();
+        let ok = unsafe {
+            let r = sdl3::sys::render::SDL_CreateRenderer(window.raw(), name.as_ptr());
+            if r.is_null() {
+                false
+            } else {
+                sdl3::sys::render::SDL_DestroyRenderer(r);
+                true
+            }
+        };
+        if ok {
+            sdl3::hint::set("SDL_RENDER_DRIVER", &cfg.window.renderer);
+        } else {
+            log::warn!("render driver {:?} unavailable ({}); using automatic", cfg.window.renderer, sdl3::get_error());
+        }
+    }
     let mut canvas: Canvas<Window> = window.into_canvas();
+    let rname = unsafe {
+        let p = sdl3::sys::render::SDL_GetRendererName(canvas.raw());
+        if p.is_null() { "?".to_string() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+    };
+    log::info!("render driver: {rname} (requested {:?})", if cfg.window.renderer.is_empty() { "auto" } else { cfg.window.renderer.as_str() });
     canvas
         .set_logical_size(lw, lh, sdl3::sys::render::SDL_LOGICAL_PRESENTATION_LETTERBOX)
         .map_err(|e| e.to_string())?;
@@ -232,8 +256,8 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                 log::debug!("render frame {frame}: {} objects, {n} drawn", drawn.len());
                 for d in &drawn {
                     log::debug!(
-                        "  z{:<3} {:<24} rect=({:.0},{:.0} {:.0}x{:.0}) alpha={} {}",
-                        d.z, d.name, d.rect.0, d.rect.1, d.rect.2, d.rect.3, d.alpha, d.status
+                        "  z{:<3} {:<24} rect=({:.0},{:.0} {:.0}x{:.0}) alpha={} {} {}",
+                        d.z, d.name, d.rect.0, d.rect.1, d.rect.2, d.rect.3, d.alpha, d.status, d.extra
                     );
                 }
             }
@@ -330,6 +354,15 @@ fn image_for(
     let name = assets.data().resolve(src, IMAGE_EXTS)?;
     if !gfx.images.contains_key(&name) {
         if let Some(Asset::Image(img)) = assets.try_get(&name) {
+            if log::log_enabled!(log::Level::Debug) {
+                let n = (img.w * img.h).max(1) as u64;
+                let asum: u64 = img.rgba.chunks_exact(4).map(|p| p[3] as u64).sum();
+                let rgbsum: u64 = img.rgba.chunks_exact(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum();
+                log::debug!(
+                    "texture {name}: {}x{} avg alpha {} avg rgb {} first px {:?}",
+                    img.w, img.h, asum / n, rgbsum / (3 * n), img.rgba.get(0..4)
+                );
+            }
             let t = upload(tc, img.w, img.h, &img.rgba, filter)?;
             gfx.images.insert(name.clone(), (t, img.w, img.h));
         } else {
@@ -358,29 +391,30 @@ fn draw_scene(
         let (x, y) = vm.scene.abs_pos(o);
         let alpha = o.int(Prop::ALPHA, 255).clamp(0, 255) as u8;
         let (ow, oh) = (o.int(Prop::WIDTH, 0), o.int(Prop::HEIGHT, 0));
-        drawn.push(Drawn { name: o.name.clone(), z, rect: (x as f32, y as f32, ow as f32, oh as f32), alpha, status: "drawn" });
-        let st = &mut drawn.last_mut().unwrap().status;
+        drawn.push(Drawn { name: o.name.clone(), z, rect: (x as f32, y as f32, ow as f32, oh as f32), alpha, status: "drawn", extra: String::new() });
+        let di = drawn.len() - 1;
+        macro_rules! st { () => { drawn[di].status } }
         if !vm.scene.effective_visible(o) {
-            *st = "hidden";
+            st!() = "hidden";
             continue;
         }
         if alpha == 0 {
-            *st = "alpha=0";
+            st!() = "alpha=0";
             continue;
         }
         match o.kind {
             Kind::Image | Kind::Button | Kind::Tile | Kind::Slider => {
                 let src = o.str(Prop::SOURCE);
                 if src.is_empty() {
-                    *st = "no source";
+                    st!() = "no source";
                     continue;
                 }
                 if assets.data().resolve(&src, IMAGE_EXTS).is_none() {
-                    *st = "missing: source not in archive";
+                    st!() = "missing: source not in archive";
                     continue;
                 }
                 let Some(key) = image_for(tc, assets, gfx, &src, filter) else {
-                    *st = "loading (texture not ready)";
+                    st!() = "loading (texture not ready)";
                     continue;
                 };
                 let (t, iw, ih) = gfx.images.get_mut(&key).unwrap();
@@ -413,17 +447,18 @@ fn draw_scene(
                 let col = o.get(Prop::COLOR).map(|v| v.as_int());
                 let fill = matches!(col, Some(c) if c >= 0 && c != 0x1FFF_FFFF);
                 if !fill || ow <= 0 || oh <= 0 {
-                    *st = "container";
+                    st!() = "container";
                     continue;
                 }
                 let c = tcolor(col.unwrap(), alpha);
+                drawn[di].extra = format!("box fill TColor=0x{:06X} -> rgb({},{},{})", col.unwrap(), c[0], c[1], c[2]);
                 canvas.set_blend_mode(BlendMode::Blend);
                 canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
                 let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, ow as f32, oh as f32));
             }
             Kind::Message => {
                 let Some(f) = font.as_deref_mut() else {
-                    *st = "font not loaded yet";
+                    st!() = "font not loaded yet";
                     continue;
                 };
                 let w = if ow > 0 { ow as u32 } else { lw.saturating_sub(x.max(0.0) as u32) };
@@ -431,7 +466,7 @@ fn draw_scene(
                 let items = o.text.clone();
                 let extra = 0;
                 if items.is_empty() {
-                    *st = "empty text";
+                    st!() = "empty text";
                     continue;
                 }
                 let stale = gfx.texts.get(&o.name).is_none_or(|(rev, ex, _)| *rev != o.text_rev || *ex != extra);
@@ -449,7 +484,7 @@ fn draw_scene(
                     let _ = canvas.copy(t, None, FRect::new(x as f32, y as f32, q.width as f32, q.height as f32));
                 }
             }
-            _ => *st = "not rendered (kind)",
+            _ => st!() = "not rendered (kind)",
         }
     }
     // tamaños intrínsecos para hit-testing y GetProp

@@ -29,6 +29,12 @@ struct Cli {
     /// Pasos máximos para --trace.
     #[arg(long, default_value_t = 5000)]
     steps: u64,
+    /// Driver de render de SDL (opengl, vulkan, software, gpu...).
+    #[arg(long)]
+    renderer: Option<String>,
+    /// Con --trace: ítem que se elige en los menús (0 = primero habilitado).
+    #[arg(long)]
+    pick: Option<i64>,
     /// Con --trace: imprime valores de condiciones If/Elseif/While en scripts de escenario.
     #[arg(long)]
     trace_conds: bool,
@@ -78,6 +84,9 @@ fn main() {
 
 fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     let mut cfg = Config::load(cli.config.as_deref())?;
+    if let Some(r) = &cli.renderer {
+        cfg.window.renderer = r.clone();
+    }
     if let Some((w, h)) = cli.res {
         cfg.game.logical_width = w;
         cfg.game.logical_height = h;
@@ -123,6 +132,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         trace: cli.trace,
         show_text: cli.show_text,
         trace_conds: cli.trace_conds,
+        pick: cli.pick,
     };
     let vm = Vm::new(assets.clone(), &game.entry, opts)?;
     if cli.trace {
@@ -276,7 +286,10 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         }
         t += 16.0;
         let sig = vm.progress_sig();
-        idle = if acted || sig != last_sig || !vm.queue.is_empty() { 0 } else { idle + 1 };
+        // los clics de avance de texto no cuentan como progreso: un ciclo de escenas que
+        // solo pide clics (p.ej. volver al título) debe acabar disparando el menú
+        let _ = acted;
+        idle = if sig != last_sig { 0 } else { idle + 1 };
         last_sig = sig;
         // el script espera algo del usuario (p.ej. bucle hasta que se pulse un botón)
         if idle > 0 && idle % 60 == 0 {

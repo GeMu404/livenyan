@@ -25,6 +25,8 @@ pub struct WindowCfg {
     pub vsync: bool,
     /// "linear" o "nearest" para el escalado.
     pub scale_filter: String,
+    /// Driver de render de SDL: "" = automático, o "opengl", "vulkan", "software", "gpu"...
+    pub renderer: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +92,7 @@ pub struct AudioCfg {
 
 impl Default for WindowCfg {
     fn default() -> Self {
-        Self { width: 0, height: 0, fullscreen: false, vsync: true, scale_filter: "linear".into() }
+        Self { width: 0, height: 0, fullscreen: false, vsync: true, scale_filter: "linear".into(), renderer: String::new() }
     }
 }
 impl Default for TextCfg {

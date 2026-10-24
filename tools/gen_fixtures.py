@@ -374,3 +374,19 @@ add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("pic")),
 add(C.Wait, Calc=lit(B(True)), Time=lit(I(100000)), StopEvent=expr())
 add(C.Exit, Calc=expr())
 open(os.path.join(rd, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- render2/: capa raíz "\x01" como PARENT y en SetProp; COLOR como TColor (0x00BBGGRR);
+# GetProp de PARENT en objeto inexistente = "" ---
+enable(C.CommandType.BoxNew, PT.PR_PARENT, PT.PR_COLOR)
+r2 = os.path.join(out, "render2"); os.makedirs(r2, exist_ok=True)
+cmds = []; n = 0
+add(C.SetProp, ObjName=lit(S("\x01")), ObjProp=lit(I(PT.PR_ZOOMX - 1)), Value=lit(I(100)))
+add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("bg")), PT.PR_PARENT: lit(S("\x01")), PT.PR_COLOR: lit(I(0x0000FF)), PT.PR_WIDTH: lit(I(800)), PT.PR_HEIGHT: lit(I(600))}))
+add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("pic")), PT.PR_PARENT: lit(S("\x01")), PT.PR_SOURCE: lit(S("pic.gal")), PT.PR_LEFT: lit(I(100)), PT.PR_TOP: lit(I(100))}))
+add(C.Calc, Calc=expr(fn("____1", F.GetProp, S("nobox"), I(PT.PR_PARENT - 1)), to("__pr", V("____1"))))
+add(C.If, Calc=expr(op(T.Equal, "____arg", V("__pr"), S(""))))
+add(C.Calc, indent=1, Calc=expr(to("pr_empty", I(1))))
+add(C.Wait, Calc=lit(B(True)), Time=lit(I(100000)), StopEvent=expr())
+add(C.Exit, Calc=expr())
+open(os.path.join(r2, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+open(os.path.join(r2, "pic.gal"), "wb").write(gal(16, 8, 24, [bytes([255, 0, 0] * 16) for _ in range(8)]))

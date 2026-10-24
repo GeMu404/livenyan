@@ -134,3 +134,25 @@ fn trace_conds_and_jump_chain() {
     assert!(t.contains("i=Int(0)"), "{t}");
     assert!(t.matches("cond ゲームメイン.lsb:6 While").count() <= 4, "{t}");
 }
+
+/// Capa raíz "\x01" (PARENT y SetProp), COLOR como TColor BGR, GetProp de PARENT ausente = "".
+#[test]
+fn root_layer_tcolor_and_getprop_defaults() {
+    let t = run(&["--trace", "--steps", "50", &fx("render2")]);
+    assert!(t.contains("Calc pr_empty = 1"), "{t}");
+    assert!(!t.contains("SetProp on missing"), "{t}");
+    let out = std::env::temp_dir().join(format!("livenyan-snap2-{}.png", std::process::id()));
+    let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .env("SDL_VIDEODRIVER", "offscreen")
+        .args(["--mute", "--renderer", "software", "--snapshot-frame", "10", out.to_str().unwrap(), &fx("render2")])
+        .output()
+        .unwrap();
+    if !r.status.success() {
+        eprintln!("skipping: offscreen video unavailable");
+        return;
+    }
+    let img = image::open(&out).unwrap().to_rgba8();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255], "TColor 0x0000FF must be red");
+    assert_eq!(img.get_pixel(105, 103).0, [0, 0, 255, 255], "image under root layer must draw above the box");
+}
