@@ -134,12 +134,13 @@ impl Scene {
 
     /// Borra el objeto y, recursivamente, sus hijos (PR_PARENT).
     /// Borra el objeto y sus hijos (PR_PARENT), devolviendo los nombres borrados.
-    pub fn delete_names(&mut self, name: &str) -> Vec<String> {
+    /// Borra `name` y sus descendientes (por PR_PARENT); devuelve los objetos borrados.
+    pub fn delete_names(&mut self, name: &str) -> Vec<Obj> {
         let mut todo = vec![name.to_string()];
         let mut out = vec![];
         while let Some(x) = todo.pop() {
-            if self.objs.remove(&x).is_some() {
-                out.push(x.clone());
+            if let Some(o) = self.objs.remove(&x) {
+                out.push(o);
             }
             self.motions.retain(|m| m.obj != x);
             for (k, o) in &self.objs {

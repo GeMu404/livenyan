@@ -253,7 +253,13 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
             if now - last_dbg >= 1000.0 {
                 last_dbg = now;
                 let n = drawn.iter().filter(|d| d.status == "drawn").count();
-                log::debug!("render frame {frame}: {} objects, {n} drawn", drawn.len());
+                let (ww, wh) = canvas.window().size();
+                let (pw, ph) = canvas.output_size().unwrap_or((0, 0));
+                let vp = canvas.viewport();
+                log::debug!(
+                    "render frame {frame}: {} objects, {n} drawn | window {ww}x{wh} output {pw}x{ph} logical {lw}x{lh} viewport ({},{} {}x{}) scale {:?}",
+                    drawn.len(), vp.x(), vp.y(), vp.width(), vp.height(), canvas.scale()
+                );
                 for d in &drawn {
                     log::debug!(
                         "  z{:<3} {:<24} rect=({:.0},{:.0} {:.0}x{:.0}) alpha={} {} {}",
@@ -426,9 +432,18 @@ fn draw_scene(
                     st!() = "loading (texture not ready)";
                     continue;
                 };
-                let key = if o.frame > 0 && gfx.images.contains_key(&format!("{key}#{}", o.frame)) { format!("{key}#{}", o.frame) } else { key };
+                let fkey = format!("{key}#{}", o.frame);
+                let has_frame = o.frame == 0 || gfx.images.contains_key(&fkey);
+                let key = if o.frame > 0 && has_frame { fkey } else { key };
                 let (t, iw, ih) = gfx.images.get_mut(&key).unwrap();
                 let (iw, ih) = (*iw, *ih);
+                drawn[di].extra = format!(
+                    "tex {iw}x{ih} frame {}{} draw ({x},{y} {}x{})",
+                    o.frame,
+                    if has_frame { "" } else { " (texture for this frame MISSING -> frame 0)" },
+                    if ow > 0 { ow } else { iw as i64 },
+                    if oh > 0 { oh } else { ih as i64 }
+                );
                 if ow <= 0 || oh <= 0 {
                     sizes.push((o.name.clone(), iw, ih));
                 }

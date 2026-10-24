@@ -210,3 +210,12 @@ fn screen_click_reaches_hidden_box() {
     assert!(s.contains("auto-click on screen -> mb.ONLBTNUP"), "{s}");
     assert!(s.contains("Calc released = 1"), "{s}");
 }
+
+/// Caja borrada en cascada (ObjDel del padre) y luego TextIns con <EVENT>: el sustituto
+/// hereda las propiedades y el evento va a su ONNOTIFY.
+#[test]
+fn deleted_box_standin_inherits_onnotify() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt12")]);
+    assert!(s.contains("event mb.ONNOTIFY -> ev.lsc"), "{s}");
+    assert!(s.contains("Calc released = 1"), "{s}");
+}

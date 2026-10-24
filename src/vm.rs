@@ -64,6 +64,8 @@ struct Frame {
     params: Vec<Value>,
     /// Para manejadores de evento: estado a restaurar al volver.
     saved_state: Option<State>,
+    /// Manejadores de evento: objeto que lo disparó (@Sender).
+    sender: Option<String>,
 }
 
 /// Evento de objeto encolado (se ejecuta como llamada-interrupción entre frames).
@@ -121,6 +123,8 @@ pub struct Vm {
     anim_clock: f64,
     /// Última caja que recibió TextIns (la "activa" para clics de pantalla).
     last_text_target: Option<String>,
+    /// Último estado (tipo y propiedades) de objetos borrados, por nombre.
+    graveyard: HashMap<String, (Kind, HashMap<u8, Value>)>,
     /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
     cinemas: HashMap<String, f64>,
     /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
@@ -173,6 +177,7 @@ impl Vm {
             anims: HashMap::new(),
             anim_clock: 0.0,
             last_text_target: None,
+            graveyard: HashMap::new(),
             cinemas: HashMap::new(),
             enabled: HashMap::new(),
             selected: HashMap::new(),
@@ -184,7 +189,7 @@ impl Vm {
             ended_unnotified: Default::default(),
         };
         vm.prefetch_from(&script, 0);
-        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), params: vec![], saved_state: None });
+        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), params: vec![], saved_state: None, sender: None });
         Ok(vm)
     }
 
@@ -427,19 +432,21 @@ impl Vm {
                 }
             }
             for raw in notifies {
-                let system = raw.starts_with('\x01');
-                let e = raw.trim_start_matches('\x01');
-                let parts: Vec<String> = e.split("\r\n").map(|x| x.to_string()).collect();
-                log::debug!("inline text event on {n}: {}{:?}", if system { "system " } else { "" }, parts.first());
-                if self.fire(&n, Prop::ONNOTIFY, parts.iter().map(|x| Value::Str(x.clone())).collect()) {
+                // <EVENT VALUE="a\nb"> -> ONNOTIFY de la caja con @ParamStr = [a, b] (manual de
+                // LiveMaker: "メッセージ中の<EVENT>タグで呼び出される（引数あり）").
+                // Los eventos de sistema (\x01: PLAYSND, WAITPLAY, CHANGECG...) son del motor.
+                if let Some(sys) = raw.strip_prefix('\x01') {
+                    let name = sys.split("\r\n").next().unwrap_or("");
+                    log::debug!("system text event on {n}: {name:?} (built-in; {})", if name == "WAITPLAY" { "sounds count as finished" } else { "ignored" });
+                    if !name.is_empty() {
+                        self.warn(&format!("unimpl:text sysevent {name}"), &format!("system text event {name} not implemented (ignored)"));
+                    }
                     continue;
                 }
-                // <EVENT VALUE="script\r\nargs..">: sin ONNOTIFY, el nombre es el script a ejecutar
-                if !system && !parts[0].trim().is_empty() {
-                    log::debug!("inline text event: calling script {:?} with {} args", parts[0], parts.len() - 1);
-                    self.queue.push_back(ObjEvent { obj: n.clone(), prop: Prop::ONNOTIFY, script: parts[0].clone(), params: parts[1..].iter().map(|x| Value::Str(x.clone())).collect() });
-                } else {
-                    self.warn("notify-nohandler", "inline text event without ONNOTIFY handler");
+                let parts: Vec<Value> = raw.split("\r\n").map(|x| Value::Str(x.to_string())).collect();
+                log::debug!("text event on {n}: {:?} ({} params) -> ONNOTIFY", parts.first().map(|v| v.as_str()), parts.len());
+                if !self.fire(&n, Prop::ONNOTIFY, parts) {
+                    self.warn("notify-nohandler", "text <EVENT> but the message box has no ONNOTIFY handler");
                 }
             }
             if finished {
@@ -613,6 +620,7 @@ impl Vm {
             }
             if let Some(f) = self.frames.last_mut() {
                 f.saved_state = Some(saved);
+                f.sender = Some(ev.obj.clone());
             }
         }
     }
@@ -678,7 +686,7 @@ impl Vm {
             for (i, p) in params.iter().enumerate() {
                 locals.insert(format!("Param{}", i + 1), p.clone());
             }
-            self.frames.push(Frame { script, pc, locals, result_var, params, saved_state: None });
+            self.frames.push(Frame { script, pc, locals, result_var, params, saved_state: None, sender: None });
         } else if let Some(f) = self.frames.last_mut() {
             f.script = script;
             f.pc = pc;
@@ -935,9 +943,10 @@ impl Vm {
                     let resolved = if src.is_empty() { "-".to_string() } else { self.assets.data().resolve(&src, IMAGE_EXTS).unwrap_or_else(|| "NOT FOUND".into()) };
                     let g = |p: u8| props.get(&p).map(|v| v.as_int().to_string()).unwrap_or_else(|| "-".into());
                     log::debug!(
-                        "{} {name} parent={:?} src={src:?} -> {resolved} pos=({},{}) size={}x{} prio={} alpha={} visible={}",
+                        "{} {name:?} parent={:?} (exists: {}) src={src:?} -> {resolved} pos=({},{}) size={}x{} prio={} alpha={} visible={}",
                         c.name(),
                         props.get(&Prop::PARENT).map(|v| v.as_str()).unwrap_or_default(),
+                        props.get(&Prop::PARENT).map(|v| v.as_str()).filter(|p| !p.is_empty()).map(|p| p == ROOT || self.scene.get(&p).is_some()).unwrap_or(true),
                         g(Prop::LEFT), g(Prop::TOP), g(Prop::WIDTH), g(Prop::HEIGHT), g(Prop::PRIORITY), g(Prop::ALPHA), g(Prop::VISIBLE)
                     );
                     if resolved == "NOT FOUND" {
@@ -1052,6 +1061,7 @@ impl Vm {
                             self.root_props.insert(p, v);
                         } else if !self.scene.set(&obj, p, v) && !obj.is_empty() {
                             self.warn(&format!("noobj:{obj}"), &format!("SetProp on missing object {obj:?}"));
+                            log::debug!("SetProp on missing {obj:?} at {}:{pc} ({})", script.name, if self.graveyard.contains_key(&obj) { "deleted earlier" } else { "never created" });
                         } else if p == Prop::ONPLAYEND {
                             self.object_defined(&obj);
                         }
@@ -1069,10 +1079,24 @@ impl Vm {
             }
             CmdType::ObjDel => {
                 let name = self.eval(c.expr("Name")).as_str();
-                let gone = self.scene.delete_names(&name);
-                for g in &gone {
-                    self.plays.remove(g);
-                    self.placeholders.remove(g);
+                let removed = self.scene.delete_names(&name);
+                if removed.is_empty() {
+                    log::debug!("ObjDel {:?}: no such object", name);
+                }
+                let mut gone = vec![];
+                for o in removed {
+                    let parent = o.str(Prop::PARENT);
+                    log::debug!(
+                        "ObjDel {name:?} at {}:{pc}: removed {:?} ({:?}){}",
+                        script.name,
+                        o.name,
+                        o.kind,
+                        if o.name == name { String::new() } else { format!(" cascade via parent {parent:?}") }
+                    );
+                    self.plays.remove(&o.name);
+                    self.placeholders.remove(&o.name);
+                    gone.push(o.name.clone());
+                    self.graveyard.insert(o.name.clone(), (o.kind, o.props));
                 }
                 detail = format!("{name:?} ({} objs: {})", gone.len(), gone.join(", "));
             }
@@ -1300,11 +1324,22 @@ impl Vm {
     fn run_text(&mut self, target: &str, tw: &crate::lsb::TpWord, wait: bool) {
         self.last_text_target = Some(target.to_string());
         if self.scene.get(target).is_none() {
-            self.warn(&format!("mes:{target}"), &format!("TextIns into missing message object {target:?}; creating one"));
-            self.scene.create(target, Kind::Message, HashMap::new());
-            self.placeholders.insert(target.to_string());
-            let msgs: Vec<String> = self.scene.draw_order().into_iter().filter(|o| o.kind == Kind::Message).map(|o| o.name.clone()).collect();
-            log::debug!("TextIns target {target:?} missing; existing message objects: {msgs:?}");
+            let msgs: Vec<String> = self.scene.draw_order().into_iter().filter(|o| o.kind == Kind::Message).map(|o| format!("{:?}", o.name)).collect();
+            log::debug!("TextIns target {target:?} (bytes {:02x?}) missing; existing message objects before stand-in: {msgs:?}", target.as_bytes());
+            match self.graveyard.get(target).cloned() {
+                Some((kind, props)) => {
+                    let evs: Vec<&str> = props.keys().map(|p| crate::lsb::prop_name(*p)).filter(|n| n.starts_with("ON")).collect();
+                    self.warn(&format!("mes:{target}"), &format!("TextIns into deleted message object {target:?}; re-creating it with its last properties"));
+                    log::debug!("stand-in {target:?} inherits {} props of the deleted object (events {evs:?})", props.len());
+                    self.scene.create(target, kind, props);
+                }
+                None => {
+                    self.warn(&format!("mes:{target}"), &format!("TextIns into never-created message object {target:?}; creating an empty stand-in (no event handlers)"));
+                    self.scene.create(target, Kind::Message, HashMap::new());
+                    // texto retenido hasta que llegue el MesNew real
+                    self.placeholders.insert(target.to_string());
+                }
+            }
         }
         self.ended_unnotified.remove(target);
         let mut plan: Vec<Pending> = vec![];
@@ -1415,6 +1450,7 @@ impl Vm {
             "@ScrHeight" => Value::Int(h as i64),
             // por marco de llamada: cada Call apila los suyos y se recuperan al volver
             "@ParamStr" => Value::Array(self.frames.last().map(|f| f.params.iter().map(|v| Value::Str(v.as_str())).collect()).unwrap_or_default()),
+            "@Sender" => Value::Str(self.frames.iter().rev().find_map(|f| f.sender.clone()).unwrap_or_default()),
             "@ParamCount" => Value::Int(self.frames.last().map(|f| f.params.len() as i64).unwrap_or(0)),
             "StatusSoundON" => Value::Bool(true),
             "ステータスフルスクリーン" => Value::Bool(false),

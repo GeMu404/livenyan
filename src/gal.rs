@@ -79,6 +79,8 @@ struct Layer {
     visible: bool,
     alpha: i32,
     alpha_on: bool,
+    /// TransColor de la capa (TColor 0x00BBGGRR; -1 = ninguno).
+    trans: i32,
 }
 
 struct Frame {
@@ -236,7 +238,8 @@ fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame]) -> R<O
     if n == 0 {
         return Ok(None);
     }
-    let packed = zlib_block(r, n)?;
+    // GARbro: el alfa va en zlib con CompType 0 y 2 (JPEG); con otros tipos, bloques crudos
+    let packed = if matches!(info.compression, Some(0) | Some(2)) { zlib_block(r, n)? } else { r.take(n)?.to_vec() };
     let st = (w as usize + 3) & !3;
     Ok(Some(unpack_blocks(&packed, w, h, 8, st, info, Prev { frames: prev, alpha: true })?))
 }
@@ -420,7 +423,7 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame
         let left = r.i32()?;
         let top = r.i32()?;
         let visible = r.u8()? != 0;
-        let _trans = r.i32()?;
+        let trans = r.i32()?;
         let alpha = r.i32()?;
         let alpha_on = r.u8()? != 0;
         let nl = r.usize()?;
@@ -431,7 +434,7 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame
         let data = layer_payload(r, info, w, h, bpp, prev)?;
         let a = alpha_payload(r, info, w, h, prev)?;
         let a = if alpha_on { a } else { None };
-        layers.push((Layer { left, top, visible, alpha, alpha_on }, data, a));
+        layers.push((Layer { left, top, visible, alpha, alpha_on, trans }, data, a));
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
     Ok(Frame { w, h, bpp, palette, layers, delay: None, raw_hdr })
@@ -561,6 +564,7 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
             visible: geti(lt, "Visible", 1) != 0,
             alpha: geti(lt, "Alpha", 255) as i32,
             alpha_on: geti(lt, "AlphaOn", 0) != 0,
+            trans: geti(lt, "TransColor", -1) as i32,
         };
         let data = layer_payload(&mut r, &info, w, h, bpp, &frames)?;
         let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h, &frames)? } else { None };
@@ -570,6 +574,7 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         return err("no layers");
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
+    // BGColor (GaleX) no se usa como color clave: sin pruebas de que lo sea
     frames.push(Frame { w, h, bpp, palette, layers, delay: fdelay, raw_hdr: vec![] });
     }
     Ok((info, frames))
@@ -608,7 +613,50 @@ pub fn quick_class(d: &[u8]) -> String {
 pub fn dump(d: &[u8]) -> String {
     let mut o = String::new();
     if d.starts_with(b"GaleX") {
-        return "GaleX (XML header): structure dump not implemented\n".into();
+        let rd = |p: usize| d.get(p..p + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+        let hs = rd(8).unwrap_or(0).max(0) as usize;
+        o += &format!("dump: GaleX file {} B, xml header @12 size {hs}\n", d.len());
+        let Some(zx) = d.get(12..12 + hs) else { return o + "  truncated header\n" };
+        let xml = match inflate(zx) {
+            Ok(x) => cp932(&x),
+            Err(e) => return o + &format!("  xml: {e}\n"),
+        };
+        let strip_names = |t: &str| {
+            // atributos sin Name (los nombres de capa podrían ser texto del juego)
+            t.split_whitespace().filter(|kv| !kv.starts_with("Name")).collect::<Vec<_>>().join(" ")
+        };
+        for t in tags(&xml, "Frames") {
+            o += &format!("  <Frames {}>\n", strip_names(t));
+        }
+        let comp = tags(&xml, "Frames").first().and_then(|t| attr(t, "CompType")).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let mut p = 12 + hs;
+        for (fi, fx) in xml.split("<Frame").skip(1).filter(|x| x.starts_with(|c: char| c.is_whitespace() || c == '>')).enumerate() {
+            o += &format!("  frame {fi}: <Frame {}>\n", strip_names(&fx[..fx.find('>').unwrap_or(0)]));
+            for lt in tags(fx, "Layers") {
+                o += &format!("    <Layers {}>\n", strip_names(lt));
+            }
+            for (li, lt) in tags(fx, "Layer").into_iter().enumerate() {
+                o += &format!("    layer {li}: <Layer {}>\n", strip_names(lt));
+                let alpha_on = attr(lt, "AlphaOn").is_some_and(|v| v != "0");
+                for what in if alpha_on { &["data", "alpha"][..] } else { &["data"][..] } {
+                    let Some(n) = rd(p) else { return o + &format!("  EOF @{p}\n") };
+                    let body = (p + 4).min(d.len());
+                    let mut extra = String::new();
+                    if n > 0 && (comp == 0 || (*what == "alpha" && comp == 2)) {
+                        extra = match inflate_stream(&d[body..]) {
+                            Ok((out, used)) => format!(" | zlib stream {used} B -> {} B{}", out.len(), if used as i64 != n as i64 { " (MISMATCH)" } else { "" }),
+                            Err(e) => format!(" | zlib: {e} (first bytes {:02x?})", &d[body..(body + 2).min(d.len())]),
+                        };
+                    }
+                    o += &format!("      {what} size @{p} = {n}{extra}\n");
+                    if n < 0 {
+                        return o;
+                    }
+                    p = body + n as usize;
+                }
+            }
+        }
+        return o + &format!("  walk stopped @{p} of {}\n", d.len());
     }
     let rd = |p: usize| d.get(p..p + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
     let ver: u32 = d.get(4..7).and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -729,7 +777,9 @@ pub fn stats(d: &[u8]) -> R<String> {
             f.w, f.h, f.bpp, f.palette.len(), f.layers.len(), f.delay, f.raw_hdr
         );
         for (li, (l, data, a)) in f.layers.iter().enumerate() {
-            let px = to_rgba(f, data, a.as_deref());
+            let mut px = to_rgba(f, data, a.as_deref());
+            let key = color_key(f, l, a.is_some());
+            apply_key(&mut px, key);
             let n = (px.len() / 4).max(1) as u64;
             let (mut r, mut g, mut b, mut al, mut nz) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for p in px.chunks_exact(4) {
@@ -742,12 +792,35 @@ pub fn stats(d: &[u8]) -> R<String> {
                 }
             }
             out += &format!(
-                "  layer {li}: pos ({},{}) visible {} alpha {} alpha_on {} mask {} | data {} B | avg rgb ({},{},{}) avg alpha {} | non-black px {:.1}%\n",
-                l.left, l.top, l.visible, l.alpha, l.alpha_on, a.is_some(), data.len(), r / n, g / n, b / n, al / n, nz as f64 * 100.0 / n as f64
+                "  layer {li}: pos ({},{}) visible {} alpha {} alpha_on {} mask {} colorkey {} | data {} B | avg rgb ({},{},{}) avg alpha {} | non-black px {:.1}%\n",
+                l.left, l.top, l.visible, l.alpha, l.alpha_on, a.is_some(), key.map(|k| format!("{k:06x}")).unwrap_or("none".into()), data.len(), r / n, g / n, b / n, al / n, nz as f64 * 100.0 / n as f64
             );
         }
     }
     Ok(out)
+}
+
+/// Color clave (transparente) de una capa sin canal alfa: TransColor de la capa o, si no
+/// hay, la máscara de la cabecera del frame (bytes 0..4; BGColor en GaleX). -1 = ninguno.
+fn color_key(f: &Frame, l: &Layer, has_alpha: bool) -> Option<u32> {
+    if has_alpha {
+        return None;
+    }
+    if l.trans != -1 {
+        return Some(l.trans as u32 & 0xFFFFFF);
+    }
+    let m = f.raw_hdr.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))?;
+    (m != 0xFFFF_FFFF && m >> 24 == 0).then_some(m)
+}
+
+fn apply_key(px: &mut [u8], key: Option<u32>) {
+    let Some(k) = key else { return };
+    let (r, g, b) = ((k & 0xFF) as u8, ((k >> 8) & 0xFF) as u8, ((k >> 16) & 0xFF) as u8);
+    for p in px.chunks_mut(4) {
+        if p[0] == r && p[1] == g && p[2] == b {
+            p[3] = 0;
+        }
+    }
 }
 
 fn to_rgba(f: &Frame, data: &[u8], alpha: Option<&[u8]>) -> Vec<u8> {
@@ -803,6 +876,7 @@ fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
     if visible.len() <= 1 {
         let (l, data, a) = visible.first().copied().unwrap_or(&frame.layers[0]);
         let mut px = to_rgba(frame, data, a.as_deref());
+        apply_key(&mut px, color_key(frame, l, a.is_some()));
         if l.alpha < 255 {
             for p in px.chunks_mut(4) {
                 p[3] = (p[3] as u32 * l.alpha.clamp(0, 255) as u32 / 255) as u8;
@@ -812,7 +886,8 @@ fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
     }
     let mut canvas = vec![0u8; (cw * ch * 4) as usize];
     for (l, data, a) in visible {
-        let px = to_rgba(frame, data, a.as_deref());
+        let mut px = to_rgba(frame, data, a.as_deref());
+        apply_key(&mut px, color_key(frame, l, a.is_some()));
         let la = l.alpha.clamp(0, 255) as u32;
         for y in 0..frame.h as i32 {
             let cy = y + l.top;
@@ -953,7 +1028,7 @@ mod tests {
             let mut f = vec![];
             f.extend((name.len() as u32).to_le_bytes());
             f.extend(name.as_bytes());
-            f.extend([0u8; 13]);
+            f.extend([0xffu8, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             f.extend(1u32.to_le_bytes());
             f.extend(16u32.to_le_bytes());
             f.extend(8u32.to_le_bytes());

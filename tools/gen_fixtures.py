@@ -486,3 +486,25 @@ cmds = []; n = 0
 add(C.Calc, Calc=expr(to("__end", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e11, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt12/: la caja (hija de un Box) se borra en cascada con ObjDel del padre; luego TextIns
+# con <EVENT>MESEND: el sustituto hereda ONNOTIFY y el evento llega a ev.lsc ---
+from livemaker.lsb.novel import TWdOpeEvent
+e12 = os.path.join(out, "evt12"); os.makedirs(e12, exist_ok=True)
+enable(C.CommandType.MesNew, PT.PR_PARENT)
+enable(C.CommandType.MesNew, PT.PR_ONNOTIFY)
+cmds = []; n = 0
+add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("base"))}))
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb")), PT.PR_PARENT: lit(S("base")), PT.PR_ONNOTIFY: lit(S("ev.lsc"))}))
+add(C.Calc, Calc=expr(to("__end", I(0))))
+add(C.ObjDel, Name=lit(S("base")))
+tw = TpWord(version=105, decorators=[], conditions=[], links=[], body=[TWdChar(ch="x", decorator=0, condition=-1, link=-1, text_speed=0), TWdOpeEvent(event="MESEND", condition=-1)])
+add(C.TextIns, Text=tw, Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+waitflag("__end")
+add(C.Calc, Calc=expr(to("released", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e12, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__end", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e12, "ev.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
