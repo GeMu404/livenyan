@@ -27,14 +27,22 @@ pub struct WindowCfg {
     pub scale_filter: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GameCfg {
+    /// Duración (ms) del placeholder de Cinema (vídeo) cuando no se conoce; clic lo salta.
+    pub cinema_placeholder_ms: f64,
     /// Fuerza la resolución lógica (0 = autodetectar, si falla 800x600).
     pub logical_width: u32,
     pub logical_height: u32,
     /// Fuerza el script de entrada.
     pub entry: Option<String>,
+}
+
+impl Default for GameCfg {
+    fn default() -> Self {
+        Self { cinema_placeholder_ms: 3000.0, logical_width: 0, logical_height: 0, entry: None }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,7 +106,7 @@ impl Default for KeysCfg {
         Self {
             advance: v(&["Return", "Space", "Keypad Enter"]),
             fullscreen: v(&["F11"]),
-            quit: v(&[]),
+            quit: v(&["Escape"]),
             skip: v(&["Left Ctrl", "Right Ctrl"]),
             menu_up: v(&["Up"]),
             menu_down: v(&["Down"]),

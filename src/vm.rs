@@ -73,6 +73,8 @@ pub struct ObjEvent {
 
 pub struct Options {
     pub screen: (u32, u32),
+    /// Duración del placeholder de Cinema cuando no se sabe la del vídeo (ms).
+    pub cinema_ms: f64,
     pub text_cps: f32,
     pub lookahead: usize,
     pub trace: bool,
@@ -104,6 +106,13 @@ pub struct Vm {
     cabinets: HashMap<String, Vec<crate::scene::Obj>>,
     /// Temporizadores activos: objeto -> próximo disparo (ms).
     timers: HashMap<String, f64>,
+    /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
+    cinemas: HashMap<String, f64>,
+    /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
+    enabled: HashMap<(String, i64), bool>,
+    selected: HashMap<(String, i64), bool>,
+    /// Secuencia de scripts entrados (Call/Jump/eventos), para detectar ciclos en --trace.
+    pub script_log: Vec<String>,
     /// Posiciones (script, pc) distintas ejecutadas: para detectar bucles sin progreso.
     pub visited: std::collections::HashSet<(usize, usize)>,
     /// Objetos de mensaje creados implícitamente por TextIns: su texto espera al MesNew real.
@@ -142,6 +151,10 @@ impl Vm {
             history_max: 0,
             cabinets: HashMap::new(),
             timers: HashMap::new(),
+            cinemas: HashMap::new(),
+            enabled: HashMap::new(),
+            selected: HashMap::new(),
+            script_log: vec![],
             visited: Default::default(),
             placeholders: Default::default(),
             ended_unnotified: Default::default(),
@@ -271,6 +284,13 @@ impl Vm {
             }
         }
         if released {
+            return;
+        }
+        if !self.cinemas.is_empty() {
+            // clic salta los vídeos en curso
+            for v in self.cinemas.values_mut() {
+                *v = self.now;
+            }
             return;
         }
         if let State::WaitUntil { skippable: true, .. } = self.state {
@@ -434,6 +454,33 @@ impl Vm {
         }
     }
 
+    fn update_cinemas(&mut self) {
+        let done: Vec<String> = self.cinemas.iter().filter(|(_, t)| **t <= self.now || self.skip).map(|(n, _)| n.clone()).collect();
+        for n in done {
+            self.cinemas.remove(&n);
+            if let Some(o) = self.scene.get_mut(&n) {
+                o.props.insert(Prop::PLAYING, Value::Bool(false));
+            }
+            self.fire(&n, Prop::ONPLAYEND, vec![]);
+        }
+    }
+
+    /// Ruta de scripts que se repite al final de la ejecución: (periodo, repeticiones).
+    pub fn cycle(&self) -> Option<(usize, usize)> {
+        let l = &self.script_log;
+        for p in 1..=400.min(l.len() / 3) {
+            let tail = &l[l.len() - p..];
+            let mut reps = 1;
+            while (reps + 1) * p <= l.len() && &l[l.len() - (reps + 1) * p..l.len() - reps * p] == tail {
+                reps += 1;
+            }
+            if reps >= 3 {
+                return Some((p, reps));
+            }
+        }
+        None
+    }
+
     /// Ejecuta manejadores encolados como llamadas-interrupción.
     fn dispatch_events(&mut self) {
         if matches!(self.state, State::Menu { .. } | State::Ended) || self.frames.len() > 200 {
@@ -471,6 +518,7 @@ impl Vm {
             }
         }
         self.update_timers();
+        self.update_cinemas();
         self.dispatch_events();
         self.yielded = false;
         let mut n = 0;
@@ -508,6 +556,9 @@ impl Vm {
             }
         };
         let pc = (label as usize).min(script.commands.len());
+        if self.script_log.len() < 1_000_000 {
+            self.script_log.push(script.name.clone());
+        }
         self.prefetch_from(&script, pc);
         if push {
             let mut locals = HashMap::new();
@@ -764,11 +815,18 @@ impl Vm {
                         self.assets.request(&n);
                     }
                 detail = format!("name={name:?}{}", if src.is_empty() { String::new() } else { format!(" src={src:?}") });
+                if kind == CmdType::Cinema {
+                    // Sin decodificador de vídeo: placeholder temporizado (PR_DURATION o
+                    // opción cinema_ms), saltable con clic; al terminar dispara ONPLAYEND.
+                    let d = props.get(&Prop::DURATION).map(|v| v.as_f64()).filter(|d| *d > 0.0).unwrap_or(self.opts.cinema_ms);
+                    self.cinemas.insert(name.clone(), self.now + if self.skip { 0.0 } else { d });
+                    self.warn("unimpl:cmd Cinema (timed placeholder, no video decode)", "Cinema: video not decoded; timed placeholder");
+                }
                 if kind == CmdType::Timer {
                     let d = props.get(&Prop::DELAY).map(|v| v.as_f64()).unwrap_or(0.0).max(1.0);
                     self.timers.insert(name.clone(), self.now + d);
                 }
-                if matches!(kind, CmdType::Cinema | CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
+                if matches!(kind, CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
                     self.warn(&format!("unimpl:cmd {} (placeholder)", c.name()), &format!("{} only creates a placeholder object", c.name()));
                 }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
@@ -830,9 +888,6 @@ impl Vm {
                 detail = format!("src={src:?} (skipped)");
                 self.warn("unimpl:cmd Movie (skipped)", "Movie playback not implemented: skipping");
                 self.events.push(Event::MovieSkipped { file: src });
-            }
-            CmdType::MovieStop => {
-                self.warn("MovieStop", "MovieStop: no-op (movies are skipped)");
             }
             CmdType::SetProp => {
                 let obj = self.eval(c.expr("ObjName")).as_str();
@@ -966,6 +1021,12 @@ impl Vm {
                 }
             }
             CmdType::DoEvent => self.yielded = true,
+            CmdType::MovieStop => {
+                // detiene vídeos (placeholder): terminan ya y disparan ONPLAYEND
+                for v in self.cinemas.values_mut() {
+                    *v = self.now;
+                }
+            }
             CmdType::FormatHist | CmdType::ClrHist | CmdType::CallHist | CmdType::ClrRead => {
                 // historial (backlog): aún no se guarda; se ignora en silencio
                 log::debug!("{} ignored", c.name());
@@ -1145,13 +1206,25 @@ impl Vm {
             .scene
             .draw_order()
             .into_iter()
-            .filter(|o| !self.plays.contains_key(&o.name) && (o.kind == Kind::Message || self.scene.effective_visible(o)) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
+            .filter(|o| !self.plays.contains_key(&o.name) && (matches!(o.kind, Kind::Message | Kind::Menu) || self.scene.effective_visible(o)) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
             .map(|o| o.name.clone())
             .collect();
         if cands.is_empty() {
             return None;
         }
-        let name = cands[n % cands.len()].clone();
+        // menús primero (p.ej. PrevMenu del título): elegir el primer ítem habilitado
+        let name = cands.iter().find(|c| self.scene.get(c).is_some_and(|o| o.kind == Kind::Menu)).cloned().unwrap_or_else(|| cands[n % cands.len()].clone());
+        if self.scene.get(&name).is_some_and(|o| o.kind == Kind::Menu) {
+            let idx = (0..64).find(|i| *self.enabled.get(&(name.clone(), *i)).unwrap_or(&true)).unwrap_or(0);
+            if let Some(o) = self.scene.get_mut(&name) {
+                o.props.insert(Prop::INDEX, Value::Int(idx));
+            }
+            for p in [Prop::ONSELECT, Prop::ONLBTNUP] {
+                if self.fire(&name, p, vec![Value::Int(idx)]) {
+                    return Some(format!("{name}[{idx}]"));
+                }
+            }
+        }
         for p in props {
             if self.fire(&name, p, vec![]) {
                 return Some(name);
@@ -1207,7 +1280,6 @@ impl Env for Vm {
             }
             Func::GETVISIBLE => Value::Bool(self.scene.get(&s(0)).is_some_and(|o| o.visible())),
             Func::SETVISIBLE => Value::Bool(self.scene.set(&s(0), Prop::VISIBLE, Value::Bool(a.get(1).is_some_and(|v| v.truthy())))),
-            Func::GETENABLED => Value::Bool(true),
             Func::INCABINET | Func::FILEEXISTS => Value::Bool(self.assets.data().find(&s(0)).is_some()),
             Func::GETHISTORYCOUNT => Value::Int(0),
             // ListCompo(arr, modo, objeto): nombres de los componentes hijos de `objeto`
@@ -1221,6 +1293,17 @@ impl Env for Vm {
                 }
                 Value::Int(n)
             }
+            // Ítems de PrevMenu/menú: (objeto, índice[, valor]). Semántica inferida.
+            Func::SETENABLED | Func::SETSELECTED => {
+                let k = (s(0), a.get(1).map(|v| v.as_int()).unwrap_or(0));
+                let v = a.get(2).map(|v| v.truthy()).unwrap_or(true);
+                if f == Func::SETENABLED { self.enabled.insert(k, v) } else { self.selected.insert(k, v) };
+                Value::Bool(true)
+            }
+            Func::GETENABLED => Value::Bool(*self.enabled.get(&(s(0), a.get(1).map(|v| v.as_int()).unwrap_or(0))).unwrap_or(&true)),
+            Func::GETSELECTED => Value::Bool(*self.selected.get(&(s(0), a.get(1).map(|v| v.as_int()).unwrap_or(0))).unwrap_or(&false)),
+            // InPrimary: no documentada; se asume "ventana principal activa" -> verdadero.
+            Func::INPRIMARY => Value::Bool(true),
             Func::GETHISTORYMAXCOUNT => Value::Int(self.history_max),
             Func::SETHISTORYMAXCOUNT => {
                 self.history_max = a.first().map(|v| v.as_int()).unwrap_or(0);
@@ -1265,7 +1348,7 @@ mod tests {
         let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&p).unwrap();
         let assets = Arc::new(Assets::new(data, 2, 64));
-        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { screen: (800, 600), text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
+        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { screen: (800, 600), cinema_ms: 0.0, text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
         let mut t = 0.0;
         for _ in 0..1000 {
             vm.update(t, 1000);

@@ -82,3 +82,22 @@ fn trace_detects_busy_loop() {
     let s = run(&["--trace", "--steps", "10000000", &fx("evt5")]);
     assert!(s.contains("# stalled at"), "{s}");
 }
+
+/// Cinema temporizado dispara ONPLAYEND; --trace elige un ítem habilitado del PrevMenu.
+#[test]
+fn cinema_and_prevmenu_autoselect() {
+    let s = run(&["--trace", "--steps", "20000", &fx("evt6")]);
+    for want in ["event mv.ONPLAYEND -> mvend.lsc", "auto-click on object title[1]", "event title.ONSELECT -> sel.lsc", "Calc primary = 1", "state=ended"] {
+        assert!(s.contains(want), "missing {want:?}\n{s}");
+    }
+}
+
+/// --trace informa de scripts distintos y de ciclos de escenas.
+#[test]
+fn trace_reports_cycle() {
+    let s = run(&["--trace", "--steps", "3000", &fx("evt7")]);
+    assert!(s.contains("(3 distinct)"), "{s}");
+    assert!(s.contains("# cycling: last 3 script entries repeated"), "{s}");
+    let t = run(&["--trace", &fx("evt6")]);
+    assert!(t.contains("# cycling: no"), "{t}");
+}

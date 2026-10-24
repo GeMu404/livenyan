@@ -111,6 +111,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     }
     let opts = Options {
         screen: game.logical,
+        cinema_ms: cfg.game.cinema_placeholder_ms,
         text_cps: if cli.trace { 0.0 } else { cfg.text.speed_cps },
         lookahead: cfg.assets.prefetch_lookahead,
         trace: cli.trace,
@@ -123,7 +124,14 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     if let Err(e) = std::fs::create_dir_all(game.save_dir()) {
         log::warn!("cannot create save dir {}: {e}", game.save_dir().display());
     }
-    livenyan::app::run(game, cfg, assets, vm, t0)
+    let r = livenyan::app::run(game, cfg, assets, vm, t0);
+    // salir de verdad aunque queden hilos de decodificación/audio vivos
+    if let Err(e) = &r {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    log::info!("exiting");
+    std::process::exit(0)
 }
 
 fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool) -> Result<(), String> {
@@ -293,6 +301,16 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         }
     }
     println!("# auto-clicks on objects: {fired}");
+    let mut uniq: Vec<&String> = vm.script_log.iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    uniq.sort();
+    println!("# scripts entered: {} ({} distinct)", vm.script_log.len(), uniq.len());
+    match vm.cycle() {
+        Some((p, reps)) => {
+            let tail = &vm.script_log[vm.script_log.len() - p..];
+            println!("# cycling: last {p} script entries repeated {reps}x: {}", tail.join(" > "));
+        }
+        None => println!("# cycling: no"),
+    }
     println!("# counts: {}", vm.counts_sorted().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
     Ok(())
 }

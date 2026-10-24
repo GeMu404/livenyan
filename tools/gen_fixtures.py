@@ -216,6 +216,52 @@ cmds[w].args["End"] = wl + 1
 add(C.Exit, Calc=expr())
 open(os.path.join(evt5, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
+# --- evt6/: Cinema (placeholder con PR_DURATION -> ONPLAYEND), PrevMenu elegido por --trace
+# (respetando SetEnabled), InPrimary ---
+evt6 = os.path.join(out, "evt6"); os.makedirs(evt6, exist_ok=True)
+enable(C.CommandType.Cinema, PT.PR_NAME, PT.PR_SOURCE, PT.PR_DURATION, PT.PR_ONPLAYEND)
+enable(C.CommandType.PrevMenuNew, PT.PR_NAME, PT.PR_ONSELECT)
+def waitflag(v):
+    w = add(C.While, Calc=expr(op(T.Equal, "____arg", V(v), I(0))), End=0)
+    add(C.Calc, indent=1, Calc=expr(to("spin", I(1))))
+    wl = add(C.WhileLoop, Calc=expr(), Start=w)
+    cmds[w].args["End"] = wl + 1
+cmds = []; n = 0
+add(C.VarNew, Name="__mv", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.VarNew, Name="__sel", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.Cinema, components=comps(C.CommandType.Cinema, {PT.PR_NAME: lit(S("mv")), PT.PR_SOURCE: lit(S("op.wmv")), PT.PR_DURATION: lit(I(200)), PT.PR_ONPLAYEND: lit(S("mvend.lsc"))}))
+waitflag("__mv")
+add(C.PrevMenuNew, components=comps(C.CommandType.PrevMenuNew, {PT.PR_NAME: lit(S("title")), PT.PR_ONSELECT: lit(S("sel.lsc"))}))
+add(C.Calc, Calc=expr(fn("____arg", F.SetEnabled, S("title"), I(0), B(False))))
+add(C.If, Calc=expr(fn("____arg", F.InPrimary)))
+add(C.Calc, indent=1, Calc=expr(to("primary", I(1))))
+waitflag("__sel")
+add(C.Exit, Calc=expr())
+open(os.path.join(evt6, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__mv", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt6, "mvend.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(0)]), to("chosen", V("____1"))))
+add(C.Calc, Calc=expr(to("__sel", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt6, "sel.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt7/: bucle de escenas sin fin (a > b > a > ...): --trace debe informar del ciclo ---
+evt7 = os.path.join(out, "evt7"); os.makedirs(evt7, exist_ok=True)
+cmds = []; n = 0
+add(C.Label, Name="top")
+call("a.lsb", 0)
+call("b.lsb", 0)
+add(C.Jump, Page=C.LabelReference("ゲームメイン.lsb", 0), Calc=lit(B(True)))
+open(os.path.join(evt7, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+for nm in ("a", "b"):
+    cmds = []; n = 0
+    add(C.Wait, Calc=lit(B(True)), Time=lit(I(10)), StopEvent=expr())
+    add(C.Exit, Calc=expr())
+    open(os.path.join(evt7, nm + ".lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
 # --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3

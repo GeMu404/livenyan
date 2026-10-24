@@ -8,6 +8,8 @@ vsync = true
 scale_filter = "linear"   # o "nearest"
 
 [game]
+# duración (ms) del placeholder de vídeo (Cinema); un clic lo salta
+cinema_placeholder_ms = 3000
 logical_width = 0    # 0 = autodetectar (lpb / tamaño de fondos) o 800x600
 logical_height = 0
 # entry = "ゲームメイン.lsb"
@@ -23,7 +25,7 @@ shadow = true
 [keys]               # nombres de tecla SDL
 advance = ["Return", "Space", "Keypad Enter"]
 fullscreen = ["F11"] # Alt+Enter siempre funciona
-quit = []
+quit = ["Escape"]
 skip = ["Left Ctrl", "Right Ctrl"]
 menu_up = ["Up"]
 menu_down = ["Down"]
