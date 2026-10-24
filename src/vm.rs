@@ -78,6 +78,8 @@ pub struct Options {
     pub text_cps: f32,
     pub lookahead: usize,
     pub trace: bool,
+    /// --trace-conds: valores de las condiciones If/Elseif/While en scripts de escenario.
+    pub trace_conds: bool,
     pub show_text: bool,
 }
 
@@ -113,6 +115,9 @@ pub struct Vm {
     selected: HashMap<(String, i64), bool>,
     /// Secuencia de scripts entrados (Call/Jump/eventos), para detectar ciclos en --trace.
     pub script_log: Vec<String>,
+    /// Aristas Jump/Call "origen:pc -> destino:etiqueta" con su número de usos.
+    pub edges: HashMap<String, u64>,
+    cond_seen: HashMap<(usize, usize, bool), u8>,
     /// Posiciones (script, pc) distintas ejecutadas: para detectar bucles sin progreso.
     pub visited: std::collections::HashSet<(usize, usize)>,
     /// Objetos de mensaje creados implícitamente por TextIns: su texto espera al MesNew real.
@@ -155,6 +160,8 @@ impl Vm {
             enabled: HashMap::new(),
             selected: HashMap::new(),
             script_log: vec![],
+            edges: HashMap::new(),
+            cond_seen: HashMap::new(),
             visited: Default::default(),
             placeholders: Default::default(),
             ended_unnotified: Default::default(),
@@ -666,6 +673,7 @@ impl Vm {
             CmdType::If => {
                 let ok = self.eval_bool(c.expr("Calc"), false);
                 detail = format!("-> {ok}");
+                self.cond_trace(&script, pc, c, ok);
                 if !ok {
                     next = self.next_branch(&script, pc);
                 }
@@ -683,6 +691,7 @@ impl Vm {
                 if self.eval_bool(c.expr("Calc"), true) {
                     let p = c.page().cloned().unwrap_or_default();
                     detail = format!("-> {}:{}", p.page, p.label);
+                    *self.edges.entry(format!("Jump {}:{} -> {}:{}", script.name, pc, p.page, p.label)).or_default() += 1;
                     self.trace(c, detail);
                     if !self.goto_script(&p.page, p.label, false, String::new(), vec![])
                         && let Some(f) = self.frames.last_mut() {
@@ -696,6 +705,7 @@ impl Vm {
                     let p = c.page().cloned().unwrap_or_default();
                     let params: Vec<Value> = c.exprs("Params").to_vec().iter().map(|e| eval(e, self)).collect();
                     detail = format!("-> {}:{} ({} params)", p.page, p.label, params.len());
+                    *self.edges.entry(format!("Call {}:{} -> {}:{}", script.name, pc, p.page, p.label)).or_default() += 1;
                     self.trace(c, detail);
                     if let Some(f) = self.frames.last_mut() {
                         f.pc = next;
@@ -764,6 +774,7 @@ impl Vm {
             }
             CmdType::While => {
                 let ok = self.eval_bool(c.expr("Calc"), true);
+                self.cond_trace(&script, pc, c, ok);
                 if !ok {
                     next = Self::loop_exit(&script, c.u32("End").unwrap_or(0), Some(pc));
                 }
@@ -815,6 +826,19 @@ impl Vm {
                         self.assets.request(&n);
                     }
                 detail = format!("name={name:?}{}", if src.is_empty() { String::new() } else { format!(" src={src:?}") });
+                if log::log_enabled!(log::Level::Debug) {
+                    let resolved = if src.is_empty() { "-".to_string() } else { self.assets.data().resolve(&src, IMAGE_EXTS).unwrap_or_else(|| "NOT FOUND".into()) };
+                    let g = |p: u8| props.get(&p).map(|v| v.as_int().to_string()).unwrap_or_else(|| "-".into());
+                    log::debug!(
+                        "{} {name} parent={:?} src={src:?} -> {resolved} pos=({},{}) size={}x{} prio={} alpha={} visible={}",
+                        c.name(),
+                        props.get(&Prop::PARENT).map(|v| v.as_str()).unwrap_or_default(),
+                        g(Prop::LEFT), g(Prop::TOP), g(Prop::WIDTH), g(Prop::HEIGHT), g(Prop::PRIORITY), g(Prop::ALPHA), g(Prop::VISIBLE)
+                    );
+                    if resolved == "NOT FOUND" {
+                        log::warn!("asset not found: {src:?} for {name}");
+                    }
+                }
                 if kind == CmdType::Cinema {
                     // Sin decodificador de vídeo: placeholder temporizado (PR_DURATION o
                     // opción cinema_ms), saltable con clic; al terminar dispara ONPLAYEND.
@@ -1061,6 +1085,48 @@ impl Vm {
         }
     }
 
+    /// --trace-conds: imprime la condición con los valores de sus variables, solo en scripts
+    /// de escenario (fuera de ノベルシステム\) y las 2 primeras veces por (posición, resultado).
+    /// Cadenas como <N chars> salvo --show-text.
+    fn cond_trace(&mut self, s: &Lsb, pc: usize, c: &Command, ok: bool) {
+        if !self.opts.trace || !self.opts.trace_conds || s.name.starts_with("ノベルシステム") {
+            return;
+        }
+        let k = (s as *const Lsb as usize, pc, ok);
+        let n = self.cond_seen.entry(k).or_default();
+        if *n >= 2 {
+            return;
+        }
+        *n += 1;
+        let Some(e) = c.expr("Calc") else { return };
+        let mut vars = vec![];
+        for o in &e.entries {
+            for p in &o.operands {
+                if let Param::Var(v) = p {
+                    if !v.starts_with("____") && !vars.iter().any(|(x, _): &(String, String)| x == v) {
+                        let val = self.lookup(v).cloned().or_else(|| self.system_var(v)).unwrap_or(Value::Empty);
+                        let shown = match &val {
+                            Value::Str(t) if !self.opts.show_text => format!("<{} chars>", t.chars().count()),
+                            Value::Array(a) => format!("[array {}]", a.len()),
+                            Value::Empty => "(undef)".into(),
+                            v => format!("{v:?}"),
+                        };
+                        vars.push((v.clone(), shown));
+                    }
+                }
+            }
+        }
+        println!(
+            "[{:>8.0}ms] cond {}:{} {} {} -> {ok} {{{}}}",
+            self.now,
+            s.name,
+            pc,
+            c.name(),
+            e.render(!self.opts.show_text),
+            vars.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join(", ")
+        );
+    }
+
     /// If falso: busca la siguiente rama Elseif/Else del mismo nivel, o el final del bloque.
     fn next_branch(&mut self, s: &Lsb, pc: usize) -> usize {
         let ind = s.commands[pc].indent;
@@ -1072,7 +1138,10 @@ impl Vm {
                     match CmdType::from(c.kind) {
                         CmdType::Elseif => {
                             *self.stats.entry("Elseif").or_default() += 1;
-                            if self.eval_bool(c.expr("Calc"), false) {
+                            let ok = self.eval_bool(c.expr("Calc"), false);
+                            let c2 = c.clone();
+                            self.cond_trace(s, j, &c2, ok);
+                            if ok {
                                 return j + 1;
                             }
                             j += 1;
@@ -1348,7 +1417,7 @@ mod tests {
         let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&p).unwrap();
         let assets = Arc::new(Assets::new(data, 2, 64));
-        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { screen: (800, 600), cinema_ms: 0.0, text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
+        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { trace_conds: false, screen: (800, 600), cinema_ms: 0.0, text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
         let mut t = 0.0;
         for _ in 0..1000 {
             vm.update(t, 1000);

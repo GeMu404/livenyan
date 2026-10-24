@@ -29,6 +29,12 @@ struct Cli {
     /// Pasos máximos para --trace.
     #[arg(long, default_value_t = 5000)]
     steps: u64,
+    /// Con --trace: imprime valores de condiciones If/Elseif/While en scripts de escenario.
+    #[arg(long)]
+    trace_conds: bool,
+    /// Renderiza (oculto) hasta el frame N y guarda una captura PNG; luego sale.
+    #[arg(long, num_args = 2, value_names = ["N", "OUT_PNG"])]
+    snapshot_frame: Option<Vec<String>>,
     /// Incluye el texto del juego en la salida (por defecto se oculta).
     #[arg(long)]
     show_text: bool,
@@ -116,6 +122,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         lookahead: cfg.assets.prefetch_lookahead,
         trace: cli.trace,
         show_text: cli.show_text,
+        trace_conds: cli.trace_conds,
     };
     let vm = Vm::new(assets.clone(), &game.entry, opts)?;
     if cli.trace {
@@ -124,7 +131,11 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     if let Err(e) = std::fs::create_dir_all(game.save_dir()) {
         log::warn!("cannot create save dir {}: {e}", game.save_dir().display());
     }
-    let r = livenyan::app::run(game, cfg, assets, vm, t0);
+    let snap = match cli.snapshot_frame.as_deref() {
+        Some([n, p]) => Some((n.parse::<u64>().map_err(|_| format!("bad frame number {n:?}"))?, PathBuf::from(p))),
+        _ => None,
+    };
+    let r = livenyan::app::run(game, cfg, assets, vm, t0, snap);
     // salir de verdad aunque queden hilos de decodificación/audio vivos
     if let Err(e) = &r {
         eprintln!("error: {e}");
@@ -310,6 +321,12 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
             println!("# cycling: last {p} script entries repeated {reps}x: {}", tail.join(" > "));
         }
         None => println!("# cycling: no"),
+    }
+    let mut edges: Vec<(&String, &u64)> = vm.edges.iter().collect();
+    edges.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    println!("# jump/call chain ({} distinct edges, most used first):", edges.len());
+    for (e, n) in edges.iter().take(40) {
+        println!("#   {e} x{n}");
     }
     println!("# counts: {}", vm.counts_sorted().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
     Ok(())

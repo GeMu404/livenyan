@@ -363,3 +363,14 @@ if ok:
     open(os.path.join(out, "scrambled.bin"), "wb").write(enc)
     open(os.path.join(out, "scrambled.plain"), "wb").write(plain)
 print("scramble fixture:", ok)
+
+# --- render/: un Box contenedor sin COLOR con PRIORITY alta y una imagen hija; la imagen
+# debe verse (antes el Box se pintaba negro a pantalla completa encima) ---
+rd = os.path.join(out, "render"); os.makedirs(rd, exist_ok=True)
+open(os.path.join(rd, "pic.gal"), "wb").write(gal(16, 8, 24, [bytes([0, 0, 255] * 16) for _ in range(8)]))
+cmds = []; n = 0
+add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("土台")), PT.PR_PRIORITY: lit(I(100))}))
+add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("pic")), PT.PR_PARENT: lit(S("土台")), PT.PR_SOURCE: lit(S("pic.gal")), PT.PR_LEFT: lit(I(10)), PT.PR_TOP: lit(I(10))}))
+add(C.Wait, Calc=lit(B(True)), Time=lit(I(100000)), StopEvent=expr())
+add(C.Exit, Calc=expr())
+open(os.path.join(rd, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())

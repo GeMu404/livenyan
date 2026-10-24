@@ -36,18 +36,30 @@ fn upload(tc: &TextureCreator<WindowContext>, w: u32, h: u32, rgba: &[u8], filte
     Some(t)
 }
 
-pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant) -> Result<(), String> {
+/// Estado de dibujo de un objeto (para el registro de depuración).
+struct Drawn {
+    name: String,
+    z: usize,
+    rect: (f32, f32, f32, f32),
+    alpha: u8,
+    status: &'static str,
+}
+
+pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant, snapshot: Option<(u64, std::path::PathBuf)>) -> Result<(), String> {
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     log::info!("video driver: {}", video.current_video_driver());
     let (lw, lh) = game.logical;
     let (ww, wh) = if cfg.window.width > 0 && cfg.window.height > 0 { (cfg.window.width, cfg.window.height) } else { (lw, lh) };
-    let mut window = video
-        .window(&format!("livenyan — {}", game.title), ww, wh)
-        .resizable()
-        .high_pixel_density()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let (ww, wh) = if snapshot.is_some() { (lw, lh) } else { (ww, wh) };
+    let mut wb = video.window(&format!("livenyan — {}", game.title), ww, wh);
+    wb.resizable();
+    if snapshot.is_some() {
+        wb.hidden();
+    } else {
+        wb.high_pixel_density();
+    }
+    let mut window = wb.build().map_err(|e| e.to_string())?;
     if cfg.window.fullscreen {
         let _ = window.set_fullscreen(true);
     }
@@ -103,6 +115,9 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
     let mut menu_sel = 0usize;
     let mut mouse = (0.0f32, 0.0f32);
     let mut first_scene_logged = false;
+    let mut frame: u64 = 0;
+    let mut last_dbg = -1000.0f64;
+    let mut missing_logged: std::collections::HashSet<String> = Default::default();
 
     'main: loop {
         for ev in pump.poll_iter() {
@@ -203,11 +218,47 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
         // ---- render ----
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
-        draw_scene(&mut canvas, &tc, &assets, &mut vm, &mut gfx, font.as_mut(), &cfg, filter, (lw, lh));
+        let drawn = draw_scene(&mut canvas, &tc, &assets, &mut vm, &mut gfx, font.as_mut(), &cfg, filter, (lw, lh));
+        frame += 1;
+        if log::log_enabled!(log::Level::Debug) {
+            for d in drawn.iter().filter(|d| d.status.starts_with("missing")) {
+                if missing_logged.insert(d.name.clone()) {
+                    log::debug!("render: {} {}", d.name, d.status);
+                }
+            }
+            if now - last_dbg >= 1000.0 {
+                last_dbg = now;
+                let n = drawn.iter().filter(|d| d.status == "drawn").count();
+                log::debug!("render frame {frame}: {} objects, {n} drawn", drawn.len());
+                for d in &drawn {
+                    log::debug!(
+                        "  z{:<3} {:<24} rect=({:.0},{:.0} {:.0}x{:.0}) alpha={} {}",
+                        d.z, d.name, d.rect.0, d.rect.1, d.rect.2, d.rect.3, d.alpha, d.status
+                    );
+                }
+            }
+        }
         if let State::Menu { choices, .. } = &vm.state {
             draw_menu(&mut canvas, &tc, &mut gfx, font.as_mut(), choices, menu_sel, (lw, lh), filter);
         } else {
             gfx.menu = None;
+        }
+        if let Some((n, path)) = &snapshot
+            && frame >= *n
+        {
+            let shot = canvas.read_pixels(None).map_err(|e| e.to_string())?;
+            let shot = shot.convert_format(PixelFormat::RGBA32).map_err(|e| e.to_string())?;
+            let (w, h, pitch) = (shot.width(), shot.height(), shot.pitch() as usize);
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            shot.with_lock(|px: &[u8]| {
+                for y in 0..h as usize {
+                    rgba.extend_from_slice(&px[y * pitch..y * pitch + w as usize * 4]);
+                }
+            });
+            image::save_buffer(path, &rgba, w, h, image::ColorType::Rgba8).map_err(|e| e.to_string())?;
+            log::info!("snapshot of frame {frame} ({w}x{h}) written to {}", path.display());
+            println!("snapshot: frame {frame}, {w}x{h}, {} objects ({} drawn) -> {}", drawn.len(), drawn.iter().filter(|d| d.status == "drawn").count(), path.display());
+            break;
         }
         canvas.present();
         if !first_scene_logged && !vm.scene.objs.is_empty() {
@@ -299,23 +350,39 @@ fn draw_scene(
     cfg: &Config,
     filter: ScaleMode,
     (lw, lh): (u32, u32),
-) {
+) -> Vec<Drawn> {
     let order: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
     let mut sizes: Vec<(String, u32, u32)> = vec![];
-    for o in &order {
-        if !vm.scene.effective_visible(o) {
-            continue;
-        }
+    let mut drawn: Vec<Drawn> = Vec::with_capacity(order.len());
+    for (z, o) in order.iter().enumerate() {
         let (x, y) = vm.scene.abs_pos(o);
         let alpha = o.int(Prop::ALPHA, 255).clamp(0, 255) as u8;
         let (ow, oh) = (o.int(Prop::WIDTH, 0), o.int(Prop::HEIGHT, 0));
+        drawn.push(Drawn { name: o.name.clone(), z, rect: (x as f32, y as f32, ow as f32, oh as f32), alpha, status: "drawn" });
+        let st = &mut drawn.last_mut().unwrap().status;
+        if !vm.scene.effective_visible(o) {
+            *st = "hidden";
+            continue;
+        }
+        if alpha == 0 {
+            *st = "alpha=0";
+            continue;
+        }
         match o.kind {
             Kind::Image | Kind::Button | Kind::Tile | Kind::Slider => {
                 let src = o.str(Prop::SOURCE);
                 if src.is_empty() {
+                    *st = "no source";
                     continue;
                 }
-                let Some(key) = image_for(tc, assets, gfx, &src, filter) else { continue };
+                if assets.data().resolve(&src, IMAGE_EXTS).is_none() {
+                    *st = "missing: source not in archive";
+                    continue;
+                }
+                let Some(key) = image_for(tc, assets, gfx, &src, filter) else {
+                    *st = "loading (texture not ready)";
+                    continue;
+                };
                 let (t, iw, ih) = gfx.images.get_mut(&key).unwrap();
                 let (iw, ih) = (*iw, *ih);
                 if ow <= 0 || oh <= 0 {
@@ -340,20 +407,31 @@ fn draw_scene(
                 }
             }
             Kind::Box => {
-                let c = tcolor(o.int(Prop::COLOR, 0), alpha);
+                // Un Box es ante todo un contenedor ("土台"): solo se rellena si tiene COLOR
+                // explícito (no clNone/-1) y tamaño. Antes un Box sin COLOR ni tamaño se
+                // pintaba negro a pantalla completa y tapaba todo.
+                let col = o.get(Prop::COLOR).map(|v| v.as_int());
+                let fill = matches!(col, Some(c) if c >= 0 && c != 0x1FFF_FFFF);
+                if !fill || ow <= 0 || oh <= 0 {
+                    *st = "container";
+                    continue;
+                }
+                let c = tcolor(col.unwrap(), alpha);
                 canvas.set_blend_mode(BlendMode::Blend);
                 canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
-                let w = if ow > 0 { ow as f32 } else { lw as f32 };
-                let h = if oh > 0 { oh as f32 } else { lh as f32 };
-                let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, w, h));
+                let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, ow as f32, oh as f32));
             }
             Kind::Message => {
-                let Some(f) = font.as_deref_mut() else { continue };
+                let Some(f) = font.as_deref_mut() else {
+                    *st = "font not loaded yet";
+                    continue;
+                };
                 let w = if ow > 0 { ow as u32 } else { lw.saturating_sub(x.max(0.0) as u32) };
                 let h = if oh > 0 { oh as u32 } else { lh.saturating_sub(y.max(0.0) as u32) };
                 let items = o.text.clone();
                 let extra = 0;
                 if items.is_empty() {
+                    *st = "empty text";
                     continue;
                 }
                 let stale = gfx.texts.get(&o.name).is_none_or(|(rev, ex, _)| *rev != o.text_rev || *ex != extra);
@@ -371,7 +449,7 @@ fn draw_scene(
                     let _ = canvas.copy(t, None, FRect::new(x as f32, y as f32, q.width as f32, q.height as f32));
                 }
             }
-            _ => {}
+            _ => *st = "not rendered (kind)",
         }
     }
     // tamaños intrínsecos para hit-testing y GetProp
@@ -382,4 +460,5 @@ fn draw_scene(
         }
     }
     gfx.texts.retain(|k, _| vm.scene.objs.contains_key(k));
+    drawn
 }

@@ -101,3 +101,36 @@ fn trace_reports_cycle() {
     let t = run(&["--trace", &fx("evt6")]);
     assert!(t.contains("# cycling: no"), "{t}");
 }
+
+/// Render fuera de pantalla: un Box contenedor (sin COLOR, PRIORITY alta) no debe tapar a su
+/// imagen hija. Usa el driver "offscreen" de SDL; si no está disponible, se omite.
+#[test]
+fn snapshot_renders_child_image() {
+    let out = std::env::temp_dir().join(format!("livenyan-snap-{}.png", std::process::id()));
+    let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .env("SDL_VIDEODRIVER", "offscreen")
+        .args(["--mute", "--snapshot-frame", "20", out.to_str().unwrap(), &fx("render")])
+        .output()
+        .unwrap();
+    if !r.status.success() {
+        eprintln!("skipping: offscreen video unavailable: {}", String::from_utf8_lossy(&r.stderr));
+        return;
+    }
+    let img = image::open(&out).unwrap().to_rgba8();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(img.dimensions(), (800, 600));
+    assert_eq!(img.get_pixel(15, 12).0, [255, 0, 0, 255], "child image not visible");
+    assert_eq!(img.get_pixel(5, 5).0, [0, 0, 0, 255]);
+}
+
+/// --trace-conds muestra condiciones con valores y el resumen la cadena de saltos.
+#[test]
+fn trace_conds_and_jump_chain() {
+    let s = run(&["--trace", "--trace-conds", "--steps", "3000", &fx("evt7")]);
+    assert!(s.contains("# jump/call chain"), "{s}");
+    assert!(s.contains("Jump ゲームメイン.lsb:3 -> ゲームメイン.lsb:0 x"), "{s}");
+    let t = run(&["--trace", "--trace-conds", &fx("evt4")]);
+    assert!(t.contains("cond ゲームメイン.lsb:6 While"), "{t}");
+    assert!(t.contains("i=Int(0)"), "{t}");
+    assert!(t.matches("cond ゲームメイン.lsb:6 While").count() <= 4, "{t}");
+}

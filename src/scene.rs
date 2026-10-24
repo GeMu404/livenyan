@@ -240,10 +240,37 @@ impl Scene {
     }
 
     /// Objetos en orden de dibujo (prioridad, luego creación).
+    /// Orden de dibujo jerárquico: cada objeto se dibuja después de su padre y sus hijos
+    /// justo encima de él; entre hermanos manda PRIORITY y luego el orden de creación.
+    /// (Antes era un orden global por PRIORITY: un "土台" con prioridad alta tapaba a sus hijos.)
     pub fn draw_order(&self) -> Vec<&Obj> {
-        let mut v: Vec<&Obj> = self.objs.values().collect();
-        v.sort_by_key(|o| (o.int(Prop::PRIORITY, 0), o.seq));
-        v
+        let mut kids: HashMap<&str, Vec<&Obj>> = HashMap::new();
+        let mut roots = vec![];
+        for o in self.objs.values() {
+            let p = o.props.get(&Prop::PARENT).map(|v| v.as_str()).unwrap_or_default();
+            if !p.is_empty() && self.objs.contains_key(&p) && p != o.name {
+                kids.entry(self.objs.get_key_value(&p).unwrap().0.as_str()).or_default().push(o);
+            } else {
+                roots.push(o);
+            }
+        }
+        let key = |o: &&Obj| (o.int(Prop::PRIORITY, 0), o.seq);
+        roots.sort_by_key(key);
+        for v in kids.values_mut() {
+            v.sort_by_key(key);
+        }
+        let mut out = Vec::with_capacity(self.objs.len());
+        let mut stack: Vec<&Obj> = roots.into_iter().rev().collect();
+        while let Some(o) = stack.pop() {
+            if out.len() > self.objs.len() {
+                break; // ciclo de padres
+            }
+            out.push(o);
+            if let Some(ch) = kids.get(o.name.as_str()) {
+                stack.extend(ch.iter().rev());
+            }
+        }
+        out
     }
 
     pub fn add_motion(&mut self, m: Motion) {
