@@ -44,3 +44,13 @@ fn onplayend_releases_wait_loop() {
     assert!(s.contains("state=ended"), "{s}");
     assert!(!s.contains("stalled"), "{s}");
 }
+
+/// Regresión: Exit con Calc falso no debe salir; TextIns vacío igual dispara ONPLAYEND.
+#[test]
+fn conditional_exit_and_empty_textins() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt2")]);
+    assert!(s.contains("Exit (not taken)"), "{s}");
+    assert!(s.contains("Calc reached = 1"), "{s}");
+    assert!(s.contains("event mbox.ONPLAYEND -> end.lsc"), "{s}");
+    assert!(s.contains("state=ended"), "{s}");
+}

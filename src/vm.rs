@@ -596,10 +596,16 @@ impl Vm {
                 }
             }
             CmdType::Exit => {
+                // Exit es condicional (pylivemaker: "Return if Calc evaluates to True");
+                // Calc vacío = salida incondicional.
                 let v = self.eval(c.expr("Calc"));
-                self.trace(c, String::new());
-                self.do_return(v);
-                return;
+                let go = matches!(v, Value::Empty) || v.truthy();
+                if go {
+                    self.trace(c, String::new());
+                    self.do_return(v);
+                    return;
+                }
+                detail = "(not taken)".into();
             }
             CmdType::Terminate => {
                 self.trace(c, String::new());
@@ -793,8 +799,12 @@ impl Vm {
             }
             CmdType::ObjDel => {
                 let name = self.eval(c.expr("Name")).as_str();
-                let n = self.scene.delete(&name);
-                detail = format!("{name:?} ({n} objs)");
+                let gone = self.scene.delete_names(&name);
+                for g in &gone {
+                    self.plays.remove(g);
+                    self.placeholders.remove(g);
+                }
+                detail = format!("{name:?} ({} objs: {})", gone.len(), gone.join(", "));
             }
             CmdType::PropMotion => {
                 let obj = self.eval(c.expr("ObjName")).as_str();

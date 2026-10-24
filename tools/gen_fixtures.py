@@ -123,6 +123,29 @@ add(C.Calc, Calc=expr(to("__done", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
+# --- evt2/: Exit condicional (Calc falso no sale) + TextIns vacío que igual dispara ONPLAYEND ---
+evt2 = os.path.join(out, "evt2"); os.makedirs(evt2, exist_ok=True)
+cmds = []; n = 0
+add(C.VarNew, Name="__done", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mbox")), PT.PR_WIDTH: lit(I(300)), PT.PR_HEIGHT: lit(I(100)), PT.PR_ONPLAYEND: lit(S("end.lsc"))}))
+add(C.Call, Page=C.LabelReference("cond.lsb", 0), Result="", Calc=lit(B(True)), Params=LiveParserArray([], prefixed=True))
+add(C.TextIns, Text=TpWord(version=105, decorators=[], conditions=[], links=[], body=[]), Target=lit(S("mbox")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+w = add(C.While, Calc=expr(op(T.Equal, "____arg", V("__done"), I(0))), End=0)
+add(C.Calc, indent=1, Calc=expr(to("spin", I(1))))
+wl = add(C.WhileLoop, Calc=expr(), Start=w)
+cmds[w].args["End"] = wl
+add(C.Exit, Calc=expr())
+open(os.path.join(evt2, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Exit, Calc=expr(op(T.Equal, "____arg", I(0), I(1))))
+add(C.Calc, Calc=expr(to("reached", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt2, "cond.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__done", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt2, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
 # --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3

@@ -105,15 +105,17 @@ impl Game {
             .ok_or("no .lsb scripts found")?;
         let (logical, logical_source) = if cfg.game.logical_width > 0 && cfg.game.logical_height > 0 {
             ((cfg.game.logical_width, cfg.game.logical_height), "config")
+        } else if let Some(r) = project.as_ref().and_then(lpb_resolution) {
+            (r, "lpb-header")
         } else if let Some(r) = project.as_ref().and_then(guess_resolution) {
-            (r, "lpb")
-        } else if let Some(r) = exe_forms(path).iter().find(|f| f.main).map(|f| (f.w, f.h)) {
-            (r, "exe-form")
+            (r, "lpb-settings")
         } else if let Some(r) = guess_from_images(&data) {
             (r, "images")
         } else {
-            (DEFAULT_RES, "default")
+            log::warn!("could not determine the game's resolution; using fallback {}x{} (override with --res)", DEFAULT_RES.0, DEFAULT_RES.1);
+            (DEFAULT_RES, "fallback")
         };
+        log::info!("logical resolution {}x{} from {}", logical.0, logical.1, logical_source);
         Ok(Self { path: path.to_path_buf(), data, project, title, slug, entry, logical, logical_source })
     }
 
@@ -168,7 +170,19 @@ fn guess_from_images(data: &GameData) -> Option<(u32, u32)> {
     counts.into_iter().max_by_key(|&((w, h), c)| (c, w * h)).filter(|&(_, c)| c >= 2).map(|(r, _)| r)
 }
 
-/// Formulario Delphi (TPF0) hallado en los recursos del .exe con ClientWidth/ClientHeight.
+/// Tamaño de pantalla desde la cabecera del .lpb (los 16 bytes "unk" de pylivemaker:
+/// dos pares ancho/alto). Si difieren se registra y se usa el primero válido.
+pub fn lpb_resolution(p: &Project) -> Option<(u32, u32)> {
+    let ok = |w: i32, h: i32| (160..=8192).contains(&w) && (120..=8192).contains(&h);
+    let a = (p.unk[0], p.unk[1]);
+    let b = (p.unk[2], p.unk[3]);
+    if ok(a.0, a.1) && ok(b.0, b.1) && a != b {
+        log::info!("lpb header has two different sizes {}x{} and {}x{}; using the first", a.0, a.1, b.0, b.1);
+    }
+    [a, b].into_iter().find(|&(w, h)| ok(w, h)).map(|(w, h)| (w as u32, h as u32))
+}
+
+/// Formulario Delphi (TPF0) (solo diagnóstico en --info: suelen ser ventanas del depurador) hallado en los recursos del .exe con ClientWidth/ClientHeight.
 #[derive(Debug, Clone)]
 pub struct ExeForm {
     pub class: String,
@@ -249,6 +263,17 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
 
 #[cfg(test)]
 mod form_tests {
+    #[test]
+    fn lpb_header_resolution() {
+        let mut p = super::Project::default();
+        p.unk = [1024, 768, 1024, 768];
+        assert_eq!(super::lpb_resolution(&p), Some((1024, 768)));
+        p.unk = [0, 0, 640, 480];
+        assert_eq!(super::lpb_resolution(&p), Some((640, 480)));
+        p.unk = [0, 0, 0, 0];
+        assert_eq!(super::lpb_resolution(&p), None);
+    }
+
     #[test]
     fn finds_main_form() {
         let mut b = b"junkTPF0\x08TAboutDlg\x05About\x0bClientWidth\x03\x40\x01\x0cClientHeight\x03\xc8\x00".to_vec();

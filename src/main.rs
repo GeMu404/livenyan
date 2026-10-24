@@ -151,7 +151,7 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
         println!("project:     (no .lpb)");
     }
     for f in livenyan::game::exe_forms(&game.path) {
-        println!("  exe form {} {}x{}{}", f.class, f.w, f.h, if f.main { " (main)" } else { "" });
+        println!("  exe form {} {}x{}{}", f.class, f.w, f.h, if f.main { " (largest/main-like; not used)" } else { "" });
     }
     println!("entry:       {}", game.entry);
     println!("resolution:  {}x{} (source: {})", game.logical.0, game.logical.1, game.logical_source);
