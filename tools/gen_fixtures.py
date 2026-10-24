@@ -146,6 +146,27 @@ add(C.Calc, Calc=expr(to("__done", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt2, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
+# --- evt3/: @ParamStr/@ParamCount por marco (Call anidado, se restauran al volver) ---
+evt3 = os.path.join(out, "evt3"); os.makedirs(evt3, exist_ok=True)
+def pick(i): return OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(i)])
+def call(page, label, *ps):
+    return add(C.Call, Page=C.LabelReference(page, label), Result="", Calc=lit(B(True)), Params=LiveParserArray([lit(S(x)) for x in ps], prefixed=True))
+cmds = []; n = 0
+call("p.lsb", 0, "abcd", "zz")
+add(C.Exit, Calc=expr())
+open(os.path.join(evt3, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.If, Calc=expr(pick(0), op(T.Equal, "____arg", V("____1"), S("abcd"))))
+call("p.lsb", 4, "inner")
+add(C.Else)
+add(C.Calc, indent=1, Calc=expr(to("first_ok", I(0))))
+add(C.If, Calc=expr(pick(0), op(T.Equal, "____arg", V("____1"), S("inner"))))
+add(C.Exit, indent=1, Calc=expr())
+add(C.If, Calc=expr(pick(0), op(T.Equal, "____2", V("____1"), S("abcd")), op(T.Equal, "____3", V("@ParamCount"), I(2)), op(T.And, "____arg", V("____2"), V("____3"))))
+add(C.Calc, indent=1, Calc=expr(to("restored_ok", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt3, "p.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
 # --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3

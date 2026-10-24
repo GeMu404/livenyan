@@ -54,3 +54,13 @@ fn conditional_exit_and_empty_textins() {
     assert!(s.contains("event mbox.ONPLAYEND -> end.lsc"), "{s}");
     assert!(s.contains("state=ended"), "{s}");
 }
+
+/// Regresión: Call Params -> @ParamStr[i]/@ParamCount por marco, restaurados tras un Call anidado.
+#[test]
+fn paramstr_per_frame() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt3")]);
+    assert!(s.contains("p.lsb:0    L1     If -> true"), "{s}");
+    assert!(s.contains("p.lsb:4    L5     If -> true"), "{s}");
+    assert!(s.contains("restored_ok = 1"), "{s}");
+    assert!(s.contains("state=ended"), "{s}");
+}

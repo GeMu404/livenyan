@@ -56,6 +56,8 @@ struct Frame {
     pc: usize,
     locals: HashMap<String, Value>,
     result_var: String,
+    /// Parámetros de la llamada (Call Params / evento), expuestos como @ParamStr[i] y @ParamCount.
+    params: Vec<Value>,
     /// Para manejadores de evento: estado a restaurar al volver.
     saved_state: Option<State>,
 }
@@ -137,7 +139,7 @@ impl Vm {
             ended_unnotified: Default::default(),
         };
         vm.prefetch_from(&script, 0);
-        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), saved_state: None });
+        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), params: vec![], saved_state: None });
         Ok(vm)
     }
 
@@ -473,10 +475,10 @@ impl Vm {
         if push {
             let mut locals = HashMap::new();
             // Convención provisional: parámetros como Param1..N (no verificado con juegos reales).
-            for (i, p) in params.into_iter().enumerate() {
-                locals.insert(format!("Param{}", i + 1), p);
+            for (i, p) in params.iter().enumerate() {
+                locals.insert(format!("Param{}", i + 1), p.clone());
             }
-            self.frames.push(Frame { script, pc, locals, result_var, saved_state: None });
+            self.frames.push(Frame { script, pc, locals, result_var, params, saved_state: None });
         } else if let Some(f) = self.frames.last_mut() {
             f.script = script;
             f.pc = pc;
@@ -1008,7 +1010,9 @@ impl Vm {
         Some(match name {
             "@ScrWidth" => Value::Int(w as i64),
             "@ScrHeight" => Value::Int(h as i64),
-            "@ParamStr" | "@ParamCount" => Value::Empty,
+            // por marco de llamada: cada Call apila los suyos y se recuperan al volver
+            "@ParamStr" => Value::Array(self.frames.last().map(|f| f.params.iter().map(|v| Value::Str(v.as_str())).collect()).unwrap_or_default()),
+            "@ParamCount" => Value::Int(self.frames.last().map(|f| f.params.len() as i64).unwrap_or(0)),
             "StatusSoundON" => Value::Bool(true),
             "ステータスフルスクリーン" => Value::Bool(false),
             "ステータスディスプレイモード" | "ステータスMIDIポート" => Value::Int(0),
