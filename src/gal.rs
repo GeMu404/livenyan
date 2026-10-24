@@ -517,3 +517,25 @@ mod tests {
         assert_eq!(attr(r#" BlockWidth="4" Width="10""#, "Width").as_deref(), Some("10"));
     }
 }
+
+/// Lee solo la cabecera para obtener (ancho, alto). `prefix` puede estar truncado.
+pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
+    if d.starts_with(b"GaleX200") && d.len() > 12 {
+        let hs = i32::from_le_bytes(d[8..12].try_into().ok()?) as usize;
+        let z = &d[12..d.len().min(12 + hs)];
+        let mut out = Vec::new();
+        let _ = flate2::read::ZlibDecoder::new(z).take(4096).read_to_end(&mut out);
+        let xml = cp932(&out);
+        let i = xml.find("Width")?;
+        let tag = &xml[i.saturating_sub(1)..];
+        let w = attr(tag, "Width")?.parse().ok()?;
+        let h = attr(tag, "Height")?.parse().ok()?;
+        return Some((w, h));
+    }
+    if d.starts_with(b"Gale") && d.len() >= 7 + 4 + 12 {
+        let ver: u32 = std::str::from_utf8(&d[4..7]).ok()?.parse().ok()?;
+        let u = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        return if ver > 102 { Some((u(11 + 4)?, u(11 + 8)?)) } else { Some((u(7 + 4)?, u(7 + 8)?)) };
+    }
+    None
+}

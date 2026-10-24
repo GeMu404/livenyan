@@ -469,6 +469,31 @@ impl GameData {
         }
     }
 
+    /// Primeros `n` bytes descomprimidos si es barato (entrada sin compresión o directorio).
+    pub fn read_prefix(&self, name: &str, n: usize) -> Option<Vec<u8>> {
+        let i = *self.index.get(&normalize(name))?;
+        match &self.source {
+            Source::Vf(a) => {
+                let e = &a.entries[i];
+                if e.compress != Compress::None {
+                    return None;
+                }
+                let mut buf = vec![0u8; (e.size as usize).min(n)];
+                if a.split {
+                    return a.read_raw(e).ok().map(|mut v| { v.truncate(n); v });
+                }
+                read_at(&a.parts[0], &mut buf, a.archive_offset + e.offset).ok()?;
+                Some(buf)
+            }
+            Source::Dir(root) => {
+                let f = File::open(root.join(self.names[i].replace('\\', std::path::MAIN_SEPARATOR_STR))).ok()?;
+                let mut buf = Vec::with_capacity(n);
+                f.take(n as u64).read_to_end(&mut buf).ok()?;
+                Some(buf)
+            }
+        }
+    }
+
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         match &self.source {
             Source::Vf(a) => self.index.get(&normalize(name)).map(|&i| &a.entries[i]),
