@@ -91,3 +91,32 @@ impl Default for Once {
         Self::new()
     }
 }
+
+/// Rectángulo (x, y, w, h) en píxeles de salida donde cae el lienzo lógico con letterbox:
+/// escala uniforme máxima que cabe, centrado. (Solo diagnóstico: el centrado real lo hace
+/// SDL con SDL_LOGICAL_PRESENTATION_LETTERBOX.)
+pub fn letterbox(out: (u32, u32), logical: (u32, u32)) -> (f64, f64, f64, f64) {
+    let (ow, oh) = (out.0 as f64, out.1 as f64);
+    let (lw, lh) = (logical.0.max(1) as f64, logical.1.max(1) as f64);
+    let k = (ow / lw).min(oh / lh);
+    let (w, h) = (lw * k, lh * k);
+    ((ow - w) / 2.0, (oh - h) / 2.0, w, h)
+}
+
+#[cfg(test)]
+mod letterbox_tests {
+    use super::letterbox;
+    #[test]
+    fn wide_window_pillarboxes() {
+        // 1848x1064 (ventana 1232x709 a densidad 1.5), juego 800x600
+        let (x, y, w, h) = letterbox((1848, 1064), (800, 600));
+        assert!((h - 1064.0).abs() < 1e-6 && (w - 1418.666).abs() < 0.01);
+        assert!((x - 214.666).abs() < 0.01 && y.abs() < 1e-6);
+    }
+    #[test]
+    fn tall_window_letterboxes() {
+        let (x, y, w, h) = letterbox((1848, 2124), (1024, 768));
+        assert!((w - 1848.0).abs() < 1e-6 && (h - 1386.0).abs() < 1e-6);
+        assert!(x.abs() < 1e-6 && (y - 369.0).abs() < 1e-6);
+    }
+}

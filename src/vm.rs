@@ -1402,8 +1402,23 @@ impl Vm {
                 };
                 let obj = obj.clone();
                 let color = src.strip_prefix('$').and_then(|h| u32::from_str_radix(h, 16).ok());
-                let alpha = args.iter().rev().find(|a| !a.is_empty()).and_then(|a| a.parse::<i64>().ok()).filter(|a| (0..=255).contains(a));
-                if name == "CHANGECG" && self.scene.get(&obj).is_some() {
+                // Posiciones: CREATECG [0]=nombre [1]=fuente/$color [2]=efecto (NORMAL/WAIT...)
+                // [3]=#capa [4]=alin. H [5]=alin. V [8]=tiempo ms [15]=alfa (solo forma de 16 args).
+                // CHANGECG [0]=nombre [1]=fuente/$color [2]=efecto [4]=tiempo ms.
+                // El resto sin verificar: no se usa (nunca se deduce alfa por posición dudosa).
+                let num = |i: usize| args.get(i).and_then(|a| a.trim().parse::<f64>().ok());
+                let alpha = if name == "CREATECG" && args.len() >= 16 { num(15).filter(|a| (0.0..=255.0).contains(a)).map(|a| a as i64) } else { None };
+                let time = if name == "CREATECG" { num(8) } else { num(4) }.unwrap_or(0.0).max(0.0);
+                let time = if self.skip || self.opts.trace { 0.0 } else { time };
+                let wait = args.get(2).is_some_and(|e| e == "WAIT");
+                if time > 0.0 && wait {
+                    // WAIT: el texto de la caja no sigue hasta que termine el efecto
+                    if let Some(p) = self.plays.get_mut(boxname) {
+                        p.next = p.next.max(self.now + time);
+                    }
+                }
+                log::debug!("{name} {obj:?}: effect {:?} time {time} ms{} alpha {alpha:?}", args.get(2), if wait { " (WAIT)" } else { "" });
+                if name == "CHANGECG" && self.scene.get(&obj).is_some() && (color.is_none() == (self.scene.get(&obj).map(|o| o.kind) == Some(Kind::Image))) {
                     match color {
                         Some(c) => {
                             let tc = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
@@ -1420,12 +1435,19 @@ impl Vm {
                     log::debug!("CHANGECG {obj:?} -> {src:?}");
                     return;
                 }
+                // CHANGECG que cambia de imagen a color (o al revés): se recrea el objeto y se
+                // conserva su posición/prioridad/padre; el fundido va sobre el nuevo.
+                let keep: Vec<(u8, Value)> = self
+                    .scene
+                    .get(&obj)
+                    .map(|o| [Prop::PRIORITY, Prop::PARENT].iter().filter_map(|p| o.get(*p).map(|v| (*p, v.clone()))).collect())
+                    .unwrap_or_default();
                 let (sw, sh) = (self.opts.screen.0 as i64, self.opts.screen.1 as i64);
                 let mut props: HashMap<u8, Value> = HashMap::new();
                 props.insert(Prop::NAME, Value::Str(obj.clone()));
-                if let Some(a) = alpha {
-                    props.insert(Prop::ALPHA, Value::Int(a));
-                }
+                props.extend(keep);
+                let target_alpha = alpha.unwrap_or(255);
+                props.insert(Prop::ALPHA, Value::Int(if time > 0.0 { 0 } else { target_alpha }));
                 let kind = match color {
                     Some(c) => {
                         let tc = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
@@ -1461,6 +1483,9 @@ impl Vm {
                 };
                 log::debug!("{name} creates {kind:?} {obj:?} src={src:?} props {:?}", props.keys().map(|p| crate::lsb::prop_name(*p)).collect::<Vec<_>>());
                 self.scene.create(&obj, kind, props);
+                if time > 0.0 {
+                    self.scene.add_motion(Motion { obj: obj.clone(), prop: Prop::ALPHA, from: 0.0, to: target_alpha as f64, start: self.now, dur: time });
+                }
                 if kind == Kind::Image {
                     self.watch_anim(&obj, src);
                 }

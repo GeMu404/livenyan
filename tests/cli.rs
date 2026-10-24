@@ -226,7 +226,7 @@ fn createcg_text_event_draws_color_background() {
     let out = std::env::temp_dir().join(format!("livenyan-cg-{}.png", std::process::id()));
     let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
         .env("SDL_VIDEODRIVER", "offscreen")
-        .args(["--mute", "--res", "800x600", "--snapshot-frame", "20", out.to_str().unwrap(), &fx("evt13")])
+        .args(["--mute", "--res", "800x600", "--snapshot-frame", "90", out.to_str().unwrap(), &fx("evt13")])
         .output()
         .unwrap();
     if !r.status.success() {

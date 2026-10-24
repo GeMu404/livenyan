@@ -214,7 +214,8 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                 }
             }
 
-        let now = start.elapsed().as_secs_f64() * 1000.0;
+        // con --snapshot-frame el reloj es simulado (60 fps) para que la captura sea reproducible
+        let now = if snapshot.is_some() { frame as f64 * 1000.0 / 60.0 } else { start.elapsed().as_secs_f64() * 1000.0 };
         vm.update(now, 20_000);
         for e in vm.events.drain(..) {
             match e {
@@ -254,18 +255,20 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                 last_dbg = now;
                 let n = drawn.iter().filter(|d| d.status == "drawn").count();
                 let (ww, wh) = canvas.window().size();
-                let (pw, ph) = canvas.output_size().unwrap_or((0, 0));
+                // tamaño real en píxeles, consultado en cada log (output_size() puede venir
+                // afectado por la presentación lógica)
+                let (pw, ph) = canvas.window().size_in_pixels();
+                let (rw, rh) = canvas.output_size().unwrap_or((0, 0));
                 let vp = canvas.viewport();
                 log::debug!(
                     "render frame {frame}: {} objects, {n} drawn | window {ww}x{wh} output {pw}x{ph} logical {lw}x{lh} viewport ({},{} {}x{}) scale {:?}",
                     drawn.len(), vp.x(), vp.y(), vp.width(), vp.height(), canvas.scale()
                 );
                 // dónde cae el lienzo lógico en píxeles reales (letterbox: escala uniforme, centrado)
-                let k = (pw as f64 / lw as f64).min(ph as f64 / lh as f64);
-                let (cw, chh) = (lw as f64 * k, lh as f64 * k);
+                let (bx, by, cw, chh) = crate::util::letterbox((pw, ph), (lw, lh));
+                let k = cw / lw as f64;
                 log::debug!(
-                    "canvas in output pixels: ({:.0},{:.0} {:.0}x{:.0}) scale {k:.3}; pixel density {:.2} (output/window {:.2}x{:.2})",
-                    (pw as f64 - cw) / 2.0, (ph as f64 - chh) / 2.0, cw, chh,
+                    "canvas in window pixels {pw}x{ph} (render output_size {rw}x{rh}): ({bx:.0},{by:.0} {cw:.0}x{chh:.0}) scale {k:.3}; pixel density {:.2} (pixels/window {:.2}x{:.2})",
                     canvas.window().pixel_density(), pw as f64 / ww.max(1) as f64, ph as f64 / wh.max(1) as f64
                 );
                 for d in &drawn {
