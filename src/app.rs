@@ -260,6 +260,14 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                     "render frame {frame}: {} objects, {n} drawn | window {ww}x{wh} output {pw}x{ph} logical {lw}x{lh} viewport ({},{} {}x{}) scale {:?}",
                     drawn.len(), vp.x(), vp.y(), vp.width(), vp.height(), canvas.scale()
                 );
+                // dónde cae el lienzo lógico en píxeles reales (letterbox: escala uniforme, centrado)
+                let k = (pw as f64 / lw as f64).min(ph as f64 / lh as f64);
+                let (cw, chh) = (lw as f64 * k, lh as f64 * k);
+                log::debug!(
+                    "canvas in output pixels: ({:.0},{:.0} {:.0}x{:.0}) scale {k:.3}; pixel density {:.2} (output/window {:.2}x{:.2})",
+                    (pw as f64 - cw) / 2.0, (ph as f64 - chh) / 2.0, cw, chh,
+                    canvas.window().pixel_density(), pw as f64 / ww.max(1) as f64, ph as f64 / wh.max(1) as f64
+                );
                 for d in &drawn {
                     log::debug!(
                         "  z{:<3} {:<24} rect=({:.0},{:.0} {:.0}x{:.0}) alpha={} {} {}",

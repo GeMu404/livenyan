@@ -508,3 +508,15 @@ cmds = []; n = 0
 add(C.Calc, Calc=expr(to("__end", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e12, "ev.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt13/: {CREATECG} incrustado en el texto crea un fondo de color sólido ---
+e13 = os.path.join(out, "evt13"); os.makedirs(e13, exist_ok=True)
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb"))}))
+add(C.Calc, Calc=expr(to("__end", I(0))))
+ev = "\x01CREATECG\r\nbackground\r\n$008000\r\nNORMAL\r\n#1\r\nC\r\nB\r\n0\r\n1\r\n500\r\n0\r\n0\r\n\r\n0\r\n0\r\n0\r\n255\r\n"
+tw = TpWord(version=105, decorators=[], conditions=[], links=[], body=[TWdOpeEvent(event=ev, condition=-1)])
+add(C.TextIns, Text=tw, Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+waitflag("__end")
+add(C.Exit, Calc=expr())
+open(os.path.join(e13, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())

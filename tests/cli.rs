@@ -219,3 +219,21 @@ fn deleted_box_standin_inherits_onnotify() {
     assert!(s.contains("event mb.ONNOTIFY -> ev.lsc"), "{s}");
     assert!(s.contains("Calc released = 1"), "{s}");
 }
+
+/// {CREATECG name $RRGGBB ...} en el texto crea un fondo de color visible.
+#[test]
+fn createcg_text_event_draws_color_background() {
+    let out = std::env::temp_dir().join(format!("livenyan-cg-{}.png", std::process::id()));
+    let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .env("SDL_VIDEODRIVER", "offscreen")
+        .args(["--mute", "--res", "800x600", "--snapshot-frame", "20", out.to_str().unwrap(), &fx("evt13")])
+        .output()
+        .unwrap();
+    if !r.status.success() {
+        eprintln!("skipping: offscreen video unavailable: {}", String::from_utf8_lossy(&r.stderr));
+        return;
+    }
+    let img = image::open(&out).unwrap().to_rgba8();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(img.get_pixel(400, 300).0, [0, 128, 0, 255]);
+}

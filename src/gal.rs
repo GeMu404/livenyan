@@ -130,12 +130,15 @@ fn stride(w: u32, bpp: u32) -> usize {
 struct Prev<'a> {
     frames: &'a [Frame],
     alpha: bool,
+    /// Capas ya leídas del frame en curso (índice de frame = frames.len()).
+    cur: &'a [(Layer, Vec<u8>, Option<Vec<u8>>)],
 }
 
 impl Prev<'_> {
     fn block_src(&self, fr: i32, lr: i32) -> Option<&[u8]> {
-        let f = self.frames.get(usize::try_from(fr).ok()?)?;
-        let (_, d, a) = f.layers.get(usize::try_from(lr).ok()?)?;
+        let fr = usize::try_from(fr).ok()?;
+        let layers: &[(Layer, Vec<u8>, Option<Vec<u8>>)] = if fr == self.frames.len() { self.cur } else { &self.frames.get(fr)?.layers };
+        let (_, d, a) = layers.get(usize::try_from(lr).ok()?)?;
         if self.alpha { a.as_deref() } else { Some(d.as_slice()) }
     }
 }
@@ -202,9 +205,15 @@ fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &
     Ok(data)
 }
 
-fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Frame]) -> R<Vec<u8>> {
-    let prev = Prev { frames: prev, alpha: false };
+type LayerData = (Layer, Vec<u8>, Option<Vec<u8>>);
+
+fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Frame], cur: &[LayerData]) -> R<Vec<u8>> {
+    let prev = Prev { frames: prev, alpha: false, cur };
     let n = r.usize()?;
+    if n == 0 {
+        // capa vacía (GaleX: capas sin contenido en este frame)
+        return Ok(Vec::new());
+    }
     if info.compression == Some(0) {
         let packed = zlib_block(r, n)?;
         return unpack_blocks(&packed, w, h, bpp, stride(w, bpp), info, prev);
@@ -233,7 +242,7 @@ fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Fram
     }
 }
 
-fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame]) -> R<Option<Vec<u8>>> {
+fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame], cur: &[LayerData]) -> R<Option<Vec<u8>>> {
     let n = r.usize()?;
     if n == 0 {
         return Ok(None);
@@ -241,7 +250,7 @@ fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame]) -> R<O
     // GARbro: el alfa va en zlib con CompType 0 y 2 (JPEG); con otros tipos, bloques crudos
     let packed = if matches!(info.compression, Some(0) | Some(2)) { zlib_block(r, n)? } else { r.take(n)?.to_vec() };
     let st = (w as usize + 3) & !3;
-    Ok(Some(unpack_blocks(&packed, w, h, 8, st, info, Prev { frames: prev, alpha: true })?))
+    Ok(Some(unpack_blocks(&packed, w, h, 8, st, info, Prev { frames: prev, alpha: true, cur })?))
 }
 
 /// Bloque zlib de tamaño declarado `n`. Si ese tamaño no cuadra con el flujo (flujo
@@ -431,8 +440,8 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame
         if ver >= 107 {
             r.u8()?;
         }
-        let data = layer_payload(r, info, w, h, bpp, prev)?;
-        let a = alpha_payload(r, info, w, h, prev)?;
+        let data = layer_payload(r, info, w, h, bpp, prev, &layers)?;
+        let a = alpha_payload(r, info, w, h, prev, &layers)?;
         let a = if alpha_on { a } else { None };
         layers.push((Layer { left, top, visible, alpha, alpha_on, trans }, data, a));
     }
@@ -549,9 +558,11 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let h = geti(layers_tag, "Height", info.h as i64) as u32;
     let bpp = geti(layers_tag, "bpp", base_bpp as i64) as u32;
     info.bpp = bpp;
-    let mut palette = Vec::new();
+    let mut palette = frames.last().map(|f: &Frame| f.palette.clone()).unwrap_or_default();
+    let pal_src: &str = if fx.contains("<RGB>") { fx } else { &xml };
     if bpp <= 8
-        && let (Some(a), Some(b)) = (fx.find("<RGB>"), fx.find("</RGB>")) {
+        && let (Some(a), Some(b)) = (pal_src.find("<RGB>"), pal_src.find("</RGB>")) {
+            let fx = pal_src;
             let hex = fx[a + 5..b].trim();
             let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect();
             palette = bytes.chunks(3).filter(|c| c.len() == 3).map(|c| [c[2], c[1], c[0]]).collect();
@@ -566,16 +577,18 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
             alpha_on: geti(lt, "AlphaOn", 0) != 0,
             trans: geti(lt, "TransColor", -1) as i32,
         };
-        let data = layer_payload(&mut r, &info, w, h, bpp, &frames)?;
-        let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h, &frames)? } else { None };
+        let data = layer_payload(&mut r, &info, w, h, bpp, &frames, &layers)?;
+        let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h, &frames, &layers)? } else { None };
         layers.push((l, data, a));
     }
     if layers.is_empty() {
         return err("no layers");
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    // BGColor (GaleX) no se usa como color clave: sin pruebas de que lo sea
-    frames.push(Frame { w, h, bpp, palette, layers, delay: fdelay, raw_hdr: vec![] });
+    // BGColor (GaleX) no se usa como color clave; TransColor del frame sí (como la máscara
+    // de la cabecera binaria; -1 = ninguno)
+    let ftrans = attr(ftag, "TransColor").and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1) as i32;
+    frames.push(Frame { w, h, bpp, palette, layers, delay: fdelay, raw_hdr: ftrans.to_le_bytes().to_vec() });
     }
     Ok((info, frames))
 }
@@ -779,7 +792,7 @@ pub fn stats(d: &[u8]) -> R<String> {
         for (li, (l, data, a)) in f.layers.iter().enumerate() {
             let mut px = to_rgba(f, data, a.as_deref());
             let key = color_key(f, l, a.is_some());
-            apply_key(&mut px, key);
+            apply_key_frame(f, data, &mut px, key);
             let n = (px.len() / 4).max(1) as u64;
             let (mut r, mut g, mut b, mut al, mut nz) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for p in px.chunks_exact(4) {
@@ -806,11 +819,35 @@ fn color_key(f: &Frame, l: &Layer, has_alpha: bool) -> Option<u32> {
     if has_alpha {
         return None;
     }
-    if l.trans != -1 {
-        return Some(l.trans as u32 & 0xFFFFFF);
+    // -1 / 0xFFFFFFFF / 0x00FFFFFF = ninguno. Con bpp <= 8 el valor es un índice de paleta.
+    let valid = |v: u32| v != 0xFFFF_FFFF && v != 0x00FF_FFFF && v >> 24 == 0 && (f.bpp > 8 || v < 256);
+    if valid(l.trans as u32) {
+        return Some(l.trans as u32);
     }
     let m = f.raw_hdr.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))?;
-    (m != 0xFFFF_FFFF && m >> 24 == 0).then_some(m)
+    valid(m).then_some(m)
+}
+
+/// Aplica el color clave: con paleta compara índices; si no, TColor 0x00BBGGRR.
+fn apply_key_frame(f: &Frame, data: &[u8], px: &mut [u8], key: Option<u32>) {
+    let Some(k) = key else { return };
+    if f.bpp <= 8 {
+        let st = stride(f.w, f.bpp);
+        for y in 0..f.h as usize {
+            for x in 0..f.w as usize {
+                let idx = if f.bpp == 8 {
+                    data.get(y * st + x).copied()
+                } else {
+                    data.get(y * st + x / 2).map(|b| if x % 2 == 0 { b >> 4 } else { b & 15 })
+                };
+                if idx == Some(k as u8) {
+                    px[(y * f.w as usize + x) * 4 + 3] = 0;
+                }
+            }
+        }
+        return;
+    }
+    apply_key(px, Some(k));
 }
 
 fn apply_key(px: &mut [u8], key: Option<u32>) {
@@ -871,12 +908,15 @@ fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
     if cw == 0 || ch == 0 || (cw as u64 * ch as u64) > 16384 * 16384 {
         return err("invalid dimensions");
     }
-    let visible: Vec<_> = frame.layers.iter().filter(|(l, _, _)| l.visible).collect();
+    let visible: Vec<_> = frame.layers.iter().filter(|(l, d, _)| l.visible && !d.is_empty()).collect();
     // caso rápido: una sola capa a tamaño completo
-    if visible.len() <= 1 {
+    if visible.is_empty() {
+        return Ok((frame.w, frame.h, vec![0u8; (frame.w * frame.h * 4) as usize]));
+    }
+    if visible.len() == 1 && visible[0].0.left == 0 && visible[0].0.top == 0 {
         let (l, data, a) = visible.first().copied().unwrap_or(&frame.layers[0]);
         let mut px = to_rgba(frame, data, a.as_deref());
-        apply_key(&mut px, color_key(frame, l, a.is_some()));
+        apply_key_frame(frame, data, &mut px, color_key(frame, l, a.is_some()));
         if l.alpha < 255 {
             for p in px.chunks_mut(4) {
                 p[3] = (p[3] as u32 * l.alpha.clamp(0, 255) as u32 / 255) as u8;
@@ -887,7 +927,7 @@ fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
     let mut canvas = vec![0u8; (cw * ch * 4) as usize];
     for (l, data, a) in visible {
         let mut px = to_rgba(frame, data, a.as_deref());
-        apply_key(&mut px, color_key(frame, l, a.is_some()));
+        apply_key_frame(frame, data, &mut px, color_key(frame, l, a.is_some()));
         let la = l.alpha.clamp(0, 255) as u32;
         for y in 0..frame.h as i32 {
             let cy = y + l.top;
@@ -1118,6 +1158,29 @@ mod tests {
         assert_eq!(&img.frames[0][0..4], &[255, 0, 0, 255]);
         assert_eq!(&img.frames[0][8 * 4..8 * 4 + 4], &[0, 0, 255, 255]);
         assert!(dump(&d).contains("(MISMATCH)"));
+    }
+
+    /// GaleX 8bpp: capa vacía (0 B) + TransColor del frame como índice de paleta.
+    #[test]
+    fn galex_empty_layer_and_index_key() {
+        use std::io::Write;
+        let z = |b: &[u8]| {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b).unwrap();
+            e.finish().unwrap()
+        };
+        let xml = r#"<?xml version="1.0"?><Frames Version="200" Width="4" Height="2" Bpp="8" Count="1" SyncPal="1" Randomized="0" CompType="0" BGColor="16777215" BlockWidth="0" BlockHeight="0"><Frame TransColor="1" Delay="400" Count="1" Count="0"><Layers Count="2" Width="4" Height="2" Bpp="8"><RGB>0000FF00FF00</RGB><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/></Layers></Frame></Frames>"#;
+        let zx = z(xml.as_bytes());
+        let mut d = b"GaleX200".to_vec();
+        d.extend((zx.len() as u32).to_le_bytes());
+        d.extend(&zx);
+        d.extend(0u32.to_le_bytes()); // capa 0 vacía
+        let px = z(&[0, 1, 0, 1, 1, 0, 1, 0]);
+        d.extend((px.len() as u32).to_le_bytes());
+        d.extend(&px);
+        let img = decode(&d).unwrap();
+        let alphas: Vec<u8> = img.rgba.chunks(4).map(|p| p[3]).collect();
+        assert_eq!(alphas, vec![255, 0, 255, 0, 0, 255, 0, 255]);
     }
 
     #[test]

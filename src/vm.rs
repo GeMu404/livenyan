@@ -436,11 +436,10 @@ impl Vm {
                 // LiveMaker: "メッセージ中の<EVENT>タグで呼び出される（引数あり）").
                 // Los eventos de sistema (\x01: PLAYSND, WAITPLAY, CHANGECG...) son del motor.
                 if let Some(sys) = raw.strip_prefix('\x01') {
-                    let name = sys.split("\r\n").next().unwrap_or("");
-                    log::debug!("system text event on {n}: {name:?} (built-in; {})", if name == "WAITPLAY" { "sounds count as finished" } else { "ignored" });
-                    if !name.is_empty() {
-                        self.warn(&format!("unimpl:text sysevent {name}"), &format!("system text event {name} not implemented (ignored)"));
-                    }
+                    let mut it = sys.split("\r\n");
+                    let name = it.next().unwrap_or("").to_string();
+                    let args: Vec<String> = it.map(|x| x.to_string()).collect();
+                    self.system_text_event(&n, &name, &args);
                     continue;
                 }
                 let parts: Vec<Value> = raw.split("\r\n").map(|x| Value::Str(x.to_string())).collect();
@@ -1384,6 +1383,95 @@ impl Vm {
         self.start_play(target, plan);
         if wait && !self.placeholders.contains(target) {
             self.state = State::WaitText { target: target.to_string() };
+        }
+    }
+
+    /// Eventos de sistema de LiveNovel incrustados en el texto ({CREATECG ...} etc.).
+    /// CREATECG/CHANGECG crean/cambian objetos de imagen; el resto se registra y se ignora
+    /// (WAITPLAY: los sonidos cuentan como terminados).
+    /// Argumentos observados de CREATECG: [nombre, fuente ("$RRGGBB" = color sólido), efecto,
+    /// "#n", alineación H (L/C/R), alineación V (T/C/B), ?, ?, tiempo ms, ?, ?, "", ?, ?, ?, alfa].
+    /// Solo nombre, fuente, alineación y alfa se usan; el resto está sin verificar.
+    fn system_text_event(&mut self, boxname: &str, name: &str, args: &[String]) {
+        log::debug!("system text event on {boxname}: {name} args {args:?}");
+        match name {
+            "CREATECG" | "CHANGECG" => {
+                let (Some(obj), Some(src)) = (args.first(), args.get(1)) else {
+                    log::debug!("{name}: missing name/source");
+                    return;
+                };
+                let obj = obj.clone();
+                let color = src.strip_prefix('$').and_then(|h| u32::from_str_radix(h, 16).ok());
+                let alpha = args.iter().rev().find(|a| !a.is_empty()).and_then(|a| a.parse::<i64>().ok()).filter(|a| (0..=255).contains(a));
+                if name == "CHANGECG" && self.scene.get(&obj).is_some() {
+                    match color {
+                        Some(c) => {
+                            let tc = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+                            self.scene.set(&obj, Prop::COLOR, Value::Int(tc as i64));
+                        }
+                        None => {
+                            if let Some(r) = self.assets.data().resolve(src, IMAGE_EXTS) {
+                                self.assets.request(&r);
+                            }
+                            self.scene.set(&obj, Prop::SOURCE, Value::Str(src.clone()));
+                            self.watch_anim(&obj, src);
+                        }
+                    }
+                    log::debug!("CHANGECG {obj:?} -> {src:?}");
+                    return;
+                }
+                let (sw, sh) = (self.opts.screen.0 as i64, self.opts.screen.1 as i64);
+                let mut props: HashMap<u8, Value> = HashMap::new();
+                props.insert(Prop::NAME, Value::Str(obj.clone()));
+                if let Some(a) = alpha {
+                    props.insert(Prop::ALPHA, Value::Int(a));
+                }
+                let kind = match color {
+                    Some(c) => {
+                        let tc = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+                        props.insert(Prop::COLOR, Value::Int(tc as i64));
+                        props.insert(Prop::WIDTH, Value::Int(sw));
+                        props.insert(Prop::HEIGHT, Value::Int(sh));
+                        Kind::Box
+                    }
+                    None => {
+                        let resolved = self.assets.data().resolve(src, IMAGE_EXTS);
+                        let size = resolved.as_ref().and_then(|r| self.assets.data().read_prefix(r, 4096)).and_then(|d| crate::gal::peek_size(&d));
+                        if let Some(r) = &resolved {
+                            self.assets.request(r);
+                        } else {
+                            log::warn!("{name}: image not found: {src:?}");
+                        }
+                        let (iw, ih) = size.map(|(w, h)| (w as i64, h as i64)).unwrap_or((sw, sh));
+                        let x = match args.get(4).map(|s| s.as_str()) {
+                            Some("C") => (sw - iw) / 2,
+                            Some("R") => sw - iw,
+                            _ => 0,
+                        };
+                        let y = match args.get(5).map(|s| s.as_str()) {
+                            Some("C") => (sh - ih) / 2,
+                            Some("B") => sh - ih,
+                            _ => 0,
+                        };
+                        props.insert(Prop::SOURCE, Value::Str(src.clone()));
+                        props.insert(Prop::LEFT, Value::Int(x));
+                        props.insert(Prop::TOP, Value::Int(y));
+                        Kind::Image
+                    }
+                };
+                log::debug!("{name} creates {kind:?} {obj:?} src={src:?} props {:?}", props.keys().map(|p| crate::lsb::prop_name(*p)).collect::<Vec<_>>());
+                self.scene.create(&obj, kind, props);
+                if kind == Kind::Image {
+                    self.watch_anim(&obj, src);
+                }
+                self.object_defined(&obj);
+            }
+            "" => {}
+            _ => {
+                if name != "WAITPLAY" {
+                    self.warn(&format!("unimpl:text sysevent {name}"), &format!("system text event {name} not implemented (ignored)"));
+                }
+            }
         }
     }
 
