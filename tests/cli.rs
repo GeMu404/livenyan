@@ -180,3 +180,24 @@ fn gal_stats_output() {
     let i = run(&["--info", &fx("game.exe")]);
     assert!(i.contains("gal check:   1 decoded: ok=1"), "{i}");
 }
+
+/// Regresión del flujo real: TextIns vacío + espera tipo 終了待ち que solo se libera con
+/// un clic en la caja de mensajes; --trace debe hacer ese clic y avanzar 5 veces.
+#[test]
+fn trace_clicks_message_box_repeatedly() {
+    let s = run(&["--trace", "--steps", "20000", &fx("evt9")]);
+    assert!(s.contains("Calc done5 = 1"), "{s}");
+    assert!(s.contains("auto-click on message box mb.ONLBTNUP"), "{s}");
+    assert!(!s.contains("# stalled"), "{s}");
+}
+
+/// GAL animado de 3 frames (con bytes intermedios): se leen todos y el ImgNew dispara
+/// ONPLAYEND al terminar la animación.
+#[test]
+fn gal_animation_plays_and_ends() {
+    let g = run(&["--gal-stats", "anim.gal", &fx("evt10")]);
+    assert!(g.contains("frames 3 (parsed 3)"), "{g}");
+    let s = run(&["--trace", "--steps", "5000", &fx("evt10")]);
+    assert!(s.contains("event logo.ONPLAYEND -> ae.lsc"), "{s}");
+    assert!(s.contains("state=ended"), "{s}");
+}

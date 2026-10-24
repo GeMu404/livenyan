@@ -49,6 +49,8 @@ pub struct Obj {
     pub shown: usize,
     /// Se incrementa al cambiar algo visual del texto (invalidación de caché).
     pub text_rev: u64,
+    /// Frame actual de una animación GAL (lo avanza el VM).
+    pub frame: usize,
 }
 
 impl Obj {
@@ -103,7 +105,7 @@ impl Scene {
             Some(old) => (old.text, old.shown, old.text_rev + 1),
             None => (vec![], 0, 0),
         };
-        let o = Obj { name: name.to_string(), kind, seq: self.seq, props, text, shown, text_rev };
+        let o = Obj { name: name.to_string(), kind, seq: self.seq, props, text, shown, text_rev, frame: 0 };
         self.objs.insert(name.to_string(), o);
     }
 

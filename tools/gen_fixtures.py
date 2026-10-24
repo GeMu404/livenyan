@@ -412,3 +412,59 @@ cmds = []; n = 0
 add(C.Calc, Calc=expr(OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(0)]), to("選択値", V("____1"))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e8, "sel.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt9/: como el flujo real repetido: TextIns vacío + espera tipo 終了待ち; la caja de
+# mensajes solo libera la espera con un clic (ONLBTNUP). Debe avanzar 5 veces ---
+e9 = os.path.join(out, "evt9"); os.makedirs(e9, exist_ok=True)
+enable(C.CommandType.MesNew, PT.PR_ONLBTNUP)
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb")), PT.PR_WIDTH: lit(I(300)), PT.PR_HEIGHT: lit(I(100)), PT.PR_ONLBTNUP: lit(S("end.lsc"))}))
+add(C.Calc, Calc=expr(to("k", I(0))))
+top = add(C.Label, Name="top")
+add(C.Calc, Calc=expr(to("__end", I(0))))
+add(C.TextIns, Text=TpWord(version=105, decorators=[], conditions=[], links=[], body=[]), Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+call("wait.lsb", 0)
+add(C.Calc, Calc=expr(op(T.Plus, "____1", V("k"), I(1)), to("k", V("____1"))))
+add(C.Jump, Page=C.LabelReference("ゲームメイン.lsb", top), Calc=expr(op(T.Small, "____arg", V("k"), I(5))))
+add(C.Calc, Calc=expr(to("done5", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e9, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+w = add(C.While, Calc=expr(op(T.Equal, "____arg", V("__end"), I(0))), End=0)
+add(C.Wait, indent=1, Calc=lit(B(True)), Time=lit(I(0)), StopEvent=expr())
+wl = add(C.WhileLoop, Calc=expr(), Start=w)
+cmds[w].args["End"] = wl + 1
+add(C.Exit, Calc=expr())
+open(os.path.join(e9, "wait.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__end", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e9, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt10/: GAL animado (3 frames, con bytes intermedios entre frames) en un ImgNew con
+# ONPLAYEND; el script espera a que termine (PR_PLAYING / ONPLAYEND) ---
+e10 = os.path.join(out, "evt10"); os.makedirs(e10, exist_ok=True)
+def galframe(bgr, name):
+    raw = bytes(bgr) * (16 * 8)
+    z = zlib.compress(raw)
+    nm = name.encode()
+    return (struct.pack("<I", len(nm)) + nm + bytes(13) + struct.pack("<IiiI", 1, 16, 8, 24) +
+            struct.pack("<ii", 0, 0) + b"\x01" + struct.pack("<ii", -1, 255) + b"\x00" + struct.pack("<I", 0) +
+            struct.pack("<I", len(z)) + z + struct.pack("<I", 0))
+base = gal(16, 8, 24, [bytes([0, 0, 255] * 16) for _ in range(8)])
+hs = struct.unpack("<I", base[7:11])[0]
+hdr = bytearray(base[11:11 + hs]); hdr[0x10:0x14] = struct.pack("<I", 3)
+anim = b"Gale106" + struct.pack("<I", hs) + bytes(hdr) + galframe([0, 0, 0], "Frame0") + galframe([0, 0, 255], "Frame1") + b"\x05\x00\x00\x00junk!" + galframe([0, 255, 0], "Frame2")
+open(os.path.join(e10, "anim.gal"), "wb").write(anim)
+enable(C.CommandType.ImgNew, PT.PR_ONPLAYEND)
+cmds = []; n = 0
+add(C.VarNew, Name="__ae", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("logo")), PT.PR_SOURCE: lit(S("anim.gal")), PT.PR_ONPLAYEND: lit(S("ae.lsc"))}))
+waitflag("__ae")
+add(C.Calc, Calc=expr(fn("____1", F.GetProp, S("logo"), I(PT.PR_PLAYING - 1)), to("playing_after", V("____1"))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e10, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__ae", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e10, "ae.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())

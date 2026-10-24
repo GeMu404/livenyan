@@ -11,6 +11,10 @@ pub struct Image {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
+    /// Frames adicionales (1..) de una animación GAL, mismo tamaño que `rgba`.
+    pub frames: Vec<Vec<u8>>,
+    /// Duración de cada frame (ms), incluido el 0; vacío = imagen estática.
+    pub delays: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -26,6 +30,7 @@ fn err<T>(m: impl Into<String>) -> R<T> {
     Err(GalError(m.into()))
 }
 
+#[derive(Clone, Copy)]
 struct Rd<'a> {
     d: &'a [u8],
     p: usize,
@@ -82,12 +87,33 @@ struct Frame {
     bpp: u32,
     palette: Vec<[u8; 3]>,
     layers: Vec<(Layer, Vec<u8>, Option<Vec<u8>>)>, // (info, datos crudos, alfa cruda)
+    /// Duración del frame (ms) si el formato la indica (atributo XML de GaleX).
+    delay: Option<u32>,
+    /// Gale binario: máscara (4 bytes) + 9 bytes sin documentar de la cabecera del frame
+    /// (candidatos a duración del frame); se muestran en --gal-stats.
+    raw_hdr: Vec<u8>,
 }
 
 fn inflate(d: &[u8]) -> R<Vec<u8>> {
     let mut out = Vec::with_capacity(d.len() * 4);
-    flate2::read::ZlibDecoder::new(d).read_to_end(&mut out).map_err(|e| GalError(format!("zlib: {e}")))?;
-    Ok(out)
+    match flate2::read::ZlibDecoder::new(d).read_to_end(&mut out) {
+        Ok(_) => Ok(out),
+        // Algunos GAL traen el flujo zlib sin cerrar (sin el bloque final/Adler32): se usa
+        // lo descomprimido; el resto del búfer queda a cero.
+        Err(e) if !out.is_empty() => {
+            log::debug!("GAL: truncated zlib stream ({e}); using {} bytes", out.len());
+            Ok(out)
+        }
+        Err(e) => {
+            // ¿deflate sin cabecera zlib?
+            let mut o2 = Vec::new();
+            match flate2::read::DeflateDecoder::new(d).read_to_end(&mut o2) {
+                Ok(_) if !o2.is_empty() => Ok(o2),
+                _ if !o2.is_empty() => Ok(o2),
+                _ => Err(GalError(format!("zlib: {e}"))),
+            }
+        }
+    }
 }
 
 fn stride(w: u32, bpp: u32) -> usize {
@@ -183,10 +209,6 @@ fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32) -> R<Option<Vec<u8>>> 
     Ok(Some(unpack_blocks(&inflate(raw)?, w, h, 8, st, info)?))
 }
 
-fn parse_gale(d: &[u8]) -> R<(Info, Frame)> {
-    let (info, mut frames) = parse_gale_all(d, 1)?;
-    Ok((info, frames.remove(0)))
-}
 
 /// Gale binario: hasta `max` frames (los frames van seguidos en el archivo).
 fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
@@ -229,12 +251,68 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     if frame_count < 1 {
         return err("no frames");
     }
-    let mut frames = Vec::new();
-    for _ in 0..(frame_count as usize).min(max.max(1)) {
+    let mut frames: Vec<Frame> = Vec::new();
+    for i in 0..(frame_count as usize).min(max.max(1)) {
+        if i == 0 {
+            frames.push(read_gale_frame(&mut r, &info, ver)?);
+            continue;
+        }
+        // Los frames siguientes no siempre empiezan justo tras el anterior (hay datos
+        // intermedios no documentados). Se resincroniza buscando una cabecera de frame
+        // plausible (mismo tamaño que el frame 0) en los bytes siguientes.
+        let (w0, h0) = (frames[0].w, frames[0].h);
+        let mut found = None;
+        for off in 0..65536usize {
+            let p = r.p + off;
+            if p + 40 > d.len() {
+                break;
+            }
+            if !frame_header_ok(d, p, w0, h0) {
+                continue;
+            }
+            let mut t = r;
+            t.p = p;
+            if let Ok(f) = read_gale_frame(&mut t, &info, ver) {
+                found = Some((f, t.p, off));
+                break;
+            }
+        }
+        match found {
+            Some((f, np, off)) => {
+                if off > 0 {
+                    log::debug!("GAL frame {i}: resynced +{off} bytes");
+                }
+                r.p = np;
+                frames.push(f);
+            }
+            None => return err(format!("frame {i}: no valid frame header found")),
+        }
+    }
+    info.frames = frame_count as u32;
+    info.version = format!("Gale{ver}");
+    Ok((info, frames))
+}
+
+
+/// Comprueba barato si en `p` empieza una cabecera de frame Gale con tamaño w0 x h0.
+fn frame_header_ok(d: &[u8], p: usize, w0: u32, h0: u32) -> bool {
+    let rd = |o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+    let Some(nl) = rd(p) else { return false };
+    if !(0..=256).contains(&nl) {
+        return false;
+    }
+    let q = p + 4 + nl as usize + 4 + 9;
+    let (Some(lc), Some(w), Some(h), Some(bpp)) = (rd(q), rd(q + 4), rd(q + 8), rd(q + 12)) else { return false };
+    (1..=64).contains(&lc) && w as u32 == w0 && h as u32 == h0 && [4, 8, 16, 24, 32].contains(&bpp)
+}
+
+/// Lee un frame Gale (cabecera + capas) en la posición actual.
+fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32) -> R<Frame> {
     let nl = r.usize()?;
     let _name = cp932(r.take(nl)?);
-    let _mask = r.i32()?;
-    r.take(9)?;
+    let hdr_start = r.p;
+    r.take(13)?;
+    let raw_hdr: Vec<u8> = r.d[hdr_start..hdr_start + 13].to_vec();
     let layer_count = r.usize()?;
     if layer_count < 1 {
         return err("invalid frame (no layers)");
@@ -263,17 +341,13 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         if ver >= 107 {
             r.u8()?;
         }
-        let data = layer_payload(&mut r, &info, w, h, bpp)?;
-        let a = alpha_payload(&mut r, &info, w, h)?;
+        let data = layer_payload(r, info, w, h, bpp)?;
+        let a = alpha_payload(r, info, w, h)?;
         let a = if alpha_on { a } else { None };
         layers.push((Layer { left, top, visible, alpha, alpha_on }, data, a));
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    frames.push(Frame { w, h, bpp, palette, layers });
-    }
-    info.frames = frame_count as u32;
-    info.version = format!("Gale{ver}");
-    Ok((info, frames))
+    Ok(Frame { w, h, bpp, palette, layers, delay: None, raw_hdr })
 }
 
 /// Atributo XML mínimo (el XML de GaleX es simple y plano).
@@ -313,10 +387,6 @@ fn tags<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     v
 }
 
-fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
-    let (info, mut frames) = parse_galex_all(d, 1)?;
-    Ok((info, frames.remove(0)))
-}
 
 fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut r = Rd { d, p: 0 };
@@ -382,6 +452,8 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let frame_end = find_frame(frame_start + 6).unwrap_or(xml.len());
     next = find_frame(frame_start + 6);
     let fx = &xml[frame_start..frame_end];
+    let ftag = &fx[..fx.find('>').unwrap_or(fx.len())];
+    let fdelay = ["Delay", "Wait", "Interval", "Time"].iter().find_map(|k| attr(ftag, k)).and_then(|v| v.parse::<u32>().ok());
     let layers_tag = tags(fx, "Layers").into_iter().next().unwrap_or("");
     let w = geti(layers_tag, "Width", info.w as i64) as u32;
     let h = geti(layers_tag, "Height", info.h as i64) as u32;
@@ -411,7 +483,7 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         return err("no layers");
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    frames.push(Frame { w, h, bpp, palette, layers });
+    frames.push(Frame { w, h, bpp, palette, layers, delay: fdelay, raw_hdr: vec![] });
     }
     Ok((info, frames))
 }
@@ -462,7 +534,10 @@ pub fn stats(d: &[u8]) -> R<String> {
     );
     out += &std::mem::take(&mut note);
     for (fi, f) in frames.iter().enumerate() {
-        out += &format!("frame {fi}: {}x{} bpp {} palette {} layers {}\n", f.w, f.h, f.bpp, f.palette.len(), f.layers.len());
+        out += &format!(
+            "frame {fi}: {}x{} bpp {} palette {} layers {} delay {:?} hdr {:02x?}\n",
+            f.w, f.h, f.bpp, f.palette.len(), f.layers.len(), f.delay, f.raw_hdr
+        );
         for (li, (l, data, a)) in f.layers.iter().enumerate() {
             let px = to_rgba(f, data, a.as_deref());
             let n = (px.len() / 4).max(1) as u64;
@@ -527,12 +602,8 @@ fn to_rgba(f: &Frame, data: &[u8], alpha: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-/// Decodifica un GAL/GaleX completo (primer frame, capas compuestas).
-pub fn decode(d: &[u8]) -> R<Image> {
-    if !d.starts_with(b"Gale") {
-        return err("not a GAL file");
-    }
-    let (info, frame) = if d.starts_with(b"GaleX") { parse_galex(d)? } else { parse_gale(d)? };
+/// Compone las capas visibles de un frame en RGBA.
+fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
     let (cw, ch) = (info.w.max(frame.w), info.h.max(frame.h));
     if cw == 0 || ch == 0 || (cw as u64 * ch as u64) > 16384 * 16384 {
         return err("invalid dimensions");
@@ -541,17 +612,17 @@ pub fn decode(d: &[u8]) -> R<Image> {
     // caso rápido: una sola capa a tamaño completo
     if visible.len() <= 1 {
         let (l, data, a) = visible.first().copied().unwrap_or(&frame.layers[0]);
-        let mut px = to_rgba(&frame, data, a.as_deref());
+        let mut px = to_rgba(frame, data, a.as_deref());
         if l.alpha < 255 {
             for p in px.chunks_mut(4) {
                 p[3] = (p[3] as u32 * l.alpha.clamp(0, 255) as u32 / 255) as u8;
             }
         }
-        return Ok(Image { w: frame.w, h: frame.h, rgba: px });
+        return Ok((frame.w, frame.h, px));
     }
     let mut canvas = vec![0u8; (cw * ch * 4) as usize];
     for (l, data, a) in visible {
-        let px = to_rgba(&frame, data, a.as_deref());
+        let px = to_rgba(frame, data, a.as_deref());
         let la = l.alpha.clamp(0, 255) as u32;
         for y in 0..frame.h as i32 {
             let cy = y + l.top;
@@ -577,7 +648,45 @@ pub fn decode(d: &[u8]) -> R<Image> {
             }
         }
     }
-    Ok(Image { w: cw, h: ch, rgba: canvas })
+    Ok((cw, ch, canvas))
+}
+
+/// Duración por defecto de un frame de animación GAL cuando el archivo no la indica (ms).
+pub const DEFAULT_FRAME_MS: u32 = 100;
+
+/// Decodifica un GAL/GaleX: todos los frames (animación) con sus capas compuestas.
+pub fn decode(d: &[u8]) -> R<Image> {
+    if !d.starts_with(b"Gale") {
+        return err("not a GAL file");
+    }
+    let x = d.starts_with(b"GaleX");
+    let all = |m| if x { parse_galex_all(d, m) } else { parse_gale_all(d, m) };
+    let (info, frames) = match all(1024) {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!("GAL: later frames unreadable ({e}); using frame 0 only");
+            all(1)?
+        }
+    };
+    let (w, h, rgba) = compose(&info, &frames[0])?;
+    let mut extra = vec![];
+    let mut delays = vec![];
+    if frames.len() > 1 {
+        delays.push(frames[0].delay.unwrap_or(DEFAULT_FRAME_MS));
+        for f in &frames[1..] {
+            match compose(&info, f) {
+                Ok((fw, fh, px)) if fw == w && fh == h => {
+                    extra.push(px);
+                    delays.push(f.delay.unwrap_or(DEFAULT_FRAME_MS));
+                }
+                _ => break,
+            }
+        }
+        if extra.is_empty() {
+            delays.clear();
+        }
+    }
+    Ok(Image { w, h, rgba, frames: extra, delays })
 }
 
 /// Decodifica GAL o, como alternativa, PNG/JPEG/BMP (juegos extraídos/parcheados).
@@ -586,7 +695,7 @@ pub fn decode_any(d: &[u8]) -> R<Image> {
         return decode(d);
     }
     let img = image::load_from_memory(d).map_err(|e| GalError(format!("image: {e}")))?.to_rgba8();
-    Ok(Image { w: img.width(), h: img.height(), rgba: img.into_raw() })
+    Ok(Image { w: img.width(), h: img.height(), rgba: img.into_raw(), frames: vec![], delays: vec![] })
 }
 
 /// Lee solo la cabecera para obtener (ancho, alto). `prefix` puede estar truncado.
@@ -632,6 +741,65 @@ mod tests {
         assert_eq!((img.w, img.h), (5, 3));
         let exp: Vec<u8> = std::fs::read(dir.join("pal_blocks.rgba")).unwrap();
         assert_eq!(img.rgba, exp);
+    }
+    /// Gale106 de 3 frames con bytes intermedios no documentados entre frames 1 y 2
+    /// (como en juegos reales): se deben leer los 3 frames.
+    #[test]
+    fn gale_multiframe_with_gap() {
+        use std::io::Write;
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let base = std::fs::read(dir.join("render2/pic.gal")).unwrap();
+        let hs = u32::from_le_bytes(base[7..11].try_into().unwrap()) as usize;
+        let mut hdr = base[11..11 + hs].to_vec();
+        hdr[0x10..0x14].copy_from_slice(&3u32.to_le_bytes());
+        let frame = |bgr: [u8; 3], name: &str| {
+            let mut f = vec![];
+            f.extend((name.len() as u32).to_le_bytes());
+            f.extend(name.as_bytes());
+            f.extend([0u8; 13]);
+            f.extend(1u32.to_le_bytes());
+            f.extend(16u32.to_le_bytes());
+            f.extend(8u32.to_le_bytes());
+            f.extend(24u32.to_le_bytes());
+            f.extend(0i32.to_le_bytes());
+            f.extend(0i32.to_le_bytes());
+            f.push(1);
+            f.extend((-1i32).to_le_bytes());
+            f.extend(255i32.to_le_bytes());
+            f.push(0);
+            f.extend(0u32.to_le_bytes());
+            let raw: Vec<u8> = bgr.iter().copied().cycle().take(16 * 3 * 8).collect();
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            z.write_all(&raw).unwrap();
+            let z = z.finish().unwrap();
+            f.extend((z.len() as u32).to_le_bytes());
+            f.extend(&z);
+            f.extend(0u32.to_le_bytes());
+            f
+        };
+        let mut d = b"Gale106".to_vec();
+        d.extend((hs as u32).to_le_bytes());
+        d.extend(&hdr);
+        d.extend(frame([0, 0, 0], "Frame0"));
+        d.extend(frame([0, 0, 255], "Frame1"));
+        d.extend(b"\x05\x00\x00\x00junk!\x00\x00");
+        d.extend(frame([0, 255, 0], "Frame2"));
+        let img = decode(&d).unwrap();
+        assert_eq!(&img.rgba[0..4], &[0, 0, 0, 255]);
+        assert_eq!(img.frames.len(), 2);
+        assert_eq!(&img.frames[0][0..4], &[255, 0, 0, 255]);
+        assert_eq!(&img.frames[1][0..4], &[0, 255, 0, 255]);
+        assert_eq!(img.delays, vec![DEFAULT_FRAME_MS; 3]);
+        assert!(stats(&d).unwrap().contains("frames 3 (parsed 3)"));
+    }
+    #[test]
+    fn truncated_zlib_tolerated() {
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&[7u8; 1000]).unwrap();
+        let z = z.finish().unwrap();
+        let out = inflate(&z[..z.len() - 6]).unwrap();
+        assert!(!out.is_empty() && out.iter().all(|&b| b == 7));
     }
     #[test]
     fn xml_attr() {

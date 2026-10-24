@@ -116,6 +116,9 @@ pub struct Vm {
     cabinets: HashMap<String, Vec<crate::scene::Obj>>,
     /// Temporizadores activos: objeto -> próximo disparo (ms).
     timers: HashMap<String, f64>,
+    /// Animaciones GAL: objeto -> (archivo, inicio ms o None si aún no cargó).
+    anims: HashMap<String, (String, Option<f64>)>,
+    anim_clock: f64,
     /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
     cinemas: HashMap<String, f64>,
     /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
@@ -165,6 +168,8 @@ impl Vm {
             root_props: HashMap::new(),
             cabinets: HashMap::new(),
             timers: HashMap::new(),
+            anims: HashMap::new(),
+            anim_clock: 0.0,
             cinemas: HashMap::new(),
             enabled: HashMap::new(),
             selected: HashMap::new(),
@@ -470,6 +475,83 @@ impl Vm {
         }
     }
 
+    /// Registra un objeto de imagen para animar si su GAL tiene varios frames.
+    fn watch_anim(&mut self, obj: &str, src: &str) {
+        match self.assets.data().resolve(src, IMAGE_EXTS) {
+            Some(n) => {
+                self.anims.insert(obj.to_string(), (n, None));
+            }
+            None => {
+                self.anims.remove(obj);
+            }
+        }
+    }
+
+    /// Avanza animaciones GAL: frame por tiempo (duraciones del archivo), bucle con
+    /// PR_REPEAT, pausa con PR_PAUSED. Mientras anima PR_PLAYING = true; al terminar
+    /// (sin repetición) queda en el último frame, PLAYING = false y se dispara ONPLAYEND.
+    fn update_anims(&mut self) {
+        let dt = (self.now - self.anim_clock).max(0.0);
+        self.anim_clock = self.now;
+        let names: Vec<String> = self.anims.keys().cloned().collect();
+        for n in names {
+            let Some(o) = self.scene.get(&n) else {
+                self.anims.remove(&n);
+                continue;
+            };
+            let paused = o.get(Prop::PAUSED).is_some_and(|v| v.truthy());
+            let repeat = o.get(Prop::REPEAT).is_some_and(|v| v.truthy());
+            let (file, start) = self.anims[&n].clone();
+            let delays = match self.assets.try_get(&file) {
+                Some(crate::assets::Asset::Image(img)) => img.delays.clone(),
+                Some(_) => vec![],
+                None => continue, // aún cargando
+            };
+            if delays.len() < 2 {
+                self.anims.remove(&n);
+                continue;
+            }
+            let total: f64 = delays.iter().map(|d| *d as f64).sum::<f64>().max(1.0);
+            let start = match start {
+                Some(s) => s,
+                None => {
+                    log::debug!("GAL animation {n}: {} frames, {total} ms", delays.len());
+                    self.now
+                }
+            };
+            let mut start = start;
+            if paused {
+                // congelar: el inicio avanza con el reloj
+                start += dt;
+            }
+            let mut el = self.now - start;
+            if self.skip && !repeat {
+                el = total;
+            }
+            let done = !repeat && el >= total;
+            let t = if repeat { el.rem_euclid(total) } else { el.min(total - 0.001) };
+            let mut acc = 0.0;
+            let mut idx = delays.len() - 1;
+            for (i, d) in delays.iter().enumerate() {
+                acc += *d as f64;
+                if t < acc {
+                    idx = i;
+                    break;
+                }
+            }
+            if let Some(o) = self.scene.get_mut(&n) {
+                o.frame = idx;
+                o.props.insert(Prop::PLAYING, Value::Bool(!done));
+            }
+            if done {
+                self.anims.remove(&n);
+                self.fire(&n, Prop::ONPLAYEND, vec![]);
+            } else {
+                self.anims.insert(n, (file, Some(start)));
+            }
+        }
+    }
+
     fn update_cinemas(&mut self) {
         let done: Vec<String> = self.cinemas.iter().filter(|(_, t)| **t <= self.now || self.skip).map(|(n, _)| n.clone()).collect();
         for n in done {
@@ -534,6 +616,7 @@ impl Vm {
             }
         }
         self.update_timers();
+        self.update_anims();
         self.update_cinemas();
         self.dispatch_events();
         self.yielded = false;
@@ -848,6 +931,9 @@ impl Vm {
                         log::warn!("asset not found: {src:?} for {name}");
                     }
                 }
+                if matches!(kind, CmdType::ImgNew | CmdType::Button | CmdType::MapImgNew) && !src.is_empty() {
+                    self.watch_anim(&name, &src);
+                }
                 if kind == CmdType::Cinema {
                     // Sin decodificador de vídeo: placeholder temporizado (PR_DURATION o
                     // opción cinema_ms), saltable con clic; al terminar dispara ONPLAYEND.
@@ -934,6 +1020,10 @@ impl Vm {
                             && let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
                                 self.assets.request(&n);
                             }
+                        if p == Prop::SOURCE && self.scene.get(&obj).is_some() {
+                            let src = v.as_str();
+                            self.watch_anim(&obj, &src);
+                        }
                         if obj == ROOT {
                             log::debug!("SetProp on root layer: {} = {v:?}", crate::lsb::prop_name(p));
                             self.root_props.insert(p, v);
@@ -1306,6 +1396,28 @@ impl Vm {
             "StatusFontName" => Value::Str(String::new()),
             _ => return None,
         })
+    }
+
+    /// Solo --trace: lo que haría un usuario al hacer clic en la caja de mensajes cuando el
+    /// script espera: su ONLBTNUP/ONLBTNDOWN, o si no tiene, su ONPLAYEND (texto ya
+    /// terminado). Solo cajas sin texto en reproducción.
+    pub fn click_message(&mut self) -> Option<String> {
+        let cands: Vec<String> = self
+            .scene
+            .draw_order()
+            .into_iter()
+            .rev()
+            .filter(|o| o.kind == Kind::Message && !self.plays.contains_key(&o.name))
+            .map(|o| o.name.clone())
+            .collect();
+        for n in cands {
+            for p in [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONPLAYEND] {
+                if self.fire(&n, p, vec![]) {
+                    return Some(format!("{n}.{}", crate::lsb::prop_name(p)));
+                }
+            }
+        }
+        None
     }
 
     /// Solo --trace: dispara el manejador de clic de algún objeto visible (rotando).

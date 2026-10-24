@@ -365,6 +365,15 @@ fn image_for(
             }
             let t = upload(tc, img.w, img.h, &img.rgba, filter)?;
             gfx.images.insert(name.clone(), (t, img.w, img.h));
+            // frames de animación GAL como texturas "nombre#i"
+            for (i, f) in img.frames.iter().enumerate() {
+                if let Some(t) = upload(tc, img.w, img.h, f, filter) {
+                    gfx.images.insert(format!("{name}#{}", i + 1), (t, img.w, img.h));
+                }
+            }
+            if !img.frames.is_empty() {
+                log::debug!("texture {name}: {} animation frames, delays {:?}", img.frames.len() + 1, img.delays);
+            }
         } else {
             return None;
         }
@@ -417,6 +426,7 @@ fn draw_scene(
                     st!() = "loading (texture not ready)";
                     continue;
                 };
+                let key = if o.frame > 0 && gfx.images.contains_key(&format!("{key}#{}", o.frame)) { format!("{key}#{}", o.frame) } else { key };
                 let (t, iw, ih) = gfx.images.get_mut(&key).unwrap();
                 let (iw, ih) = (*iw, *ih);
                 if ow <= 0 || oh <= 0 {

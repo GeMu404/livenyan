@@ -329,6 +329,13 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
                 println!("[{t:>8.0}ms] auto-select menu {m}");
             }
         }
+        // el script espera y no hay texto pendiente: clic en la caja de mensajes
+        if idle > 0 && idle % 30 == 0 && idle % 60 != 0 {
+            if let Some(m) = vm.click_message() {
+                clicks += 1;
+                println!("[{t:>8.0}ms] auto-click on message box {m}");
+            }
+        }
         if idle > 0 && idle % 60 == 0 {
             if let Some(o) = vm.auto_fire(fired) {
                 fired += 1;
