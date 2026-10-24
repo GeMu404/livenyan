@@ -64,3 +64,21 @@ fn paramstr_per_frame() {
     assert!(s.contains("restored_ok = 1"), "{s}");
     assert!(s.contains("state=ended"), "{s}");
 }
+
+/// Regresión: While con End = índice tras el WhileLoop + If/Elseif dentro; ListCompo;
+/// SetProp con índice numérico base 0 (3=LEFT, 4=TOP); IsDelimiter; Timer.
+#[test]
+fn while_end_listcompo_props_timer() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt4")]);
+    for want in ["SetProp \"c1\".LEFT", "SetProp \"c2\".TOP", "While -> false", "Calc after = 1", "Calc delim = 1", "event tm.ONPLAYEND -> tick.lsc", "state=ended", "# unimplemented: none"] {
+        assert!(s.contains(want), "missing {want:?}\n{s}");
+    }
+    assert_eq!(s.matches("While -> true").count() >= 2, true);
+}
+
+/// El detector de estancamiento de --trace debe atrapar bucles que repiten SetProp.
+#[test]
+fn trace_detects_busy_loop() {
+    let s = run(&["--trace", "--steps", "10000000", &fx("evt5")]);
+    assert!(s.contains("# stalled at"), "{s}");
+}

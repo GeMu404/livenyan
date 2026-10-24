@@ -274,6 +274,12 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
         Func::STRINGOFCHAR => Value::Str(s(0).repeat(n(1).max(0) as usize)),
         Func::STRINGREPLACE => Value::Str(s(0).replace(&s(1), &s(2))),
         Func::CHR => Value::Str(char::from_u32(n(0) as u32).map(String::from).unwrap_or_default()),
+        // Delphi IsDelimiter(Delimiters, S, Index): ¿S[Index] (base 1) está en Delimiters?
+        Func::ISDELIMITER => {
+            let c = chars(&s(1));
+            let i = n(2);
+            Value::Bool(i >= 1 && (i as usize) <= c.len() && s(0).contains(c[i as usize - 1]))
+        }
         Func::ORD => Value::Int(s(0).chars().next().map(|c| c as i64).unwrap_or(0)),
         Func::EXTRACTFILENAME => Value::Str(s(0).rsplit(['\\', '/']).next().unwrap_or("").to_string()),
         Func::EXTRACTFILEEXT => {

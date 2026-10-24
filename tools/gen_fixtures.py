@@ -167,6 +167,55 @@ add(C.Calc, indent=1, Calc=expr(to("restored_ok", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt3, "p.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
+# --- evt4/: While con End = índice tras el WhileLoop (como en juegos reales) y cadena
+# If/Elseif dentro; ListCompo; SetProp con índice de propiedad numérico (base 0);
+# IsDelimiter; Timer que dispara su manejador ---
+evt4 = os.path.join(out, "evt4"); os.makedirs(evt4, exist_ok=True)
+enable(C.CommandType.ImgNew, PT.PR_PARENT)
+enable(C.CommandType.Timer, PT.PR_NAME, PT.PR_DELAY, PT.PR_ONPLAYEND)
+def fn(name, f, *ops): return OpeData(T.Func, name, func=f, operands=list(ops))
+cmds = []; n = 0
+add(C.VarNew, Name="__tick", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("par"))}))
+add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("c1")), PT.PR_PARENT: lit(S("par"))}))
+add(C.ImgNew, components=comps(C.CommandType.ImgNew, {PT.PR_NAME: lit(S("c2")), PT.PR_PARENT: lit(S("par"))}))
+add(C.Calc, Calc=expr(fn("____arg", F.ListCompo, V("ss"), I(0), S("par"))))
+add(C.WhileInit, Calc=expr(to("i", I(0))))
+w = add(C.While, Calc=expr(fn("____1", F.GetArraySize, V("ss")), op(T.Small, "____arg", V("i"), V("____1"))), End=0)
+add(C.If, indent=1, Calc=expr(op(T.Equal, "____arg", V("i"), I(0))))
+add(C.Calc, indent=2, Calc=expr(to("tmpy", I(0))))
+add(C.Elseif, indent=1, Calc=expr(op(T.Equal, "____arg", V("i"), I(1))))
+add(C.Calc, indent=2, Calc=expr(to("tmpy", I(5))))
+add(C.SetProp, indent=1, ObjName=expr(OpeData(T.DimTo, "____arg", operands=[V("ss"), V("i")])), ObjProp=lit(I(3)), Value=expr(op(T.Plus, "____arg", V("i"), I(10))))
+add(C.SetProp, indent=1, ObjName=expr(OpeData(T.DimTo, "____arg", operands=[V("ss"), V("i")])), ObjProp=lit(I(4)), Value=expr(to("____arg", V("tmpy"))))
+wl = add(C.WhileLoop, Calc=expr(op(T.Plus, "____1", V("i"), I(1)), to("i", V("____1"))), Start=w)
+cmds[w].args["End"] = wl + 1
+add(C.Calc, Calc=expr(to("after", I(1))))
+add(C.If, Calc=expr(fn("____arg", F.IsDelimiter, S(",;"), S("a;b"), I(2))))
+add(C.Calc, indent=1, Calc=expr(to("delim", I(1))))
+add(C.Timer, components=comps(C.CommandType.Timer, {PT.PR_NAME: lit(S("tm")), PT.PR_DELAY: lit(I(100)), PT.PR_ONPLAYEND: lit(S("tick.lsc"))}))
+w = add(C.While, Calc=expr(op(T.Equal, "____arg", V("__tick"), I(0))), End=0)
+add(C.Calc, indent=1, Calc=expr(to("spin", I(1))))
+wl = add(C.WhileLoop, Calc=expr(), Start=w)
+cmds[w].args["End"] = wl + 1
+add(C.Exit, Calc=expr())
+open(os.path.join(evt4, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__tick", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt4, "tick.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt5/: bucle infinito con efectos repetidos (SetProp): --trace debe declararlo estancado ---
+evt5 = os.path.join(out, "evt5"); os.makedirs(evt5, exist_ok=True)
+cmds = []; n = 0
+add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("b"))}))
+w = add(C.While, Calc=expr(op(T.Equal, "____arg", I(1), I(1))), End=0)
+add(C.SetProp, indent=1, ObjName=lit(S("b")), ObjProp=lit(I(3)), Value=lit(I(1)))
+wl = add(C.WhileLoop, Calc=expr(), Start=w)
+cmds[w].args["End"] = wl + 1
+add(C.Exit, Calc=expr())
+open(os.path.join(evt5, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
 # --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3

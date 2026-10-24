@@ -86,8 +86,11 @@ pub struct Scene {
 /// Convierte el valor de ObjProp (id numérico o nombre) en PropertyType.
 pub fn prop_of(v: &Value) -> Option<u8> {
     match v {
-        Value::Int(i) if (0..=255).contains(i) => Some(*i as u8),
-        Value::Str(s) => s.trim().parse::<u8>().ok().or_else(|| prop_id(s.trim())),
+        // Los índices numéricos de propiedad son base 0 (igual que los bits de command_params:
+        // bit j -> PropertyType j+1). Confirmado con un juego real: 1=PARENT, 3=LEFT, 4=TOP.
+        Value::Int(i) if (0..=254).contains(i) => Some(*i as u8 + 1),
+        Value::Float(f) if (0.0..=254.0).contains(f) => Some(*f as u8 + 1),
+        Value::Str(s) => s.trim().parse::<u8>().ok().filter(|&i| i < 255).map(|i| i + 1).or_else(|| prop_id(s.trim())),
         _ => None,
     }
 }
@@ -144,6 +147,36 @@ impl Scene {
             }
         }
         out
+    }
+
+    /// Hijos (PR_PARENT == name) en orden de creación; `recursive` incluye descendientes.
+    pub fn children(&self, name: &str, recursive: bool) -> Vec<String> {
+        let mut out = vec![];
+        let mut todo = vec![name.to_string()];
+        while let Some(p) = todo.pop() {
+            let mut v: Vec<&Obj> = self.objs.values().filter(|o| o.str(Prop::PARENT) == p).collect();
+            v.sort_by_key(|o| o.seq);
+            for o in v {
+                out.push(o.name.clone());
+                if recursive {
+                    todo.push(o.name.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Saca objetos de la escena (para SaveCabinet).
+    pub fn take(&mut self, name: &str) -> Option<Obj> {
+        self.objs.remove(name)
+    }
+
+    pub fn put(&mut self, o: Obj) {
+        self.objs.insert(o.name.clone(), o);
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.objs.keys().cloned().collect()
     }
 
     pub fn delete(&mut self, name: &str) -> usize {

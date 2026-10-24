@@ -101,6 +101,11 @@ pub struct Vm {
     pub unimpl: std::collections::BTreeMap<String, u64>,
     pub db: crate::db::Db,
     history_max: i64,
+    cabinets: HashMap<String, Vec<crate::scene::Obj>>,
+    /// Temporizadores activos: objeto -> próximo disparo (ms).
+    timers: HashMap<String, f64>,
+    /// Posiciones (script, pc) distintas ejecutadas: para detectar bucles sin progreso.
+    pub visited: std::collections::HashSet<(usize, usize)>,
     /// Objetos de mensaje creados implícitamente por TextIns: su texto espera al MesNew real.
     placeholders: std::collections::HashSet<String>,
     /// Objetos cuyo texto terminó sin manejador ONPLAYEND (se dispara si se asigna después).
@@ -135,6 +140,9 @@ impl Vm {
             unimpl: Default::default(),
             db: Default::default(),
             history_max: 0,
+            cabinets: HashMap::new(),
+            timers: HashMap::new(),
+            visited: Default::default(),
             placeholders: Default::default(),
             ended_unnotified: Default::default(),
         };
@@ -153,10 +161,10 @@ impl Vm {
     /// Firma de progreso para --trace: pila de scripts y número de comandos "con efecto"
     /// (no cuenta control de flujo, así un While de espera cuenta como inactivo).
     pub fn progress_sig(&self) -> (String, u64) {
+        // Progreso = ejecutar algún comando nunca visto. Un bucle (de espera o de un
+        // manejador) que repite las mismas posiciones cuenta como inactivo.
         let stack: Vec<&str> = self.frames.iter().map(|f| f.script.name.as_str()).collect();
-        let ctrl = ["If", "Elseif", "Else", "While", "WhileInit", "WhileLoop", "Label", "Jump", "Wait", "Calc", "VarNew", "Continue", "Break"];
-        let work: u64 = self.stats.iter().filter(|(k, _)| !ctrl.contains(k)).map(|(_, v)| *v).sum();
-        (stack.join(">"), work)
+        (stack.first().copied().unwrap_or_default().to_string(), self.visited.len() as u64)
     }
 
     fn warn(&mut self, key: &str, msg: &str) {
@@ -398,6 +406,34 @@ impl Vm {
         }
     }
 
+    /// Timer: dispara su manejador cada PR_DELAY ms (una vez salvo PR_REPEAT).
+    /// Qué propiedad de evento usa el Timer original no está documentado: se prueba
+    /// ONPLAYEND, luego ONNOTIFY, ONPLAYING e ONIDLE.
+    fn update_timers(&mut self) {
+        let due: Vec<String> = self.timers.iter().filter(|(_, t)| **t <= self.now).map(|(n, _)| n.clone()).collect();
+        for n in due {
+            let Some(o) = self.scene.get(&n) else {
+                self.timers.remove(&n);
+                continue;
+            };
+            if o.get(Prop::PAUSED).is_some_and(|v| v.truthy()) {
+                continue;
+            }
+            let delay = o.get(Prop::DELAY).map(|v| v.as_f64()).unwrap_or(0.0).max(1.0);
+            let repeat = o.get(Prop::REPEAT).is_some_and(|v| v.truthy());
+            for p in [Prop::ONPLAYEND, Prop::ONNOTIFY, Prop::ONPLAYING, Prop::ONIDLE] {
+                if self.fire(&n, p, vec![]) {
+                    break;
+                }
+            }
+            if repeat {
+                self.timers.insert(n, self.now + delay);
+            } else {
+                self.timers.remove(&n);
+            }
+        }
+    }
+
     /// Ejecuta manejadores encolados como llamadas-interrupción.
     fn dispatch_events(&mut self) {
         if matches!(self.state, State::Menu { .. } | State::Ended) || self.frames.len() > 200 {
@@ -434,6 +470,7 @@ impl Vm {
                 self.state = State::Running;
             }
         }
+        self.update_timers();
         self.dispatch_events();
         self.yielded = false;
         let mut n = 0;
@@ -488,6 +525,28 @@ impl Vm {
 
     /// Resuelve un destino de bucle: índice de comando (como en pylivemaker) y,
     /// si no cuadra con el tipo esperado, se intenta como LineNo.
+    /// Destino de salida de un While/Break: pylivemaker guarda en End el índice del comando
+    /// siguiente al WhileLoop (no el WhileLoop). Se aceptan ambas formas y, si no, se busca
+    /// estructuralmente el WhileLoop cuyo Start apunta a este While.
+    fn loop_exit(script: &Lsb, v: u32, while_pc: Option<usize>) -> usize {
+        let i = v as usize;
+        let is_wl = |k: usize| script.commands.get(k).is_some_and(|c| CmdType::from(c.kind) == CmdType::WhileLoop);
+        if is_wl(i) {
+            return i + 1;
+        }
+        if i > 0 && is_wl(i - 1) {
+            return i;
+        }
+        if let Some(w) = while_pc {
+            if let Some(k) = (w + 1..script.commands.len())
+                .find(|&k| is_wl(k) && script.commands[k].u32("Start").map(|s| Self::loop_target(script, s, CmdType::While)) == Some(w))
+            {
+                return k + 1;
+            }
+        }
+        Self::loop_target(script, v, CmdType::WhileLoop) + 1
+    }
+
     fn loop_target(script: &Lsb, v: u32, want: CmdType) -> usize {
         let i = v as usize;
         if script.commands.get(i).is_some_and(|c| CmdType::from(c.kind) == want) {
@@ -538,6 +597,7 @@ impl Vm {
         if pc % 32 == 0 {
             self.prefetch_from(&script, pc);
         }
+        self.visited.insert((Arc::as_ptr(&script) as *const u8 as usize, pc));
         let c = &script.commands[pc];
         self.steps += 1;
         *self.stats.entry(c.name()).or_default() += 1;
@@ -654,7 +714,7 @@ impl Vm {
             CmdType::While => {
                 let ok = self.eval_bool(c.expr("Calc"), true);
                 if !ok {
-                    next = Self::loop_target(&script, c.u32("End").unwrap_or(0), CmdType::WhileLoop) + 1;
+                    next = Self::loop_exit(&script, c.u32("End").unwrap_or(0), Some(pc));
                 }
                 detail = format!("-> {ok}");
             }
@@ -669,7 +729,7 @@ impl Vm {
             }
             CmdType::Break => {
                 if self.eval_bool(c.expr("Calc"), true) {
-                    next = Self::loop_target(&script, c.u32("End").unwrap_or(0), CmdType::WhileLoop) + 1;
+                    next = Self::loop_exit(&script, c.u32("End").unwrap_or(0), None);
                 }
             }
             CmdType::Continue => {
@@ -704,7 +764,11 @@ impl Vm {
                         self.assets.request(&n);
                     }
                 detail = format!("name={name:?}{}", if src.is_empty() { String::new() } else { format!(" src={src:?}") });
-                if matches!(kind, CmdType::Timer | CmdType::Cinema | CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
+                if kind == CmdType::Timer {
+                    let d = props.get(&Prop::DELAY).map(|v| v.as_f64()).unwrap_or(0.0).max(1.0);
+                    self.timers.insert(name.clone(), self.now + d);
+                }
+                if matches!(kind, CmdType::Cinema | CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
                     self.warn(&format!("unimpl:cmd {} (placeholder)", c.name()), &format!("{} only creates a placeholder object", c.name()));
                 }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
@@ -843,10 +907,63 @@ impl Vm {
                 }
             }
             CmdType::Flip => {
-                // Transiciones: se aplican de forma instantánea por ahora.
-                let t = self.eval(c.expr("Time")).as_f64();
-                detail = format!("{t}ms (instant)");
-                self.warn("unimpl:cmd Flip (instant)", "Flip transitions are applied instantly");
+                // Transición: el efecto visual es un corte, pero se respeta su duración
+                // (el script espera, saltable) y Delete borra los objetos al terminar.
+                let t = self.eval(c.expr("Time")).as_f64().max(0.0);
+                let targets: Vec<String> = c.exprs("Targets").to_vec().iter().map(|e| eval(e, self).as_str()).collect();
+                let del = self.eval_bool(c.expr("Delete"), false);
+                if del {
+                    for n in &targets {
+                        self.scene.delete(n);
+                    }
+                }
+                detail = format!("{t}ms targets={} delete={del}", targets.len());
+                if t > 0.0 && !self.skip {
+                    self.state = State::WaitUntil { until: self.now + t, skippable: true };
+                }
+            }
+            CmdType::SaveCabinet | CmdType::LoadCabinet => {
+                let props = self.props_of(c);
+                let cab = props.get(&Prop::NAME).map(|v| v.as_str()).unwrap_or_default();
+                let act = self.eval_bool(c.expr("Act"), false);
+                let targets: Vec<String> = c.exprs("Targets").to_vec().iter().map(|e| eval(e, self).as_str()).filter(|s| !s.is_empty()).collect();
+                if kind == CmdType::SaveCabinet {
+                    // Act=false: guarda los indicados; Act=true: todos menos los indicados
+                    let sel: Vec<String> = if act {
+                        self.scene.names().into_iter().filter(|n| !targets.contains(n)).collect()
+                    } else {
+                        targets.clone()
+                    };
+                    let mut saved = vec![];
+                    for n in &sel {
+                        let mut all = vec![n.clone()];
+                        all.extend(self.scene.children(n, true));
+                        for k in all {
+                            if let Some(o) = self.scene.take(&k) {
+                                saved.push(o);
+                            }
+                        }
+                    }
+                    detail = format!("{cab:?} saved {}", saved.len());
+                    self.cabinets.insert(cab, saved);
+                } else {
+                    let objs = self.cabinets.remove(&cab).unwrap_or_default();
+                    let mut keep = vec![];
+                    let mut n = 0;
+                    for o in objs {
+                        let want = targets.is_empty() || targets.contains(&o.name) != act;
+                        if want {
+                            self.scene.put(o);
+                            n += 1;
+                        } else {
+                            keep.push(o);
+                        }
+                    }
+                    if !keep.is_empty() {
+                        self.cabinets.insert(cab.clone(), keep);
+                    }
+                    detail = format!("{cab:?} restored {n}");
+                }
             }
             CmdType::DoEvent => self.yielded = true,
             CmdType::FormatHist | CmdType::ClrHist | CmdType::CallHist | CmdType::ClrRead => {
@@ -1093,6 +1210,17 @@ impl Env for Vm {
             Func::GETENABLED => Value::Bool(true),
             Func::INCABINET | Func::FILEEXISTS => Value::Bool(self.assets.data().find(&s(0)).is_some()),
             Func::GETHISTORYCOUNT => Value::Int(0),
+            // ListCompo(arr, modo, objeto): nombres de los componentes hijos de `objeto`
+            // en orden de creación (modo != 0: también descendientes; semántica inferida).
+            Func::LISTCOMPO => {
+                let list = self.scene.children(&s(2), a.get(1).map(|v| v.as_int() != 0).unwrap_or(false));
+                let n = list.len() as i64;
+                if let Some(Param::Var(var)) = raw.first() {
+                    let var = var.clone();
+                    self.assign(&var, Value::Array(list.into_iter().map(Value::Str).collect()));
+                }
+                Value::Int(n)
+            }
             Func::GETHISTORYMAXCOUNT => Value::Int(self.history_max),
             Func::SETHISTORYMAXCOUNT => {
                 self.history_max = a.first().map(|v| v.as_int()).unwrap_or(0);
