@@ -12,4 +12,5 @@ pub mod game;
 pub mod lsb;
 pub mod scene;
 pub mod util;
+pub mod lpm;
 pub mod vm;

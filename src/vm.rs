@@ -73,6 +73,24 @@ struct Frame {
     sender: Option<String>,
 }
 
+/// Botón de un PrevMenu, en coordenadas relativas al objeto.
+#[derive(Debug, Clone)]
+pub struct PmButton {
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    pub src: String,
+    pub src_selected: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrevMenu {
+    pub buttons: Vec<PmButton>,
+    pub hover: Option<usize>,
+}
+
 /// Evento de objeto encolado (se ejecuta como llamada-interrupción entre frames).
 #[derive(Debug, Clone)]
 pub struct ObjEvent {
@@ -131,6 +149,10 @@ pub struct Vm {
     /// Último estado (tipo y propiedades) de objetos borrados, por nombre.
     graveyard: HashMap<String, (Kind, HashMap<u8, Value>)>,
     play_dbg: HashMap<String, f64>,
+    /// Menús de previsualización (.lpm) por nombre de objeto.
+    pub prevmenus: HashMap<String, PrevMenu>,
+    /// LIVENYAN_CONDS=<parte del nombre de script>: condiciones a debug (también en GUI).
+    cond_filter: Option<String>,
     /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
     cinemas: HashMap<String, f64>,
     /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
@@ -185,6 +207,8 @@ impl Vm {
             last_text_target: None,
             graveyard: HashMap::new(),
             play_dbg: HashMap::new(),
+            prevmenus: HashMap::new(),
+            cond_filter: std::env::var("LIVENYAN_CONDS").ok().filter(|s| !s.is_empty()),
             cinemas: HashMap::new(),
             enabled: HashMap::new(),
             selected: HashMap::new(),
@@ -385,7 +409,8 @@ impl Vm {
             // efecto WAIT pendiente: animación o fundido del objeto aún en curso
             let waiting_obj = self.plays.get(&n).and_then(|p| p.wait_for.clone());
             if let Some((o, deadline)) = waiting_obj {
-                let busy = self.scene.get(&o).is_some() && (self.anims.contains_key(&o) || self.scene.motions.iter().any(|m| m.obj == o));
+                let repeat = self.scene.get(&o).is_some_and(|x| x.get(Prop::REPEAT).is_some_and(|v| v.truthy()));
+                let busy = self.scene.get(&o).is_some() && ((!repeat && self.anims.contains_key(&o)) || self.scene.motions.iter().any(|m| m.obj == o));
                 if busy && self.now < deadline && !self.skip {
                     self.play_debug(&n, &format!("waiting-for-effect on {o:?}"));
                     continue;
@@ -412,6 +437,17 @@ impl Vm {
                 if p.next > self.now + 1.0 && p.pos >= p.cur.len() {
                     break; // espera temporizada (WAIT de efecto con tiempo)
                 }
+                if p.waiting_click && !self.skip {
+                    let hidden = self.scene.get(&n).is_none_or(|o| !self.scene.effective_visible(o));
+                    if hidden {
+                        log::debug!("text on {n}: click-wait skipped (message box hidden)");
+                        if let Some(p) = self.plays.get_mut(&n) {
+                            p.waiting_click = false;
+                        }
+                        continue;
+                    }
+                }
+                let Some(p) = self.plays.get_mut(&n) else { break };
                 if p.waiting_click {
                     if self.skip {
                         p.waiting_click = false;
@@ -698,6 +734,16 @@ impl Vm {
     // ---------- ejecución ----------
 
     fn goto_script(&mut self, page: &str, label: u32, push: bool, result_var: String, params: Vec<Value>) -> bool {
+        // manejadores "script.lsc:ETIQUETA": empiezan en el comando Label con ese nombre
+        let mut label = label;
+        let mut named: Option<String> = None;
+        let page = match page.rsplit_once(':') {
+            Some((a, l)) if !l.is_empty() && !l.contains(['\\', '/', '.']) && [".lsc", ".lsb"].iter().any(|x| a.to_lowercase().ends_with(x)) => {
+                named = Some(l.to_string());
+                a
+            }
+            _ => page,
+        };
         let data = self.assets.data().clone();
         let cur = self.frames.last().map(|f| f.script.clone());
         let script = match (&cur, page.is_empty()) {
@@ -717,6 +763,15 @@ impl Vm {
                 }
             }
         };
+        if let Some(l) = &named {
+            match script.commands.iter().position(|c| CmdType::from(c.kind) == CmdType::Label && c.str("Name") == Some(l.as_str())) {
+                Some(i) => label = i as u32,
+                None => {
+                    self.warn(&format!("label:{}:{l}", script.name), &format!("label {l:?} not found in {}", script.name));
+                }
+            }
+        }
+        log::debug!("enter {}:{label}{} ({})", script.name, named.as_ref().map(|l| format!(" (label {l:?})")).unwrap_or_default(), if push { "call" } else { "jump" });
         let pc = (label as usize).min(script.commands.len());
         if self.script_log.len() < 1_000_000 {
             self.script_log.push(script.name.clone());
@@ -1020,6 +1075,9 @@ impl Vm {
                     }
                 }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
+                if kind == CmdType::PrevMenuNew {
+                    self.load_prevmenu(&name, &src);
+                }
                 self.object_defined(&name);
             }
             CmdType::Menu => {
@@ -1137,6 +1195,7 @@ impl Vm {
                     );
                     self.plays.remove(&o.name);
                     self.placeholders.remove(&o.name);
+                    self.prevmenus.remove(&o.name);
                     gone.push(o.name.clone());
                     self.graveyard.insert(o.name.clone(), (o.kind, o.props));
                 }
@@ -1280,7 +1339,8 @@ impl Vm {
     /// de escenario (fuera de ノベルシステム\) y las 2 primeras veces por (posición, resultado).
     /// Cadenas como <N chars> salvo --show-text.
     fn cond_trace(&mut self, s: &Lsb, pc: usize, c: &Command, ok: bool) {
-        if !self.opts.trace || !self.opts.trace_conds || s.name.starts_with("ノベルシステム") {
+        let dbg = self.cond_filter.as_ref().is_some_and(|f| s.name.contains(f.as_str()));
+        if !dbg && (!self.opts.trace || !self.opts.trace_conds || s.name.starts_with("ノベルシステム")) {
             return;
         }
         let k = (s as *const Lsb as usize, pc, ok);
@@ -1307,7 +1367,7 @@ impl Vm {
                 }
             }
         }
-        println!(
+        let line = format!(
             "[{:>8.0}ms] cond {}:{} {} {} -> {ok} {{{}}}",
             self.now,
             s.name,
@@ -1316,6 +1376,11 @@ impl Vm {
             e.render(!self.opts.show_text),
             vars.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join(", ")
         );
+        if dbg {
+            log::debug!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 
     /// If falso: busca la siguiente rama Elseif/Else del mismo nivel, o el final del bloque.
@@ -1423,9 +1488,107 @@ impl Vm {
             }
         }
         flush(&mut plan, &mut cur);
+        if log::log_enabled!(log::Level::Debug) {
+            let tags: Vec<String> = tw
+                .body
+                .iter()
+                .filter_map(|g| match g {
+                    Glyph::Return { kind } => Some(format!("Return({kind})")),
+                    Glyph::Event { event } => Some(format!("Event({})", event.trim_start_matches('\x01').split("\r\n").next().unwrap_or(""))),
+                    Glyph::Img { .. } => Some("Img".into()),
+                    _ => None,
+                })
+                .collect();
+            log::debug!("TextIns {target}: {} glyphs, tags {tags:?}", tw.body.len());
+        }
         self.start_play(target, plan);
         if wait && !self.placeholders.contains(target) {
             self.state = State::WaitText { target: target.to_string() };
+        }
+    }
+
+    /// Carga los botones de un .lpm. Posición: si los dos primeros enteros del botón
+    /// coinciden con el tamaño de su imagen son tamaño y la posición son unk15/unk16; si no,
+    /// son la posición (sin verificar: se registran todos los números a debug).
+    fn load_prevmenu(&mut self, name: &str, src: &str) {
+        let data = self.assets.data().clone();
+        let Some(file) = data.resolve(src, &[".lpm"]) else {
+            log::warn!("PrevMenu {name}: {src:?} not found");
+            return;
+        };
+        let parsed = data.read(&file).map_err(|e| e.to_string()).and_then(|d| crate::lpm::parse(&d));
+        let (ver, btns) = match parsed {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("PrevMenu {name}: {file}: {e}");
+                return;
+            }
+        };
+        let mut pm = PrevMenu::default();
+        for (i, b) in btns.iter().enumerate() {
+            let res = data.resolve(&b.src, IMAGE_EXTS);
+            let size = res.as_ref().and_then(|r| data.read_prefix(r, 4096)).and_then(|d| crate::gal::peek_size(&d)).map(|(w, h)| (w as i64, h as i64));
+            if let Some(r) = &res {
+                self.assets.request(r);
+            }
+            if let Some(r) = data.resolve(&b.src_selected, IMAGE_EXTS) {
+                self.assets.request(&r);
+            }
+            let (w, h) = size.unwrap_or((b.a.0 as i64, b.a.1 as i64));
+            let a_is_size = size == Some((b.a.0 as i64, b.a.1 as i64));
+            let (x, y) = if a_is_size { (b.b.0 as i64, b.b.1 as i64) } else { (b.a.0 as i64, b.a.1 as i64) };
+            log::debug!(
+                "PrevMenu {name} (lpm v{ver}) button {i}: ints a=({},{}) b=({},{}) image {:?} size {:?} -> pos ({x},{y}) {w}x{h}",
+                b.a.0, b.a.1, b.b.0, b.b.1, res, size
+            );
+            pm.buttons.push(PmButton { x, y, w, h, src: b.src.clone(), src_selected: b.src_selected.clone(), name: b.name.clone() });
+        }
+        self.prevmenus.insert(name.to_string(), pm);
+    }
+
+    /// Botón de PrevMenu bajo (x, y) lógicos: (menú, índice).
+    fn prevmenu_hit(&self, x: f64, y: f64) -> Option<(String, usize)> {
+        let mut best: Option<(i64, u64, String, usize)> = None;
+        for (n, pm) in &self.prevmenus {
+            let Some(o) = self.scene.get(n) else { continue };
+            if !self.scene.effective_visible(o) {
+                continue;
+            }
+            let (ox, oy) = self.scene.abs_pos(o);
+            for (i, b) in pm.buttons.iter().enumerate() {
+                let (bx, by) = (ox + b.x as f64, oy + b.y as f64);
+                if x >= bx && y >= by && x < bx + b.w as f64 && y < by + b.h as f64 {
+                    let k = (o.int(Prop::PRIORITY, 0), o.seq);
+                    if best.as_ref().is_none_or(|b| (b.0, b.1) < k) {
+                        best = Some((k.0, k.1, n.clone(), i));
+                    }
+                }
+            }
+        }
+        best.map(|b| (b.2, b.3))
+    }
+
+    /// Movimiento del ratón: hover de PrevMenu (ONMAPIN/ONMAPOUT con @ParamStr = [nombre, índice]).
+    pub fn mouse_move(&mut self, x: f64, y: f64) {
+        let hit = self.prevmenu_hit(x, y);
+        let names: Vec<String> = self.prevmenus.keys().cloned().collect();
+        for n in names {
+            let now = hit.as_ref().filter(|h| h.0 == n).map(|h| h.1);
+            let before = self.prevmenus[&n].hover;
+            if now == before {
+                continue;
+            }
+            self.prevmenus.get_mut(&n).unwrap().hover = now;
+            let bname = |vm: &Self, i: usize| vm.prevmenus[&n].buttons.get(i).map(|b| b.name.clone()).unwrap_or_default();
+            if let Some(i) = before {
+                let p = vec![Value::Str(bname(self, i)), Value::Int(i as i64)];
+                self.fire(&n, Prop::ONMAPOUT, p);
+            }
+            if let Some(i) = now {
+                log::debug!("PrevMenu {n}: hover button {i}");
+                let p = vec![Value::Str(bname(self, i)), Value::Int(i as i64)];
+                self.fire(&n, Prop::ONMAPIN, p);
+            }
         }
     }
 
@@ -1539,6 +1702,9 @@ impl Vm {
                     }
                 };
                 log::debug!("{name} creates {kind:?} {obj:?} src={src:?} props {:?}", props.keys().map(|p| crate::lsb::prop_name(*p)).collect::<Vec<_>>());
+                if args.get(2).is_some_and(|e| e == "REPEAT") {
+                    props.insert(Prop::REPEAT, Value::Bool(true));
+                }
                 self.scene.create(&obj, kind, props);
                 if time > 0.0 {
                     self.scene.add_motion(Motion { obj: obj.clone(), prop: Prop::ALPHA, from: 0.0, to: target_alpha as f64, start: self.now, dur: time });
@@ -1548,6 +1714,19 @@ impl Vm {
                 }
                 self.object_defined(&obj);
             }
+            "DELETECG" => {
+                // [0]=nombres separados por comas, [2]=tiempo (fundido; aquí se borra ya)
+                for obj in args.first().map(|s| s.as_str()).unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let gone = self.scene.delete_names(obj);
+                    log::debug!("DELETECG {obj:?}: removed {} objects", gone.len());
+                    for o in gone {
+                        self.anims.remove(&o.name);
+                        self.prevmenus.remove(&o.name);
+                        self.graveyard.insert(o.name.clone(), (o.kind, o.props));
+                    }
+                }
+            }
+            "PLAYSND" | "STOPSND" => log::debug!("{name}: audio from text events not implemented"),
             "" => {}
             _ => {
                 if name != "WAITPLAY" {
@@ -1559,6 +1738,15 @@ impl Vm {
 
     /// Clic (izquierdo o derecho) en coordenadas lógicas: manejadores de objeto o avance.
     pub fn click_at(&mut self, x: f64, y: f64, right: bool) {
+        if !right && let Some((n, i)) = self.prevmenu_hit(x, y) {
+            // selección: ONSELECT y, al terminar (sin animación de selección), ONPLAYEND
+            let bname = self.prevmenus[&n].buttons[i].name.clone();
+            log::debug!("PrevMenu {n}: selected button {i}");
+            let p = vec![Value::Str(bname), Value::Int(i as i64)];
+            self.fire(&n, Prop::ONSELECT, p.clone());
+            self.fire(&n, Prop::ONPLAYEND, p);
+            return;
+        }
         let props: &[u8] = if right { &[Prop::ONRBTNUP, Prop::ONRBTNDOWN] } else { &[Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT] };
         if let Some(name) = self.scene.hit_handler(x, y, props).map(|o| o.name.clone()) {
             for &p in props {

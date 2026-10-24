@@ -181,7 +181,10 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                         vm.skip = false;
                     }
                 }
-                Event::MouseMotion { x, y, .. } => mouse = (x, y),
+                Event::MouseMotion { x, y, .. } => {
+                    mouse = (x, y);
+                    vm.mouse_move(x as f64, y as f64);
+                }
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => {
                     log::debug!("click at logical ({x:.0},{y:.0})");
                     mouse = (x, y);
@@ -491,6 +494,19 @@ fn draw_scene(
                 canvas.set_blend_mode(BlendMode::Blend);
                 canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
                 let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, ow as f32, oh as f32));
+            }
+            Kind::Menu if vm.prevmenus.contains_key(&o.name) => {
+                let pm = vm.prevmenus[&o.name].clone();
+                let mut n = 0;
+                for (i, b) in pm.buttons.iter().enumerate() {
+                    let src = if pm.hover == Some(i) && !b.src_selected.is_empty() { &b.src_selected } else { &b.src };
+                    let Some(key) = image_for(tc, assets, gfx, src, filter) else { continue };
+                    let (t, iw, ih) = gfx.images.get_mut(&key).unwrap();
+                    t.set_alpha_mod(alpha);
+                    let _ = canvas.copy(t, None, FRect::new((x + b.x as f64) as f32, (y + b.y as f64) as f32, *iw as f32, *ih as f32));
+                    n += 1;
+                }
+                drawn[di].extra = format!("prevmenu {n}/{} buttons drawn, hover {:?}", pm.buttons.len(), pm.hover);
             }
             Kind::Message => {
                 let Some(f) = font.as_deref_mut() else {
