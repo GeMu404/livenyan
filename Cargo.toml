@@ -1,0 +1,30 @@
+[package]
+name = "livenyan"
+description = "Reimplementación nativa (Rust + SDL3) del reproductor de LiveMaker"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+crossbeam-channel = "0.5.17"
+encoding_rs = "0.8.35"
+env_logger = "0.11.11"
+flate2 = "1.1.10"
+fontdue = "0.9.5"
+hound = "3.5.1"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
+lewton = "0.10.2"
+log = "0.4.34"
+sdl3 = { version = "0.20.0", features = ["unsafe_textures"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[features]
+default = []
+# Compila SDL3 desde fuente y lo enlaza estáticamente (útil en Windows o sin SDL3 del sistema)
+static-sdl = ["sdl3/build-from-source-static"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
