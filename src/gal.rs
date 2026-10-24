@@ -63,6 +63,8 @@ struct Info {
     compression: Option<u8>,
     block_w: i32,
     block_h: i32,
+    frames: u32,
+    version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +184,12 @@ fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32) -> R<Option<Vec<u8>>> 
 }
 
 fn parse_gale(d: &[u8]) -> R<(Info, Frame)> {
+    let (info, mut frames) = parse_gale_all(d, 1)?;
+    Ok((info, frames.remove(0)))
+}
+
+/// Gale binario: hasta `max` frames (los frames van seguidos en el archivo).
+fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut r = Rd { d, p: 0 };
     let hdr = r.take(7)?;
     let ver: u32 = std::str::from_utf8(&hdr[4..7]).ok().and_then(|s| s.parse().ok()).ok_or(GalError("bad version".into()))?;
@@ -221,7 +229,8 @@ fn parse_gale(d: &[u8]) -> R<(Info, Frame)> {
     if frame_count < 1 {
         return err("no frames");
     }
-    // primer frame
+    let mut frames = Vec::new();
+    for _ in 0..(frame_count as usize).min(max.max(1)) {
     let nl = r.usize()?;
     let _name = cp932(r.take(nl)?);
     let _mask = r.i32()?;
@@ -260,7 +269,11 @@ fn parse_gale(d: &[u8]) -> R<(Info, Frame)> {
         layers.push((Layer { left, top, visible, alpha, alpha_on }, data, a));
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    Ok((info, Frame { w, h, bpp, palette, layers }))
+    frames.push(Frame { w, h, bpp, palette, layers });
+    }
+    info.frames = frame_count as u32;
+    info.version = format!("Gale{ver}");
+    Ok((info, frames))
 }
 
 /// Atributo XML mínimo (el XML de GaleX es simple y plano).
@@ -301,6 +314,11 @@ fn tags<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
+    let (info, mut frames) = parse_galex_all(d, 1)?;
+    Ok((info, frames.remove(0)))
+}
+
+fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut r = Rd { d, p: 0 };
     let hdr = r.take(8)?;
     if &hdr[4..8] != b"X200" {
@@ -332,6 +350,8 @@ fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
         compression: Some(geti(root, "CompType", 0) as u8),
         block_w: geti(root, "BlockWidth", 0) as i32,
         block_h: geti(root, "BlockHeight", 0) as i32,
+        frames: geti(root, "Count", 1) as u32,
+        version: "GaleX200".into(),
     };
     if info.randomized {
         return err("LiveMaker Pro randomized (encrypted) images are not supported");
@@ -348,13 +368,24 @@ fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
         }
         None
     };
-    let frame_start = find_frame(0).ok_or(GalError("no Frame".into()))?;
+    let mut frames = Vec::new();
+    r.p = hs + 12;
+    let base_bpp = info.bpp;
+    let mut next = find_frame(0);
+    if next.is_none() {
+        return err("no Frame");
+    }
+    while let Some(frame_start) = next {
+    if frames.len() >= max.max(1) {
+        break;
+    }
     let frame_end = find_frame(frame_start + 6).unwrap_or(xml.len());
+    next = find_frame(frame_start + 6);
     let fx = &xml[frame_start..frame_end];
     let layers_tag = tags(fx, "Layers").into_iter().next().unwrap_or("");
     let w = geti(layers_tag, "Width", info.w as i64) as u32;
     let h = geti(layers_tag, "Height", info.h as i64) as u32;
-    let bpp = geti(layers_tag, "bpp", info.bpp as i64) as u32;
+    let bpp = geti(layers_tag, "bpp", base_bpp as i64) as u32;
     info.bpp = bpp;
     let mut palette = Vec::new();
     if bpp <= 8
@@ -364,7 +395,6 @@ fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
             palette = bytes.chunks(3).filter(|c| c.len() == 3).map(|c| [c[2], c[1], c[0]]).collect();
         }
     let mut layers = Vec::new();
-    r.p = hs + 12;
     for lt in tags(fx, "Layer") {
         let l = Layer {
             left: geti(lt, "Left", 0) as i32,
@@ -381,7 +411,78 @@ fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
         return err("no layers");
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    Ok((info, Frame { w, h, bpp, palette, layers }))
+    frames.push(Frame { w, h, bpp, palette, layers });
+    }
+    Ok((info, frames))
+}
+
+/// Estadísticas de un GAL sin exponer su contenido: versión, frames, capas, bpp,
+/// compresión, tamaño y medias de color/alfa por capa (para diagnosticar en el PC del
+/// usuario sin ver la imagen).
+pub fn quick_class(d: &[u8]) -> &'static str {
+    match decode(d) {
+        Err(_) => "error",
+        Ok(img) => {
+            let mut opaque_black = true;
+            let mut transparent = true;
+            for p in img.rgba.chunks_exact(4) {
+                if p[3] != 0 {
+                    transparent = false;
+                    if p[0] | p[1] | p[2] != 0 {
+                        opaque_black = false;
+                    }
+                }
+                if !opaque_black && !transparent {
+                    return "ok";
+                }
+            }
+            if transparent { "all-transparent" } else { "all-black" }
+        }
+    }
+}
+
+pub fn stats(d: &[u8]) -> R<String> {
+    if !d.starts_with(b"Gale") {
+        return err("not a GAL file");
+    }
+    let all = |m| if d.starts_with(b"GaleX") { parse_galex_all(d, m) } else { parse_gale_all(d, m) };
+    let (mut note, (info, frames)) = match all(64) {
+        Ok(v) => (String::new(), v),
+        Err(e) => (format!("note: only frame 0 parsed; later frames failed: {e}\n"), all(1)?),
+    };
+    let comp = match info.compression {
+        Some(0) => "0 (zlib)".to_string(),
+        Some(2) => "2 (jpeg)".to_string(),
+        Some(c) => format!("{c} (raw)"),
+        None => "none (old Gale)".to_string(),
+    };
+    let mut out = format!(
+        "version {} size {}x{} bpp {} frames {} (parsed {}) compression {} blocks {}x{}\n",
+        info.version, info.w, info.h, info.bpp, info.frames, frames.len(), comp, info.block_w, info.block_h
+    );
+    out += &std::mem::take(&mut note);
+    for (fi, f) in frames.iter().enumerate() {
+        out += &format!("frame {fi}: {}x{} bpp {} palette {} layers {}\n", f.w, f.h, f.bpp, f.palette.len(), f.layers.len());
+        for (li, (l, data, a)) in f.layers.iter().enumerate() {
+            let px = to_rgba(f, data, a.as_deref());
+            let n = (px.len() / 4).max(1) as u64;
+            let (mut r, mut g, mut b, mut al, mut nz) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for p in px.chunks_exact(4) {
+                r += p[0] as u64;
+                g += p[1] as u64;
+                b += p[2] as u64;
+                al += p[3] as u64;
+                if p[0] | p[1] | p[2] != 0 {
+                    nz += 1;
+                }
+            }
+            out += &format!(
+                "  layer {li}: pos ({},{}) visible {} alpha {} alpha_on {} mask {} | data {} B | avg rgb ({},{},{}) avg alpha {} | non-black px {:.1}%\n",
+                l.left, l.top, l.visible, l.alpha, l.alpha_on, a.is_some(), data.len(), r / n, g / n, b / n, al / n, nz as f64 * 100.0 / n as f64
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn to_rgba(f: &Frame, data: &[u8], alpha: Option<&[u8]>) -> Vec<u8> {

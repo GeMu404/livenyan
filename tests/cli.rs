@@ -87,7 +87,7 @@ fn trace_detects_busy_loop() {
 #[test]
 fn cinema_and_prevmenu_autoselect() {
     let s = run(&["--trace", "--steps", "20000", &fx("evt6")]);
-    for want in ["event mv.ONPLAYEND -> mvend.lsc", "auto-click on object title[1]", "event title.ONSELECT -> sel.lsc", "Calc primary = 1", "state=ended"] {
+    for want in ["event mv.ONPLAYEND -> mvend.lsc", "auto-select menu title[1]", "event title.ONSELECT -> sel.lsc", "Calc primary = 1", "state=ended"] {
         assert!(s.contains(want), "missing {want:?}\n{s}");
     }
 }
@@ -155,4 +155,28 @@ fn root_layer_tcolor_and_getprop_defaults() {
     let _ = std::fs::remove_file(&out);
     assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255], "TColor 0x0000FF must be red");
     assert_eq!(img.get_pixel(105, 103).0, [0, 0, 255, 255], "image under root layer must draw above the box");
+}
+
+/// Regresión: un título en bucle que pide clics de texto cada vuelta. --trace debe seguir
+/// haciendo clic (no estancarse) y acabar eligiendo el menú; --pick decide el ítem.
+#[test]
+fn title_loop_clicks_and_menu_pick() {
+    let s = run(&["--trace", "--pick", "1", "--steps", "5000", &fx("evt8")]);
+    assert!(s.contains("auto-select menu title[1]"), "{s}");
+    assert!(s.contains("Calc started = 1"), "{s}");
+    assert!(s.contains("state=ended"), "{s}");
+    let clicks: u32 = s.split(" clicks").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(clicks > 10, "text clicks must keep advancing: {clicks}");
+    let p0 = run(&["--trace", "--pick", "0", "--steps", "3000", &fx("evt8")]);
+    assert!(p0.contains("auto-select menu title[0]") && !p0.contains("started = 1") && !p0.contains("# stalled"), "{p0}");
+}
+
+/// --gal-stats solo imprime estadísticas.
+#[test]
+fn gal_stats_output() {
+    let s = run(&["--gal-stats", "pic.gal", &fx("render2")]);
+    assert!(s.contains("version Gale106 size 16x8 bpp 24 frames 1"), "{s}");
+    assert!(s.contains("avg rgb (0,0,255) avg alpha 255"), "{s}");
+    let i = run(&["--info", &fx("game.exe")]);
+    assert!(i.contains("gal check:   1 decoded: ok=1"), "{i}");
 }

@@ -1309,39 +1309,51 @@ impl Vm {
     }
 
     /// Solo --trace: dispara el manejador de clic de algún objeto visible (rotando).
+    /// Solo --trace: elige un ítem de un menú (Menu/PrevMenu) con manejador, visible o no.
+    /// Ítem: --pick N, o el primero habilitado (SetEnabled).
+    pub fn auto_menu(&mut self) -> Option<String> {
+        let name = self
+            .scene
+            .draw_order()
+            .into_iter()
+            .rev()
+            .find(|o| o.kind == Kind::Menu && [Prop::ONSELECT, Prop::ONLBTNUP].iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
+            .map(|o| o.name.clone())?;
+        let idx = match self.opts.pick {
+            Some(p) => p,
+            None => (0..64).find(|i| *self.enabled.get(&(name.clone(), *i)).unwrap_or(&true)).unwrap_or(0),
+        };
+        // el texto del ítem (si el menú lo tiene en PR_TEXT, una línea por ítem)
+        let item = self.scene.get(&name).map(|o| o.str(Prop::TEXT)).unwrap_or_default();
+        let item = item.lines().nth(idx.max(0) as usize).unwrap_or("").to_string();
+        if let Some(o) = self.scene.get_mut(&name) {
+            o.props.insert(Prop::INDEX, Value::Int(idx));
+            o.props.insert(Prop::VALUE, Value::Int(idx));
+        }
+        self.selected.insert((name.clone(), idx), true);
+        for p in [Prop::ONSELECT, Prop::ONLBTNUP] {
+            if self.fire(&name, p, vec![Value::Int(idx), Value::Str(item.clone())]) {
+                return Some(format!("{name}[{idx}]"));
+            }
+        }
+        None
+    }
+
+    /// Solo --trace: dispara el manejador de clic de algún objeto visible (rotando).
+    /// No toca menús (auto_menu) ni el ONPLAYEND de mensajes con texto pendiente.
     pub fn auto_fire(&mut self, n: usize) -> Option<String> {
-        let props = [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT, Prop::ONPLAYEND];
+        let props = [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT];
         let cands: Vec<String> = self
             .scene
             .draw_order()
             .into_iter()
-            .filter(|o| !self.plays.contains_key(&o.name) && (matches!(o.kind, Kind::Message | Kind::Menu) || self.scene.effective_visible(o)) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
+            .filter(|o| o.kind != Kind::Menu && !self.plays.contains_key(&o.name) && self.scene.effective_visible(o) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
             .map(|o| o.name.clone())
             .collect();
         if cands.is_empty() {
             return None;
         }
-        // menús primero (p.ej. PrevMenu del título): elegir el primer ítem habilitado
-        let name = cands.iter().find(|c| self.scene.get(c).is_some_and(|o| o.kind == Kind::Menu)).cloned().unwrap_or_else(|| cands[n % cands.len()].clone());
-        if self.scene.get(&name).is_some_and(|o| o.kind == Kind::Menu) {
-            let idx = match self.opts.pick {
-                Some(p) => p,
-                None => (0..64).find(|i| *self.enabled.get(&(name.clone(), *i)).unwrap_or(&true)).unwrap_or(0),
-            };
-            // el texto del ítem (si el menú lo tiene en PR_TEXT, una línea por ítem)
-            let item = self.scene.get(&name).map(|o| o.str(Prop::TEXT)).unwrap_or_default();
-            let item = item.lines().nth(idx.max(0) as usize).unwrap_or("").to_string();
-            if let Some(o) = self.scene.get_mut(&name) {
-                o.props.insert(Prop::INDEX, Value::Int(idx));
-                o.props.insert(Prop::VALUE, Value::Int(idx));
-            }
-            self.selected.insert((name.clone(), idx), true);
-            for p in [Prop::ONSELECT, Prop::ONLBTNUP] {
-                if self.fire(&name, p, vec![Value::Int(idx), Value::Str(item.clone())]) {
-                    return Some(format!("{name}[{idx}]"));
-                }
-            }
-        }
+        let name = cands[n % cands.len()].clone();
         for p in props {
             if self.fire(&name, p, vec![]) {
                 return Some(name);

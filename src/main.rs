@@ -29,6 +29,9 @@ struct Cli {
     /// Pasos máximos para --trace.
     #[arg(long, default_value_t = 5000)]
     steps: u64,
+    /// Decodifica una imagen GAL del archivo y muestra solo estadísticas (sin imagen).
+    #[arg(long, value_name = "ARCHIVE_PATH")]
+    gal_stats: Option<String>,
     /// Driver de render de SDL (opengl, vulkan, software, gpu...).
     #[arg(long)]
     renderer: Option<String>,
@@ -117,6 +120,13 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     );
     let assets = Arc::new(Assets::new(game.data.clone(), cfg.threads(), cfg.assets.cache_mb));
 
+    if let Some(name) = &cli.gal_stats {
+        let n = game.data.resolve(name, livenyan::assets::IMAGE_EXTS).ok_or(format!("not in archive: {name}"))?;
+        let d = game.data.read(&n).map_err(|e| e.to_string())?;
+        println!("{n}: {} bytes", d.len());
+        print!("{}", livenyan::gal::stats(&d).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
     if cli.info {
         return info(&game, &assets, &cfg, t0, cli.show_text);
     }
@@ -183,6 +193,23 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
         println!("  exe form {} {}x{}{}", f.class, f.w, f.h, if f.main { " (largest/main-like; not used)" } else { "" });
     }
     println!("entry:       {}", game.entry);
+    // autocomprobación del decodificador GAL: primeras 30 imágenes
+    {
+        let gals: Vec<&String> = names.iter().filter(|n| n.to_lowercase().ends_with(".gal")).take(30).collect();
+        let mut c: std::collections::BTreeMap<&str, u32> = Default::default();
+        let mut bad = vec![];
+        for n in &gals {
+            let k = game.data.read(n).map(|d| livenyan::gal::quick_class(&d)).unwrap_or("error");
+            *c.entry(k).or_default() += 1;
+            if k != "ok" {
+                bad.push(format!("{n} ({k})"));
+            }
+        }
+        println!("gal check:   {} decoded: {}", gals.len(), c.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+        for b in bad.iter().take(10) {
+            println!("  not ok: {b}");
+        }
+    }
     println!("resolution:  {}x{} (source: {})", game.logical.0, game.logical.1, game.logical_source);
     println!("save dir:    {}", game.save_dir().display());
     println!("open time:   {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
@@ -266,6 +293,7 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
     let mut menus = 0;
     let mut fired = 0;
     let mut idle = 0;
+    let mut cov_idle = 0u64;
     let mut last_sig = (String::new(), 0u64);
     while vm.steps < steps && !vm.ended() {
         vm.update(t, (steps - vm.steps).min(100_000) as usize);
@@ -286,12 +314,21 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         }
         t += 16.0;
         let sig = vm.progress_sig();
-        // los clics de avance de texto no cuentan como progreso: un ciclo de escenas que
-        // solo pide clics (p.ej. volver al título) debe acabar disparando el menú
-        let _ = acted;
-        idle = if sig != last_sig { 0 } else { idle + 1 };
+        // idle: sin comandos nuevos ni clics -> el script espera algo (botón, etc.)
+        // cov_idle: sin comandos nuevos aunque haya clics de texto -> p.ej. el título en bucle
+        let new_code = sig != last_sig;
+        idle = if new_code || acted { 0 } else { idle + 1 };
+        cov_idle = if new_code { 0 } else { cov_idle + 1 };
         last_sig = sig;
-        // el script espera algo del usuario (p.ej. bucle hasta que se pulse un botón)
+        // a partir de 60 frames sin código nuevo, intentar cada frame hasta que haya un menú
+        // (en un bucle de título el menú puede existir solo en algunos frames del ciclo)
+        if cov_idle >= 60 {
+            if let Some(m) = vm.auto_menu() {
+                menus += 1;
+                cov_idle = 0;
+                println!("[{t:>8.0}ms] auto-select menu {m}");
+            }
+        }
         if idle > 0 && idle % 60 == 0 {
             if let Some(o) = vm.auto_fire(fired) {
                 fired += 1;

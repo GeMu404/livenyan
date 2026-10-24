@@ -390,3 +390,25 @@ add(C.Wait, Calc=lit(B(True)), Time=lit(I(100000)), StopEvent=expr())
 add(C.Exit, Calc=expr())
 open(os.path.join(r2, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 open(os.path.join(r2, "pic.gal"), "wb").write(gal(16, 8, 24, [bytes([255, 0, 0] * 16) for _ in range(8)]))
+
+# --- evt8/: título en bucle que pide clics de texto en cada vuelta (como 0000009C.lsb):
+# --trace debe seguir haciendo clic Y acabar eligiendo el menú; --pick elige el ítem ---
+e8 = os.path.join(out, "evt8"); os.makedirs(e8, exist_ok=True)
+enable(C.CommandType.MesNew, PT.PR_NAME)
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("msg")), PT.PR_WIDTH: lit(I(300)), PT.PR_HEIGHT: lit(I(100))}))
+top = add(C.Label, Name="top")
+add(C.Calc, Calc=expr(to("選択値", S(""))))
+add(C.TextIns, Text=tpword("ab"), Target=lit(S("msg")), Hist=lit(B(True)), Wait=lit(B(True)), StopEvent=expr())
+add(C.PrevMenuNew, components=comps(C.CommandType.PrevMenuNew, {PT.PR_NAME: lit(S("title")), PT.PR_ONSELECT: lit(S("sel.lsc"))}))
+add(C.Wait, Calc=lit(B(True)), Time=lit(I(300)), StopEvent=expr())
+add(C.Jump, Page=C.LabelReference("ゲームメイン.lsb", 9), Calc=expr(op(T.Equal, "____arg", V("選択値"), S("1"))))
+add(C.ObjDel, Name=lit(S("title")))
+add(C.Jump, Page=C.LabelReference("ゲームメイン.lsb", top), Calc=lit(B(True)))
+add(C.Calc, Calc=expr(to("started", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e8, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(0)]), to("選択値", V("____1"))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e8, "sel.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
