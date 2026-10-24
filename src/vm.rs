@@ -24,19 +24,30 @@ pub enum Event {
 pub enum State {
     Running,
     WaitUntil { until: f64, skippable: bool },
-    /// Mostrando texto progresivamente.
-    Text { target: String, items: Vec<TextItem>, pos: usize, next: f64, then: Vec<Pending> },
-    WaitClick { then: Vec<Pending> },
+    /// TextIns con Wait: espera a que el objeto de mensaje termine de reproducir.
+    WaitText { target: String },
     Menu { choices: Vec<String>, var: String },
     Ended,
 }
 
-/// Acciones que quedan tras un clic dentro de un TextIns.
+/// Elementos pendientes de la reproducción de texto de un objeto de mensaje.
 #[derive(Debug, Clone)]
 pub enum Pending {
-    Clear(String),
-    Text(String, Vec<TextItem>),
+    Clear,
+    Text(Vec<TextItem>),
     Click,
+    /// Evento en línea (TWdOpeEvent) -> ONNOTIFY.
+    Notify(String),
+}
+
+/// Reproducción de texto en curso de un objeto de mensaje (no bloquea al VM salvo Wait).
+#[derive(Debug, Clone, Default)]
+pub struct Playback {
+    plan: std::collections::VecDeque<Pending>,
+    cur: Vec<TextItem>,
+    pos: usize,
+    next: f64,
+    waiting_click: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -45,9 +56,21 @@ struct Frame {
     pc: usize,
     locals: HashMap<String, Value>,
     result_var: String,
+    /// Para manejadores de evento: estado a restaurar al volver.
+    saved_state: Option<State>,
+}
+
+/// Evento de objeto encolado (se ejecuta como llamada-interrupción entre frames).
+#[derive(Debug, Clone)]
+pub struct ObjEvent {
+    pub obj: String,
+    pub prop: u8,
+    pub script: String,
+    pub params: Vec<Value>,
 }
 
 pub struct Options {
+    pub screen: (u32, u32),
     pub text_cps: f32,
     pub lookahead: usize,
     pub trace: bool,
@@ -69,6 +92,13 @@ pub struct Vm {
     rng: u64,
     prefetched_upto: HashMap<String, usize>,
     pub skip: bool,
+    plays: HashMap<String, Playback>,
+    pub queue: std::collections::VecDeque<ObjEvent>,
+    yielded: bool,
+    /// Funciones/comandos no implementados vistos (clave -> veces).
+    pub unimpl: std::collections::BTreeMap<String, u64>,
+    pub db: crate::db::Db,
+    history_max: i64,
 }
 
 fn redact(s: &str, show: bool) -> String {
@@ -93,9 +123,15 @@ impl Vm {
             rng: 0x9E37_79B9_7F4A_7C15,
             prefetched_upto: HashMap::new(),
             skip: false,
+            plays: HashMap::new(),
+            queue: Default::default(),
+            yielded: false,
+            unimpl: Default::default(),
+            db: Default::default(),
+            history_max: 0,
         };
         vm.prefetch_from(&script, 0);
-        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new() });
+        vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), saved_state: None });
         Ok(vm)
     }
 
@@ -107,6 +143,9 @@ impl Vm {
     }
 
     fn warn(&mut self, key: &str, msg: &str) {
+        if let Some(k) = key.strip_prefix("unimpl:") {
+            *self.unimpl.entry(k.to_string()).or_default() += 1;
+        }
         if self.warned.insert(key.to_string()) {
             log::warn!("{msg} (first at {})", self.location());
         }
@@ -177,26 +216,40 @@ impl Vm {
         matches!(self.state, State::Ended)
     }
 
-    /// Clic / avance del usuario.
+    /// Clic / avance del usuario: completa o libera el texto en reproducción.
     pub fn click(&mut self) {
-        match std::mem::replace(&mut self.state, State::Running) {
-            State::Text { target, items, then, .. } => {
-                // completa el texto actual de golpe
-                if let Some(o) = self.scene.get_mut(&target) {
-                    o.text.extend(items);
+        // 1) texto apareciendo -> mostrarlo entero
+        let mut revealed = false;
+        let names: Vec<String> = self.plays.keys().cloned().collect();
+        for n in &names {
+            let p = self.plays.get_mut(n).unwrap();
+            if p.pos < p.cur.len() {
+                let rest: Vec<TextItem> = p.cur[p.pos..].to_vec();
+                p.pos = p.cur.len();
+                if let Some(o) = self.scene.get_mut(n) {
+                    o.text.extend(rest);
                     o.shown = o.text.len();
                     o.text_rev += 1;
                 }
-                self.state = State::Running;
-                self.continue_pending(then);
+                revealed = true;
             }
-            State::WaitClick { then } => self.continue_pending(then),
-            State::WaitUntil { until, skippable } => {
-                if !skippable {
-                    self.state = State::WaitUntil { until, skippable };
-                }
+        }
+        if revealed {
+            return;
+        }
+        // 2) esperando clic dentro del texto -> continuar
+        let mut released = false;
+        for p in self.plays.values_mut() {
+            if p.waiting_click {
+                p.waiting_click = false;
+                released = true;
             }
-            other => self.state = other,
+        }
+        if released {
+            return;
+        }
+        if let State::WaitUntil { skippable: true, .. } = self.state {
+            self.state = State::Running;
         }
     }
 
@@ -213,84 +266,160 @@ impl Vm {
         }
     }
 
-    fn continue_pending(&mut self, mut then: Vec<Pending>) {
-        while !then.is_empty() {
-            match then.remove(0) {
-                Pending::Clear(t) => {
-                    if let Some(o) = self.scene.get_mut(&t) {
-                        o.text.clear();
-                        o.shown = 0;
-                        o.text_rev += 1;
+    /// ¿Hay texto esperando un clic del usuario?
+    pub fn wants_click(&self) -> bool {
+        self.plays.values().any(|p| p.waiting_click || p.pos < p.cur.len())
+    }
+
+    /// Encola el manejador de evento `prop` del objeto, si lo tiene.
+    pub fn fire(&mut self, obj: &str, prop: u8, params: Vec<Value>) -> bool {
+        let script = self.scene.get(obj).map(|o| o.str(prop)).unwrap_or_default();
+        if script.trim().is_empty() {
+            return false;
+        }
+        self.queue.push_back(ObjEvent { obj: obj.to_string(), prop, script, params });
+        true
+    }
+
+    fn start_play(&mut self, target: &str, plan: Vec<Pending>) {
+        let p = self.plays.entry(target.to_string()).or_default();
+        p.plan.extend(plan);
+        if p.next < self.now {
+            p.next = self.now;
+        }
+    }
+
+    /// Avanza la reproducción de texto de todos los objetos de mensaje.
+    fn update_plays(&mut self) {
+        let cps = if self.opts.text_cps <= 0.0 || self.skip { f64::INFINITY } else { self.opts.text_cps as f64 };
+        let names: Vec<String> = self.plays.keys().cloned().collect();
+        for n in names {
+            let mut finished = false;
+            let mut notifies = vec![];
+            loop {
+                let Some(p) = self.plays.get_mut(&n) else { break };
+                if p.waiting_click {
+                    if self.skip {
+                        p.waiting_click = false;
+                    } else {
+                        break;
                     }
                 }
-                Pending::Text(t, items) => {
-                    self.start_text(t, items, then);
-                    return;
+                if p.pos < p.cur.len() {
+                    let start = p.pos;
+                    if cps.is_infinite() {
+                        p.pos = p.cur.len();
+                    } else {
+                        while p.pos < p.cur.len() && p.next <= self.now {
+                            p.pos += 1;
+                            p.next += 1000.0 / cps;
+                        }
+                    }
+                    let add: Vec<TextItem> = p.cur[start..p.pos].to_vec();
+                    let more = p.pos < p.cur.len();
+                    if !add.is_empty() {
+                        if let Some(o) = self.scene.get_mut(&n) {
+                            o.text.extend(add);
+                            o.shown = o.text.len();
+                            o.text_rev += 1;
+                        }
+                    }
+                    if more {
+                        break;
+                    }
+                    continue;
                 }
-                Pending::Click => {
-                    self.state = State::WaitClick { then };
-                    return;
+                match p.plan.pop_front() {
+                    Some(Pending::Text(items)) => {
+                        p.cur = items;
+                        p.pos = 0;
+                        if p.next < self.now {
+                            p.next = self.now;
+                        }
+                    }
+                    Some(Pending::Click) => p.waiting_click = true,
+                    Some(Pending::Notify(e)) => notifies.push(e),
+                    Some(Pending::Clear) => {
+                        if let Some(o) = self.scene.get_mut(&n) {
+                            o.text.clear();
+                            o.shown = 0;
+                            o.text_rev += 1;
+                        }
+                    }
+                    None => {
+                        finished = true;
+                        break;
+                    }
                 }
+            }
+            for e in notifies {
+                let parts: Vec<Value> = e.split("\r\n").map(|x| Value::Str(x.to_string())).collect();
+                if !self.fire(&n, Prop::ONNOTIFY, parts) {
+                    self.warn("notify-nohandler", "inline text event without ONNOTIFY handler");
+                }
+            }
+            if finished {
+                self.plays.remove(&n);
+                self.fire(&n, Prop::ONPLAYEND, vec![]);
+                if matches!(&self.state, State::WaitText { target } if *target == n) {
+                    self.state = State::Running;
+                }
+            }
+        }
+        if let State::WaitText { target } = &self.state {
+            if !self.plays.contains_key(target) {
+                self.state = State::Running;
             }
         }
     }
 
-    fn start_text(&mut self, target: String, items: Vec<TextItem>, then: Vec<Pending>) {
-        if self.opts.text_cps <= 0.0 || self.skip || items.is_empty() {
-            if let Some(o) = self.scene.get_mut(&target) {
-                o.text.extend(items);
-                o.shown = o.text.len();
-                o.text_rev += 1;
+    /// Ejecuta manejadores encolados como llamadas-interrupción.
+    fn dispatch_events(&mut self) {
+        if matches!(self.state, State::Menu { .. } | State::Ended) || self.frames.len() > 200 {
+            return;
+        }
+        // un manejador a la vez: si ya hay uno activo, esperar a que termine
+        if self.frames.iter().any(|f| f.saved_state.is_some()) && matches!(self.state, State::Running) {
+            return;
+        }
+        if let Some(ev) = self.queue.pop_front() {
+            if self.opts.trace {
+                println!("[{:>8.0}ms] event {}.{} -> {}", self.now, ev.obj, crate::lsb::prop_name(ev.prop), ev.script);
             }
-            self.continue_pending(then);
-        } else {
-            self.state = State::Text { target, items, pos: 0, next: self.now, then };
+            let saved = std::mem::replace(&mut self.state, State::Running);
+            if !self.goto_script(&ev.script, 0, true, String::new(), ev.params) {
+                self.state = saved;
+                return;
+            }
+            if let Some(f) = self.frames.last_mut() {
+                f.saved_state = Some(saved);
+            }
         }
     }
 
-    /// Avanza el reloj y ejecuta hasta bloquearse (o `budget` comandos).
+    /// Avanza un frame: reloj, animaciones, texto, eventos y ejecución
+    /// cooperativa (un While/Wait 0 cede el resto del frame).
     pub fn update(&mut self, now: f64, budget: usize) {
         self.now = now;
         self.scene.update(now);
-        // texto progresivo
-        if let State::Text { target, items, pos, next, then } = &mut self.state {
-            let cps = self.opts.text_cps.max(1.0) as f64;
-            while *pos < items.len() && *next <= now {
-                *pos += 1;
-                *next += 1000.0 / cps;
-            }
-            if *pos >= items.len() {
-                let (t, it, th) = (target.clone(), std::mem::take(items), std::mem::take(then));
-                if let Some(o) = self.scene.get_mut(&t) {
-                    o.text.extend(it);
-                    o.shown = o.text.len();
-                    o.text_rev += 1;
-                }
+        self.update_plays();
+        if let State::WaitUntil { until, .. } = self.state {
+            if now >= until || self.skip {
                 self.state = State::Running;
-                self.continue_pending(th);
             }
         }
-        if let State::WaitUntil { until, .. } = self.state
-            && (now >= until || self.skip) {
-                self.state = State::Running;
-            }
-        if self.skip
-            && let State::WaitClick { .. } = self.state {
-                self.click();
-            }
+        self.dispatch_events();
+        self.yielded = false;
         let mut n = 0;
-        while matches!(self.state, State::Running) && n < budget {
+        while matches!(self.state, State::Running) && n < budget && !self.yielded {
             self.step();
             n += 1;
+            if !self.queue.is_empty() && self.frames.iter().all(|f| f.saved_state.is_none()) {
+                self.dispatch_events();
+            }
         }
-    }
-
-    /// Texto parcialmente visible del TextIns en curso (para el renderizador).
-    pub fn partial_text(&self) -> Option<(&str, &[TextItem])> {
-        match &self.state {
-            State::Text { target, items, pos, .. } => Some((target.as_str(), &items[..*pos])),
-            _ => None,
-        }
+        // el texto puede haber empezado en este frame
+        self.update_plays();
     }
 
     // ---------- ejecución ----------
@@ -323,7 +452,7 @@ impl Vm {
             for (i, p) in params.into_iter().enumerate() {
                 locals.insert(format!("Param{}", i + 1), p);
             }
-            self.frames.push(Frame { script, pc, locals, result_var });
+            self.frames.push(Frame { script, pc, locals, result_var, saved_state: None });
         } else if let Some(f) = self.frames.last_mut() {
             f.script = script;
             f.pc = pc;
@@ -460,6 +589,8 @@ impl Vm {
                     detail = format!("{t}ms");
                     if t > 0.0 {
                         self.state = State::WaitUntil { until: self.now + t, skippable };
+                    } else {
+                        self.yielded = true;
                     }
                 }
             }
@@ -501,6 +632,8 @@ impl Vm {
             CmdType::WhileLoop => {
                 self.eval(c.expr("Calc"));
                 next = Self::loop_target(&script, c.u32("Start").unwrap_or(0), CmdType::While);
+                // LiveMaker es cooperativo: cada vuelta cede el frame (eventos, texto, timers)
+                self.yielded = true;
             }
             CmdType::Break => {
                 if self.eval_bool(c.expr("Calc"), true) {
@@ -540,7 +673,7 @@ impl Vm {
                     }
                 detail = format!("name={name:?}{}", if src.is_empty() { String::new() } else { format!(" src={src:?}") });
                 if matches!(kind, CmdType::Timer | CmdType::Cinema | CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
-                    self.warn(c.name(), &format!("{} only creates a placeholder object", c.name()));
+                    self.warn(&format!("unimpl:cmd {} (placeholder)", c.name()), &format!("{} only creates a placeholder object", c.name()));
                 }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
             }
@@ -598,7 +731,7 @@ impl Vm {
                 let props = self.props_of(c);
                 let src = props.get(&Prop::SOURCE).map(|v| v.as_str()).unwrap_or_default();
                 detail = format!("src={src:?} (skipped)");
-                self.warn("Movie", "Movie playback not implemented: skipping");
+                self.warn("unimpl:cmd Movie (skipped)", "Movie playback not implemented: skipping");
                 self.events.push(Event::MovieSkipped { file: src });
             }
             CmdType::MovieStop => {
@@ -616,7 +749,7 @@ impl Vm {
                             && let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
                                 self.assets.request(&n);
                             }
-                        if !self.scene.set(&obj, p, v) {
+                        if !self.scene.set(&obj, p, v) && !obj.is_empty() {
                             self.warn(&format!("noobj:{obj}"), &format!("SetProp on missing object {obj:?}"));
                         }
                     }
@@ -658,7 +791,8 @@ impl Vm {
                 if let Some(f) = self.frames.last_mut() {
                     f.pc = next;
                 }
-                self.run_text(&target, &tw);
+                let wait = self.eval_bool(c.expr("Wait"), true);
+                self.run_text(&target, &tw, wait);
                 return;
             }
             CmdType::TextClr => {
@@ -673,12 +807,16 @@ impl Vm {
                 // Transiciones: se aplican de forma instantánea por ahora.
                 let t = self.eval(c.expr("Time")).as_f64();
                 detail = format!("{t}ms (instant)");
-                self.warn("Flip", "Flip transitions are applied instantly");
+                self.warn("unimpl:cmd Flip (instant)", "Flip transitions are applied instantly");
             }
-            CmdType::DoEvent => {}
+            CmdType::DoEvent => self.yielded = true,
+            CmdType::FormatHist | CmdType::ClrHist | CmdType::CallHist | CmdType::ClrRead => {
+                // historial (backlog): aún no se guarda; se ignora en silencio
+                log::debug!("{} ignored", c.name());
+            }
             CmdType::IFDEF | CmdType::IFNDEF | CmdType::ENDIF => {}
             _ => {
-                self.warn(c.name(), &format!("unimplemented command {}", c.name()));
+                self.warn(&format!("unimpl:cmd {}", c.name()), &format!("unimplemented command {}", c.name()));
             }
         }
         self.trace(c, detail);
@@ -694,10 +832,16 @@ impl Vm {
             self.state = State::Ended;
             return;
         }
-        if let Some(f) = f
-            && !f.result_var.is_empty() {
+        if let Some(f) = f {
+            if !f.result_var.is_empty() {
                 self.assign(&f.result_var, v);
             }
+            if let Some(st) = f.saved_state {
+                // vuelta de un manejador de evento: restaurar lo que hacía el script
+                self.state = st;
+                self.yielded = true;
+            }
+        }
     }
 
     /// If falso: busca la siguiente rama Elseif/Else del mismo nivel, o el final del bloque.
@@ -742,7 +886,7 @@ impl Vm {
         j
     }
 
-    fn run_text(&mut self, target: &str, tw: &crate::lsb::TpWord) {
+    fn run_text(&mut self, target: &str, tw: &crate::lsb::TpWord, wait: bool) {
         if self.scene.get(target).is_none() {
             self.warn(&format!("mes:{target}"), &format!("TextIns into missing message object {target:?}; creating one"));
             self.scene.create(target, Kind::Message, HashMap::new());
@@ -751,7 +895,7 @@ impl Vm {
         let mut cur: Vec<TextItem> = vec![];
         let flush = |plan: &mut Vec<Pending>, cur: &mut Vec<TextItem>| {
             if !cur.is_empty() {
-                plan.push(Pending::Text(target.to_string(), std::mem::take(cur)));
+                plan.push(Pending::Text(std::mem::take(cur)));
             }
         };
         for g in &tw.body {
@@ -770,41 +914,79 @@ impl Vm {
                     brk::PAGE => {
                         flush(&mut plan, &mut cur);
                         plan.push(Pending::Click);
-                        plan.push(Pending::Clear(target.to_string()));
+                        plan.push(Pending::Clear);
                     }
                     _ => {
                         flush(&mut plan, &mut cur);
-                        plan.push(Pending::Clear(target.to_string()));
+                        plan.push(Pending::Clear);
                     }
                 },
-                Glyph::Event { .. } => self.warn("twd-event", "TextIns inline events are ignored"),
-                Glyph::Img { .. } => self.warn("twd-img", "TextIns inline images are ignored"),
+                Glyph::Event { event } => {
+                    flush(&mut plan, &mut cur);
+                    plan.push(Pending::Notify(event.trim_start_matches('\x01').to_string()));
+                }
+                Glyph::Img { .. } => self.warn("unimpl:TextIns inline image", "TextIns inline images are ignored"),
                 _ => {}
             }
         }
         flush(&mut plan, &mut cur);
-        self.state = State::Running;
-        self.continue_pending(plan);
+        self.start_play(target, plan);
+        if wait {
+            self.state = State::WaitText { target: target.to_string() };
+        }
     }
 
-    /// Clic en coordenadas lógicas: botones o avance.
-    pub fn click_at(&mut self, x: f64, y: f64) {
-        if let Some(b) = self.scene.hit_button(x, y) {
-            let handler = b
-                .get(Prop::ONLBTNUP)
-                .or_else(|| b.get(Prop::ONLBTNDOWN))
-                .or_else(|| b.get(Prop::ONSELECT))
-                .map(|v| v.as_str())
-                .unwrap_or_default();
-            if !handler.is_empty() && matches!(self.state, State::Running | State::WaitClick { .. } | State::WaitUntil { .. }) {
-                self.goto_script(&handler, 0, true, String::new(), vec![]);
-                if !matches!(self.state, State::WaitClick { .. }) {
-                    self.state = State::Running;
+    /// Clic (izquierdo o derecho) en coordenadas lógicas: manejadores de objeto o avance.
+    pub fn click_at(&mut self, x: f64, y: f64, right: bool) {
+        let props: &[u8] = if right { &[Prop::ONRBTNUP, Prop::ONRBTNDOWN] } else { &[Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT] };
+        if let Some(name) = self.scene.hit_handler(x, y, props).map(|o| o.name.clone()) {
+            for &p in props {
+                if self.fire(&name, p, vec![]) {
+                    break;
                 }
-                return;
+            }
+            return;
+        }
+        if !right {
+            self.click();
+        }
+    }
+
+    /// Variables de sistema que el motor original provee.
+    fn system_var(&self, name: &str) -> Option<Value> {
+        let (w, h) = self.opts.screen;
+        Some(match name {
+            "@ScrWidth" => Value::Int(w as i64),
+            "@ScrHeight" => Value::Int(h as i64),
+            "@ParamStr" | "@ParamCount" => Value::Empty,
+            "StatusSoundON" => Value::Bool(true),
+            "ステータスフルスクリーン" => Value::Bool(false),
+            "ステータスディスプレイモード" | "ステータスMIDIポート" => Value::Int(0),
+            "StatusFontName" => Value::Str(String::new()),
+            _ => return None,
+        })
+    }
+
+    /// Solo --trace: dispara el manejador de clic de algún objeto visible (rotando).
+    pub fn auto_fire(&mut self, n: usize) -> Option<String> {
+        let props = [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT];
+        let cands: Vec<String> = self
+            .scene
+            .draw_order()
+            .into_iter()
+            .filter(|o| self.scene.effective_visible(o) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
+            .map(|o| o.name.clone())
+            .collect();
+        if cands.is_empty() {
+            return None;
+        }
+        let name = cands[n % cands.len()].clone();
+        for p in props {
+            if self.fire(&name, p, vec![]) {
+                return Some(name);
             }
         }
-        self.click();
+        None
     }
 
     pub fn counts_sorted(&self) -> Vec<(&'static str, u64)> {
@@ -818,10 +1000,16 @@ impl Env for Vm {
     fn get_var(&mut self, name: &str) -> Value {
         match self.lookup(name) {
             Some(v) => v.clone(),
-            None => {
-                self.warn(&format!("undef:{name}"), &format!("read of undefined variable {name}"));
-                Value::Empty
-            }
+            None => match self.system_var(name) {
+                Some(v) => v,
+                None => {
+                    // LiveMaker trata las variables sin declarar como 0/""; solo se registra en debug
+                    if self.warned.insert(format!("undef:{name}")) {
+                        log::debug!("read of undefined variable {name} (as 0/\"\")");
+                    }
+                    Value::Empty
+                }
+            },
         }
     }
     fn set_var(&mut self, name: &str, v: Value) {
@@ -851,6 +1039,25 @@ impl Env for Vm {
             Func::GETENABLED => Value::Bool(true),
             Func::INCABINET | Func::FILEEXISTS => Value::Bool(self.assets.data().find(&s(0)).is_some()),
             Func::GETHISTORYCOUNT => Value::Int(0),
+            Func::GETHISTORYMAXCOUNT => Value::Int(self.history_max),
+            Func::SETHISTORYMAXCOUNT => {
+                self.history_max = a.first().map(|v| v.as_int()).unwrap_or(0);
+                Value::Bool(true)
+            }
+            // ventana = espacio lógico (letterbox lo resuelve SDL), así que la conversión es identidad
+            Func::TOSCREENX | Func::TOSCREENY | Func::TOCLIENTX | Func::TOCLIENTY => a.last().cloned().unwrap_or(Value::Int(0)),
+            Func::LOADTEXTFILE => {
+                let d = self.assets.data().clone();
+                d.resolve(&s(0), &[".txt"]).and_then(|n| d.read(&n).ok()).map(|b| Value::Str(crate::util::cp932(&b))).unwrap_or(Value::Str(String::new()))
+            }
+            Func::DBCREATETABLE..=Func::DBGETRECNO
+            | Func::DBCLEARRECORD
+            | Func::DBGETTABLECOUNT
+            | Func::DBGETTABLE => {
+                let d = self.assets.data().clone();
+                let load = move |f: &str| d.resolve(f, &[".tsv", ".txt"]).and_then(|n| d.read(&n).ok()).map(|b| crate::util::cp932(&b));
+                return self.db.call(f, a, &load);
+            }
             Func::GETDISPLAYMODE => Value::Int(0),
             _ => return None,
         })
@@ -862,7 +1069,8 @@ impl Env for Vm {
         (self.rng >> 11) as f64 / (1u64 << 53) as f64
     }
     fn warn_once(&mut self, key: &str, msg: &str) {
-        self.warn(key, msg);
+        let k = if msg.starts_with("unimplemented function") { format!("unimpl:func {key}") } else { key.to_string() };
+        self.warn(&k, msg);
     }
 }
 
@@ -875,14 +1083,14 @@ mod tests {
         let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&p).unwrap();
         let assets = Arc::new(Assets::new(data, 2, 64));
-        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
+        let mut vm = Vm::new(assets, "ゲームメイン.lsb", Options { screen: (800, 600), text_cps: 0.0, lookahead: 50, trace: false, show_text: false }).unwrap();
         let mut t = 0.0;
         for _ in 0..1000 {
             vm.update(t, 1000);
             if vm.ended() {
                 break;
             }
-            if matches!(vm.state, State::WaitClick { .. }) {
+            if vm.wants_click() {
                 vm.click();
             }
             t += 50.0;

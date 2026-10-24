@@ -103,13 +103,14 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     let assets = Arc::new(Assets::new(game.data.clone(), cfg.threads(), cfg.assets.cache_mb));
 
     if cli.info {
-        return info(&game, &assets, &cfg, t0);
+        return info(&game, &assets, &cfg, t0, cli.show_text);
     }
     if cli.dump_lsb {
         let name = cli.script.as_deref().unwrap_or(&game.entry);
         return dump(&game, name, cli.show_text);
     }
     let opts = Options {
+        screen: game.logical,
         text_cps: if cli.trace { 0.0 } else { cfg.text.speed_cps },
         lookahead: cfg.assets.prefetch_lookahead,
         trace: cli.trace,
@@ -125,7 +126,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     livenyan::app::run(game, cfg, assets, vm, t0)
 }
 
-fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant) -> Result<(), String> {
+fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool) -> Result<(), String> {
     let names = game.data.names();
     let mut exts: HashMap<String, usize> = HashMap::new();
     for n in names {
@@ -139,6 +140,12 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant) -> Result<(), S
     println!("by type:     {}", exts.iter().map(|(e, n)| format!(".{e} {n}")).collect::<Vec<_>>().join(", "));
     if let Some(p) = &game.project {
         println!("project:     lpb v{} init={:?} exit={:?} settings={}", p.version, p.init_lsb, p.exit_lsb, p.settings.len());
+        // claves y valores numéricos (las cadenas solo como longitud salvo --show-text): sirve
+        // para localizar dónde guarda el .lpb el tamaño de pantalla sin filtrar texto del juego
+        for (k, v) in &p.settings {
+            let shown = if v.trim().parse::<f64>().is_ok() || show_text { v.clone() } else { format!("<{} chars>", v.chars().count()) };
+            println!("  setting {k} = {shown}");
+        }
     } else {
         println!("project:     (no .lpb)");
     }
@@ -224,25 +231,38 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
     let mut t = 0.0;
     let mut clicks = 0;
     let mut menus = 0;
+    let mut fired = 0;
     let mut idle = 0;
+    let mut last_loc = String::new();
     while vm.steps < steps && !vm.ended() {
-        let before = vm.steps;
-        vm.update(t, (steps - vm.steps) as usize);
+        vm.update(t, (steps - vm.steps).min(100_000) as usize);
+        let mut acted = false;
+        if vm.wants_click() {
+            clicks += 1;
+            vm.click();
+            acted = true;
+        }
         match &vm.state {
-            State::WaitClick { .. } | State::Text { .. } => {
-                clicks += 1;
-                vm.click();
-            }
             State::Menu { .. } => {
                 menus += 1;
                 vm.choose(0);
+                acted = true;
             }
             State::WaitUntil { until, .. } => t = t.max(*until),
             _ => {}
         }
         t += 16.0;
-        idle = if vm.steps == before { idle + 1 } else { 0 };
-        if idle > 1000 {
+        let loc = vm.location();
+        idle = if acted || loc != last_loc || !vm.queue.is_empty() { 0 } else { idle + 1 };
+        last_loc = loc;
+        // el script espera algo del usuario (p.ej. bucle hasta que se pulse un botón)
+        if idle > 0 && idle % 60 == 0 {
+            if let Some(o) = vm.auto_fire(fired) {
+                fired += 1;
+                println!("[{t:>8.0}ms] auto-click on object {o}");
+            }
+        }
+        if idle > 3000 {
             println!("# stalled at {}", vm.location());
             break;
         }
@@ -260,6 +280,15 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         },
         t0.elapsed().as_secs_f64() * 1000.0
     );
+    if vm.unimpl.is_empty() {
+        println!("# unimplemented: none");
+    } else {
+        println!("# unimplemented ({} unique):", vm.unimpl.len());
+        for (k, n) in &vm.unimpl {
+            println!("#   {k} x{n}");
+        }
+    }
+    println!("# auto-clicks on objects: {fired}");
     println!("# counts: {}", vm.counts_sorted().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
     Ok(())
 }

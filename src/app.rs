@@ -151,8 +151,11 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                             vm.choose(i);
                         }
                     } else {
-                        vm.click_at(x as f64, y as f64);
+                        vm.click_at(x as f64, y as f64, false);
                     }
+                }
+                Event::MouseButtonDown { mouse_btn: MouseButton::Right, x, y, .. } => {
+                    vm.click_at(x as f64, y as f64, true);
                 }
                 Event::MouseWheel { y, .. } if y < 0.0 => vm.click(),
                 _ => {}
@@ -297,7 +300,6 @@ fn draw_scene(
     filter: ScaleMode,
     (lw, lh): (u32, u32),
 ) {
-    let partial = vm.partial_text().map(|(t, items)| (t.to_string(), items.to_vec()));
     let order: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
     let mut sizes: Vec<(String, u32, u32)> = vec![];
     for o in &order {
@@ -349,13 +351,8 @@ fn draw_scene(
                 let Some(f) = font.as_deref_mut() else { continue };
                 let w = if ow > 0 { ow as u32 } else { lw.saturating_sub(x.max(0.0) as u32) };
                 let h = if oh > 0 { oh as u32 } else { lh.saturating_sub(y.max(0.0) as u32) };
-                let mut items = o.text.clone();
-                let mut extra = 0;
-                if let Some((t, p)) = &partial
-                    && *t == o.name {
-                        extra = p.len();
-                        items.extend(p.iter().cloned());
-                    }
+                let items = o.text.clone();
+                let extra = 0;
                 if items.is_empty() {
                     continue;
                 }

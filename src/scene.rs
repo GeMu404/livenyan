@@ -217,6 +217,18 @@ impl Scene {
         self.update(f64::INFINITY);
     }
 
+    /// Objeto visible más alto bajo el punto que tenga alguno de los manejadores `props`.
+    pub fn hit_handler(&self, x: f64, y: f64, props: &[u8]) -> Option<&Obj> {
+        self.draw_order().into_iter().rev().find(|o| {
+            if !props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())) || !self.effective_visible(o) {
+                return false;
+            }
+            let (ox, oy) = self.abs_pos(o);
+            let (w, h) = (o.int(Prop::WIDTH, 0) as f64, o.int(Prop::HEIGHT, 0) as f64);
+            x >= ox && y >= oy && x < ox + w && y < oy + h
+        })
+    }
+
     /// Objeto clicable (Button) más alto bajo el punto lógico.
     pub fn hit_button(&self, x: f64, y: f64) -> Option<&Obj> {
         self.draw_order().into_iter().rev().find(|o| {

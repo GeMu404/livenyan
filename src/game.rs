@@ -119,6 +119,15 @@ pub fn resolve_lsb(data: &GameData, name: &str) -> Option<String> {
     if n.is_empty() {
         return None;
     }
+    // .lsc = fuente de texto del mismo script; en el juego compilado existe como .lsb
+    let lower = n.to_lowercase();
+    let stem_lsb;
+    let n = if lower.ends_with(".lsc") {
+        stem_lsb = format!("{}.lsb", &n[..n.len() - 4]);
+        stem_lsb.as_str()
+    } else {
+        n
+    };
     data.resolve(n, &[".lsb"])
         .or_else(|| {
             let base = n.rsplit(['\\', '/']).next().unwrap_or(n);
