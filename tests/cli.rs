@@ -237,3 +237,25 @@ fn createcg_text_event_draws_color_background() {
     let _ = std::fs::remove_file(&out);
     assert_eq!(img.get_pixel(400, 300).0, [0, 128, 0, 255]);
 }
+
+/// CREATECG ... WAIT de un GAL animado: el CHANGECG siguiente espera al fin de la animación.
+#[test]
+fn createcg_wait_holds_text_until_animation_ends() {
+    let out = std::env::temp_dir().join(format!("livenyan-wait-{}.png", std::process::id()));
+    let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .env("SDL_VIDEODRIVER", "offscreen")
+        .env("LIVENYAN_LOG", "debug")
+        .args(["--mute", "--res", "800x600", "--snapshot-frame", "200", out.to_str().unwrap(), &fx("evt14")])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&out);
+    if !r.status.success() {
+        eprintln!("skipping: offscreen video unavailable");
+        return;
+    }
+    let e = String::from_utf8_lossy(&r.stderr);
+    let anim = e.find("GAL animation logo").expect("animation started");
+    let done = e.find("WAIT on \"logo\" done").expect("wait released");
+    let change = e.find("CHANGECG args").expect("changecg ran");
+    assert!(anim < done && done < change, "{e}");
+}

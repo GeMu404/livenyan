@@ -52,6 +52,11 @@ pub struct Playback {
     pos: usize,
     next: f64,
     waiting_click: bool,
+    /// Efecto WAIT: el texto espera a que termine la animación/fundido de este objeto
+    /// (con plazo máximo de seguridad).
+    wait_for: Option<(String, f64)>,
+    /// Última etiqueta/evento procesado (solo nombre, para depurar).
+    last_tag: String,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +130,7 @@ pub struct Vm {
     last_text_target: Option<String>,
     /// Último estado (tipo y propiedades) de objetos borrados, por nombre.
     graveyard: HashMap<String, (Kind, HashMap<u8, Value>)>,
+    play_dbg: HashMap<String, f64>,
     /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
     cinemas: HashMap<String, f64>,
     /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
@@ -178,6 +184,7 @@ impl Vm {
             anim_clock: 0.0,
             last_text_target: None,
             graveyard: HashMap::new(),
+            play_dbg: HashMap::new(),
             cinemas: HashMap::new(),
             enabled: HashMap::new(),
             selected: HashMap::new(),
@@ -375,8 +382,36 @@ impl Vm {
             }
             let mut finished = false;
             let mut notifies = vec![];
+            // efecto WAIT pendiente: animación o fundido del objeto aún en curso
+            let waiting_obj = self.plays.get(&n).and_then(|p| p.wait_for.clone());
+            if let Some((o, deadline)) = waiting_obj {
+                let busy = self.scene.get(&o).is_some() && (self.anims.contains_key(&o) || self.scene.motions.iter().any(|m| m.obj == o));
+                if busy && self.now < deadline && !self.skip {
+                    self.play_debug(&n, &format!("waiting-for-effect on {o:?}"));
+                    continue;
+                }
+                log::debug!("text on {n}: WAIT on {o:?} done{}", if busy { " (deadline/skip)" } else { "" });
+                if let Some(p) = self.plays.get_mut(&n) {
+                    p.wait_for = None;
+                }
+            }
+            if let Some(p) = self.plays.get(&n) {
+                let st = if p.waiting_click {
+                    "waiting-for-click".to_string()
+                } else if p.next > self.now + 1.0 {
+                    format!("timed wait {:.0} ms left", p.next - self.now)
+                } else if p.pos < p.cur.len() {
+                    format!("playing ({}/{} items of chunk, {} queued)", p.pos, p.cur.len(), p.plan.len())
+                } else {
+                    format!("between chunks ({} queued, last tag {:?})", p.plan.len(), p.last_tag)
+                };
+                self.play_debug(&n, &st);
+            }
             loop {
                 let Some(p) = self.plays.get_mut(&n) else { break };
+                if p.next > self.now + 1.0 && p.pos >= p.cur.len() {
+                    break; // espera temporizada (WAIT de efecto con tiempo)
+                }
                 if p.waiting_click {
                     if self.skip {
                         p.waiting_click = false;
@@ -416,8 +451,16 @@ impl Vm {
                             p.next = self.now;
                         }
                     }
-                    Some(Pending::Click) => p.waiting_click = true,
-                    Some(Pending::Notify(e)) => notifies.push(e),
+                    Some(Pending::Click) => {
+                        p.last_tag = "click-wait".into();
+                        p.waiting_click = true
+                    }
+                    Some(Pending::Notify(e)) => {
+                        p.last_tag = e.trim_start_matches('\x01').split("\r\n").next().unwrap_or("").to_string();
+                        notifies.push(e);
+                        // un evento por vez: puede fijar una espera (WAIT) antes de seguir
+                        break;
+                    }
                     Some(Pending::Clear) => {
                         if let Some(o) = self.scene.get_mut(&n) {
                             o.text.clear();
@@ -1386,6 +1429,18 @@ impl Vm {
         }
     }
 
+    /// Estado de reproducción de una caja, a debug, como mucho una vez por segundo y caja.
+    fn play_debug(&mut self, name: &str, st: &str) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let last = self.play_dbg.get(name).copied().unwrap_or(f64::NEG_INFINITY);
+        if self.now - last >= 1000.0 {
+            self.play_dbg.insert(name.to_string(), self.now);
+            log::debug!("text playback {name}: {st}");
+        }
+    }
+
     /// Eventos de sistema de LiveNovel incrustados en el texto ({CREATECG ...} etc.).
     /// CREATECG/CHANGECG crean/cambian objetos de imagen; el resto se registra y se ignora
     /// (WAITPLAY: los sonidos cuentan como terminados).
@@ -1411,10 +1466,12 @@ impl Vm {
                 let time = if name == "CREATECG" { num(8) } else { num(4) }.unwrap_or(0.0).max(0.0);
                 let time = if self.skip || self.opts.trace { 0.0 } else { time };
                 let wait = args.get(2).is_some_and(|e| e == "WAIT");
-                if time > 0.0 && wait {
-                    // WAIT: el texto de la caja no sigue hasta que termine el efecto
+                if wait && !self.opts.trace {
+                    // WAIT: el texto de la caja no sigue hasta que terminen la animación del
+                    // objeto (su PLAYEND) y el fundido; con imagen estática y tiempo 0, nada.
+                    let deadline = self.now + time + 30_000.0;
                     if let Some(p) = self.plays.get_mut(boxname) {
-                        p.next = p.next.max(self.now + time);
+                        p.wait_for = Some((obj.clone(), deadline));
                     }
                 }
                 log::debug!("{name} {obj:?}: effect {:?} time {time} ms{} alpha {alpha:?}", args.get(2), if wait { " (WAIT)" } else { "" });

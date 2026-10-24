@@ -520,3 +520,19 @@ add(C.TextIns, Text=tw, Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False
 waitflag("__end")
 add(C.Exit, Calc=expr())
 open(os.path.join(e13, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt14/: CREATECG con WAIT de una imagen animada y luego CHANGECG a negro: el texto
+# espera a que termine la animación antes del CHANGECG ---
+import shutil
+e14 = os.path.join(out, "evt14"); os.makedirs(e14, exist_ok=True)
+shutil.copy(os.path.join(out, "evt10", "anim.gal"), os.path.join(e14, "anim.gal"))
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb"))}))
+add(C.Calc, Calc=expr(to("__end", I(0))))
+ev1 = "\x01CREATECG\r\nlogo\r\nanim.gal\r\nWAIT\r\n#1\r\nC\r\nB\r\n0\r\n1\r\n0\r\n0\r\n0\r\n\r\n1"
+ev2 = "\x01CHANGECG\r\nlogo\r\n$000000\r\nNORMAL\r\n1\r\n200\r\n0\r\n0\r\n\r\n1"
+tw = TpWord(version=105, decorators=[], conditions=[], links=[], body=[TWdOpeEvent(event=ev1, condition=-1), TWdOpeEvent(event=ev2, condition=-1)])
+add(C.TextIns, Text=tw, Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+waitflag("__end")
+add(C.Exit, Calc=expr())
+open(os.path.join(e14, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
