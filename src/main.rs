@@ -142,12 +142,16 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
         println!("project:     lpb v{} init={:?} exit={:?} settings={}", p.version, p.init_lsb, p.exit_lsb, p.settings.len());
         // claves y valores numéricos (las cadenas solo como longitud salvo --show-text): sirve
         // para localizar dónde guarda el .lpb el tamaño de pantalla sin filtrar texto del juego
+        println!("  lpb unk:   {:?}", p.unk);
         for (k, v) in &p.settings {
             let shown = if v.trim().parse::<f64>().is_ok() || show_text { v.clone() } else { format!("<{} chars>", v.chars().count()) };
             println!("  setting {k} = {shown}");
         }
     } else {
         println!("project:     (no .lpb)");
+    }
+    for f in livenyan::game::exe_forms(&game.path) {
+        println!("  exe form {} {}x{}{}", f.class, f.w, f.h, if f.main { " (main)" } else { "" });
     }
     println!("entry:       {}", game.entry);
     println!("resolution:  {}x{} (source: {})", game.logical.0, game.logical.1, game.logical_source);
@@ -233,7 +237,7 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
     let mut menus = 0;
     let mut fired = 0;
     let mut idle = 0;
-    let mut last_loc = String::new();
+    let mut last_sig = (String::new(), 0u64);
     while vm.steps < steps && !vm.ended() {
         vm.update(t, (steps - vm.steps).min(100_000) as usize);
         let mut acted = false;
@@ -252,9 +256,9 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
             _ => {}
         }
         t += 16.0;
-        let loc = vm.location();
-        idle = if acted || loc != last_loc || !vm.queue.is_empty() { 0 } else { idle + 1 };
-        last_loc = loc;
+        let sig = vm.progress_sig();
+        idle = if acted || sig != last_sig || !vm.queue.is_empty() { 0 } else { idle + 1 };
+        last_sig = sig;
         // el script espera algo del usuario (p.ej. bucle hasta que se pulse un botón)
         if idle > 0 && idle % 60 == 0 {
             if let Some(o) = vm.auto_fire(fired) {

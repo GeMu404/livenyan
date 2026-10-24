@@ -95,7 +95,12 @@ pub fn prop_of(v: &Value) -> Option<u8> {
 impl Scene {
     pub fn create(&mut self, name: &str, kind: Kind, props: HashMap<u8, Value>) {
         self.seq += 1;
-        let o = Obj { name: name.to_string(), kind, seq: self.seq, props, text: vec![], shown: 0, text_rev: 0 };
+        // recrear un objeto existente conserva su texto (p.ej. TextIns antes del MesNew definitivo)
+        let (text, shown, text_rev) = match self.objs.remove(name) {
+            Some(old) => (old.text, old.shown, old.text_rev + 1),
+            None => (vec![], 0, 0),
+        };
+        let o = Obj { name: name.to_string(), kind, seq: self.seq, props, text, shown, text_rev };
         self.objs.insert(name.to_string(), o);
     }
 

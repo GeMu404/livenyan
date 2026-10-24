@@ -34,3 +34,13 @@ fn dump_hides_text() {
     assert!(s.contains("TextIns"));
     assert!(!s.contains("こんにちは"));
 }
+
+/// Regresión v0.1: TextIns a un objeto aún inexistente + MesNew con ONPLAYEND + While de espera
+/// (patrón de 終了待ち.lsb de LiveNovel). El manejador debe dispararse y el bucle terminar.
+#[test]
+fn onplayend_releases_wait_loop() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt")]);
+    assert!(s.contains("event mbox.ONPLAYEND -> end.lsc"), "{s}");
+    assert!(s.contains("state=ended"), "{s}");
+    assert!(!s.contains("stalled"), "{s}");
+}

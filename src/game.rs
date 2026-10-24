@@ -16,6 +16,8 @@ pub struct Project {
     pub audio_formats: String,
     /// (nombre, valor) de los ajustes de sistema.
     pub settings: Vec<(String, String)>,
+    /// Los 16 bytes sin identificar tras el nombre (unk1/unk2 en pylivemaker), como 4 x i32.
+    pub unk: [i32; 4],
 }
 
 /// Port de `livemaker/lpb.py` (LMProject).
@@ -27,7 +29,11 @@ pub fn parse_lpb(d: &[u8]) -> Result<Project, String> {
         return Err(format!("unsupported lpb version {version}"));
     }
     let name = r.string().map_err(e)?;
-    r.take(16).map_err(e)?;
+    let ub = r.take(16).map_err(e)?;
+    let mut unk = [0i32; 4];
+    for (i, u) in unk.iter_mut().enumerate() {
+        *u = i32::from_le_bytes(ub[i * 4..i * 4 + 4].try_into().unwrap());
+    }
     let init_lsb = r.string().map_err(e)?;
     let exit_lsb = if version > 0x6D { r.string().map_err(e)? } else { String::new() };
     let _dir = r.string().map_err(e)?;
@@ -59,7 +65,7 @@ pub fn parse_lpb(d: &[u8]) -> Result<Project, String> {
             settings.push((k, v));
         }
     }
-    Ok(Project { version, name, init_lsb, exit_lsb, audio_formats, settings })
+    Ok(Project { version, name, init_lsb, exit_lsb, audio_formats, settings, unk })
 }
 
 pub struct Game {
@@ -101,6 +107,8 @@ impl Game {
             ((cfg.game.logical_width, cfg.game.logical_height), "config")
         } else if let Some(r) = project.as_ref().and_then(guess_resolution) {
             (r, "lpb")
+        } else if let Some(r) = exe_forms(path).iter().find(|f| f.main).map(|f| (f.w, f.h)) {
+            (r, "exe-form")
         } else if let Some(r) = guess_from_images(&data) {
             (r, "images")
         } else {
@@ -158,4 +166,96 @@ fn guess_from_images(data: &GameData) -> Option<(u32, u32)> {
             }
     }
     counts.into_iter().max_by_key(|&((w, h), c)| (c, w * h)).filter(|&(_, c)| c >= 2).map(|(r, _)| r)
+}
+
+/// Formulario Delphi (TPF0) hallado en los recursos del .exe con ClientWidth/ClientHeight.
+#[derive(Debug, Clone)]
+pub struct ExeForm {
+    pub class: String,
+    pub w: u32,
+    pub h: u32,
+    /// Formulario elegido como ventana principal del juego.
+    pub main: bool,
+}
+
+/// Busca formularios Delphi en el intérprete (solo la parte anterior al archivo).
+/// El tamaño de pantalla de un juego LiveMaker vive en el formulario principal del .exe.
+pub fn exe_forms(path: &Path) -> Vec<ExeForm> {
+    let exe = if path.is_file() {
+        Some(path.to_path_buf())
+    } else {
+        std::fs::read_dir(path).ok().and_then(|rd| {
+            rd.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+        })
+    };
+    let Some(exe) = exe else { return vec![] };
+    let Ok(mut b) = std::fs::read(&exe) else { return vec![] };
+    if !b.starts_with(b"MZ") {
+        return vec![];
+    }
+    // cortar en el archivo anexado (trailer "<u32 offset>lv")
+    if b.len() > 6 && &b[b.len() - 2..] == b"lv" {
+        let off = u32::from_le_bytes(b[b.len() - 6..b.len() - 2].try_into().unwrap()) as usize;
+        if off < b.len() {
+            b.truncate(off);
+        }
+    }
+    parse_forms(&b)
+}
+
+fn dfm_int(b: &[u8], i: usize) -> Option<i64> {
+    match *b.get(i)? {
+        2 => Some(*b.get(i + 1)? as i8 as i64),
+        3 => Some(i16::from_le_bytes(b.get(i + 1..i + 3)?.try_into().ok()?) as i64),
+        4 => Some(i32::from_le_bytes(b.get(i + 1..i + 5)?.try_into().ok()?) as i64),
+        _ => None,
+    }
+}
+
+pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
+    let find = |hay: &[u8], pat: &[u8]| hay.windows(pat.len()).position(|w| w == pat);
+    let mut out = vec![];
+    let mut i = 0;
+    while let Some(p) = find(&b[i..], b"TPF0") {
+        let start = i + p;
+        i = start + 4;
+        let Some(&cl) = b.get(i) else { break };
+        let class = String::from_utf8_lossy(b.get(i + 1..i + 1 + cl as usize).unwrap_or_default()).to_string();
+        // propiedades del formulario raíz: dentro de una ventana razonable
+        let end = (start + 4096).min(b.len());
+        let next = find(&b[i..end], b"TPF0").map(|q| i + q).unwrap_or(end);
+        let blk = &b[i..next];
+        let get = |name: &[u8]| {
+            let mut pat = vec![name.len() as u8];
+            pat.extend_from_slice(name);
+            find(blk, &pat).and_then(|q| dfm_int(blk, q + pat.len()))
+        };
+        if let (Some(w), Some(h)) = (get(b"ClientWidth"), get(b"ClientHeight")) {
+            if (160..=8192).contains(&w) && (120..=8192).contains(&h) {
+                out.push(ExeForm { class, w: w as u32, h: h as u32, main: false });
+            }
+        }
+    }
+    // principal: clase con "Main"/"Live"/"Novel"; si no, la primera de mayor área
+    let pick = out
+        .iter()
+        .position(|f| ["main", "live", "novel", "game"].iter().any(|k| f.class.to_lowercase().contains(k)))
+        .or_else(|| out.iter().enumerate().max_by_key(|(_, f)| f.w * f.h).map(|(i, _)| i));
+    if let Some(k) = pick {
+        out[k].main = true;
+    }
+    out
+}
+
+#[cfg(test)]
+mod form_tests {
+    #[test]
+    fn finds_main_form() {
+        let mut b = b"junkTPF0\x08TAboutDlg\x05About\x0bClientWidth\x03\x40\x01\x0cClientHeight\x03\xc8\x00".to_vec();
+        b.extend_from_slice(b"..TPF0\x09TMainForm\x08MainForm\x0bClientWidth\x03\x80\x02\x0cClientHeight\x03\xe0\x01\x00");
+        let f = super::parse_forms(&b);
+        assert_eq!(f.len(), 2);
+        let m = f.iter().find(|f| f.main).unwrap();
+        assert_eq!((m.class.as_str(), m.w, m.h), ("TMainForm", 640, 480));
+    }
 }

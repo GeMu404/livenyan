@@ -100,6 +100,29 @@ add(C.Exit, Calc=expr())
 gm = LMScript(version=117, flags=0, command_params=cmd_params_list, commands=cmds)
 open(os.path.join(out, "ゲームメイン.lsb"), "wb").write(gm.to_lsb())
 
+# --- evt/: regresión del bucle de espera de LiveNovel (終了待ち): TextIns a un objeto que aún no
+# existe, luego MesNew con ONPLAYEND y un While que espera la variable que pone el manejador ---
+evt = os.path.join(out, "evt"); os.makedirs(evt, exist_ok=True)
+enable(C.CommandType.MesNew, PT.PR_ONPLAYEND)
+cmds = []; n = 0
+add(C.VarNew, Name="__done", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
+add(C.TextIns, Text=tpword("ab"), Target=lit(S("mbox")), Hist=lit(B(True)), Wait=lit(B(True)), StopEvent=expr())
+add(C.Call, Page=C.LabelReference("終了待ち.lsb", 0), Result="", Calc=lit(B(True)), Params=LiveParserArray([], prefixed=True))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mbox")), PT.PR_WIDTH: lit(I(300)), PT.PR_HEIGHT: lit(I(100)), PT.PR_ONPLAYEND: lit(S("end.lsc"))}))
+w = add(C.While, Calc=expr(op(T.Equal, "____arg", V("__done"), I(0))), End=0)
+add(C.Calc, indent=1, Calc=expr(to("spin", I(1))))
+wl = add(C.WhileLoop, Calc=expr(), Start=w)
+cmds[w].args["End"] = wl
+add(C.Exit, Calc=expr())
+open(os.path.join(evt, "終了待ち.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__done", B(True))))
+add(C.Exit, Calc=expr())
+open(os.path.join(evt, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
 # --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3

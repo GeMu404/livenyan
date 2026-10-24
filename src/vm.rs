@@ -99,6 +99,10 @@ pub struct Vm {
     pub unimpl: std::collections::BTreeMap<String, u64>,
     pub db: crate::db::Db,
     history_max: i64,
+    /// Objetos de mensaje creados implícitamente por TextIns: su texto espera al MesNew real.
+    placeholders: std::collections::HashSet<String>,
+    /// Objetos cuyo texto terminó sin manejador ONPLAYEND (se dispara si se asigna después).
+    ended_unnotified: std::collections::HashSet<String>,
 }
 
 fn redact(s: &str, show: bool) -> String {
@@ -129,6 +133,8 @@ impl Vm {
             unimpl: Default::default(),
             db: Default::default(),
             history_max: 0,
+            placeholders: Default::default(),
+            ended_unnotified: Default::default(),
         };
         vm.prefetch_from(&script, 0);
         vm.frames.push(Frame { script, pc: 0, locals: HashMap::new(), result_var: String::new(), saved_state: None });
@@ -140,6 +146,15 @@ impl Vm {
             Some(f) => format!("{}:{}", f.script.name, f.pc),
             None => "<ended>".into(),
         }
+    }
+
+    /// Firma de progreso para --trace: pila de scripts y número de comandos "con efecto"
+    /// (no cuenta control de flujo, así un While de espera cuenta como inactivo).
+    pub fn progress_sig(&self) -> (String, u64) {
+        let stack: Vec<&str> = self.frames.iter().map(|f| f.script.name.as_str()).collect();
+        let ctrl = ["If", "Elseif", "Else", "While", "WhileInit", "WhileLoop", "Label", "Jump", "Wait", "Calc", "VarNew", "Continue", "Break"];
+        let work: u64 = self.stats.iter().filter(|(k, _)| !ctrl.contains(k)).map(|(_, v)| *v).sum();
+        (stack.join(">"), work)
     }
 
     fn warn(&mut self, key: &str, msg: &str) {
@@ -275,8 +290,10 @@ impl Vm {
     pub fn fire(&mut self, obj: &str, prop: u8, params: Vec<Value>) -> bool {
         let script = self.scene.get(obj).map(|o| o.str(prop)).unwrap_or_default();
         if script.trim().is_empty() {
+            log::debug!("event {obj}.{}: no handler", crate::lsb::prop_name(prop));
             return false;
         }
+        log::debug!("event enqueue {obj}.{} -> {script} (queue {})", crate::lsb::prop_name(prop), self.queue.len() + 1);
         self.queue.push_back(ObjEvent { obj: obj.to_string(), prop, script, params });
         true
     }
@@ -294,6 +311,9 @@ impl Vm {
         let cps = if self.opts.text_cps <= 0.0 || self.skip { f64::INFINITY } else { self.opts.text_cps as f64 };
         let names: Vec<String> = self.plays.keys().cloned().collect();
         for n in names {
+            if self.placeholders.contains(&n) {
+                continue; // aún no existe el objeto real
+            }
             let mut finished = false;
             let mut notifies = vec![];
             loop {
@@ -360,7 +380,10 @@ impl Vm {
             }
             if finished {
                 self.plays.remove(&n);
-                self.fire(&n, Prop::ONPLAYEND, vec![]);
+                log::debug!("playback end on {n}");
+                if !self.fire(&n, Prop::ONPLAYEND, vec![]) {
+                    self.ended_unnotified.insert(n.clone());
+                }
                 if matches!(&self.state, State::WaitText { target } if *target == n) {
                     self.state = State::Running;
                 }
@@ -383,6 +406,7 @@ impl Vm {
             return;
         }
         if let Some(ev) = self.queue.pop_front() {
+            log::debug!("event dispatch {}.{} -> {} (depth {})", ev.obj, crate::lsb::prop_name(ev.prop), ev.script, self.frames.len());
             if self.opts.trace {
                 println!("[{:>8.0}ms] event {}.{} -> {}", self.now, ev.obj, crate::lsb::prop_name(ev.prop), ev.script);
             }
@@ -676,6 +700,7 @@ impl Vm {
                     self.warn(&format!("unimpl:cmd {} (placeholder)", c.name()), &format!("{} only creates a placeholder object", c.name()));
                 }
                 self.scene.create(&name, Kind::from_cmd(c.kind), props);
+                self.object_defined(&name);
             }
             CmdType::Menu => {
                 let props = self.props_of(c);
@@ -751,6 +776,8 @@ impl Vm {
                             }
                         if !self.scene.set(&obj, p, v) && !obj.is_empty() {
                             self.warn(&format!("noobj:{obj}"), &format!("SetProp on missing object {obj:?}"));
+                        } else if p == Prop::ONPLAYEND {
+                            self.object_defined(&obj);
                         }
                     }
                     None => self.warn("setprop-bad", "SetProp with unknown property"),
@@ -890,7 +917,9 @@ impl Vm {
         if self.scene.get(target).is_none() {
             self.warn(&format!("mes:{target}"), &format!("TextIns into missing message object {target:?}; creating one"));
             self.scene.create(target, Kind::Message, HashMap::new());
+            self.placeholders.insert(target.to_string());
         }
+        self.ended_unnotified.remove(target);
         let mut plan: Vec<Pending> = vec![];
         let mut cur: Vec<TextItem> = vec![];
         let flush = |plan: &mut Vec<Pending>, cur: &mut Vec<TextItem>| {
@@ -931,7 +960,7 @@ impl Vm {
         }
         flush(&mut plan, &mut cur);
         self.start_play(target, plan);
-        if wait {
+        if wait && !self.placeholders.contains(target) {
             self.state = State::WaitText { target: target.to_string() };
         }
     }
@@ -952,6 +981,17 @@ impl Vm {
         }
     }
 
+    /// Un objeto pasa a existir de verdad / recibe ONPLAYEND: libera el texto retenido
+    /// y notifica un fin de reproducción que ocurrió sin manejador.
+    fn object_defined(&mut self, name: &str) {
+        if self.placeholders.remove(name) {
+            log::debug!("message object {name} defined; releasing held text");
+        }
+        if self.ended_unnotified.contains(name) && self.fire(name, Prop::ONPLAYEND, vec![]) {
+            self.ended_unnotified.remove(name);
+        }
+    }
+
     /// Variables de sistema que el motor original provee.
     fn system_var(&self, name: &str) -> Option<Value> {
         let (w, h) = self.opts.screen;
@@ -969,12 +1009,12 @@ impl Vm {
 
     /// Solo --trace: dispara el manejador de clic de algún objeto visible (rotando).
     pub fn auto_fire(&mut self, n: usize) -> Option<String> {
-        let props = [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT];
+        let props = [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONSELECT, Prop::ONPLAYEND];
         let cands: Vec<String> = self
             .scene
             .draw_order()
             .into_iter()
-            .filter(|o| self.scene.effective_visible(o) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
+            .filter(|o| !self.plays.contains_key(&o.name) && (o.kind == Kind::Message || self.scene.effective_visible(o)) && props.iter().any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty())))
             .map(|o| o.name.clone())
             .collect();
         if cands.is_empty() {
