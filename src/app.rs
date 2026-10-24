@@ -164,14 +164,13 @@ pub fn run(game: Game, cfg: Config, assets: Arc<Assets>, mut vm: Vm, t0: Instant
                 menu_sel = i;
             }
         }
-        if font.is_none() {
-            if let Ok(r) = frx.try_recv() {
+        if font.is_none()
+            && let Ok(r) = frx.try_recv() {
                 match r {
                     Ok(f) => font = Some(f),
                     Err(e) => log::error!("{e}"),
                 }
             }
-        }
 
         let now = start.elapsed().as_secs_f64() * 1000.0;
         vm.update(now, 20_000);
@@ -242,8 +241,8 @@ fn draw_menu(
     filter: ScaleMode,
 ) {
     let rects = menu_rects(choices.len(), lw, lh);
-    if gfx.menu.as_ref().is_none_or(|(c, _)| c != choices) {
-        if let Some(f) = font {
+    if gfx.menu.as_ref().is_none_or(|(c, _)| c != choices)
+        && let Some(f) = font {
             let texs = choices
                 .iter()
                 .zip(&rects)
@@ -255,17 +254,15 @@ fn draw_menu(
                 .collect();
             gfx.menu = Some((choices.to_vec(), texs));
         }
-    }
     canvas.set_blend_mode(BlendMode::Blend);
     for (i, r) in rects.iter().enumerate() {
         canvas.set_draw_color(if i == sel { Color::RGBA(60, 80, 160, 220) } else { Color::RGBA(0, 0, 0, 180) });
         let _ = canvas.fill_rect(*r);
-        if let Some((_, texs)) = &gfx.menu {
-            if let Some(t) = texs.get(i) {
+        if let Some((_, texs)) = &gfx.menu
+            && let Some(t) = texs.get(i) {
                 let q = t.query();
                 let _ = canvas.copy(t, None, FRect::new(r.x + 8.0, r.y + 6.0, q.width as f32, q.height as f32));
             }
-        }
     }
 }
 
@@ -354,12 +351,11 @@ fn draw_scene(
                 let h = if oh > 0 { oh as u32 } else { lh.saturating_sub(y.max(0.0) as u32) };
                 let mut items = o.text.clone();
                 let mut extra = 0;
-                if let Some((t, p)) = &partial {
-                    if *t == o.name {
+                if let Some((t, p)) = &partial
+                    && *t == o.name {
                         extra = p.len();
                         items.extend(p.iter().cloned());
                     }
-                }
                 if items.is_empty() {
                     continue;
                 }

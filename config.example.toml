@@ -1,0 +1,38 @@
+# Copiar a $XDG_CONFIG_HOME/livenyan/config.toml (todo es opcional)
+
+[window]
+width = 0            # 0 = resolución lógica del juego
+height = 0
+fullscreen = false
+vsync = true
+scale_filter = "linear"   # o "nearest"
+
+[game]
+logical_width = 0    # 0 = autodetectar (lpb / tamaño de fondos) o 800x600
+logical_height = 0
+# entry = "ゲームメイン.lsb"
+
+[text]
+# font = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"
+font_index = 0
+size = 24.0
+speed_cps = 60.0     # 0 = instantáneo
+color = [255, 255, 255, 255]
+shadow = true
+
+[keys]               # nombres de tecla SDL
+advance = ["Return", "Space", "Keypad Enter"]
+fullscreen = ["F11"] # Alt+Enter siempre funciona
+quit = []
+skip = ["Left Ctrl", "Right Ctrl"]
+menu_up = ["Up"]
+menu_down = ["Down"]
+
+[assets]
+threads = 0          # 0 = automático
+prefetch_lookahead = 200
+cache_mb = 768
+
+[audio]
+enabled = true
+volume = 1.0

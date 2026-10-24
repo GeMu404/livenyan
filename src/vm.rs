@@ -125,17 +125,15 @@ impl Vm {
         let data = self.assets.data().clone();
         for c in &script.commands[start.min(end)..end] {
             for s in c.strings() {
-                if s.len() > 2 && s.len() < 260 {
-                    if let Some(n) = data.resolve(s, ALL_EXTS) {
+                if s.len() > 2 && s.len() < 260
+                    && let Some(n) = data.resolve(s, ALL_EXTS) {
                         self.assets.prefetch(&n);
                     }
-                }
             }
-            if let Some(p) = c.page() {
-                if let Some(n) = crate::game::resolve_lsb(&data, &p.page) {
+            if let Some(p) = c.page()
+                && let Some(n) = crate::game::resolve_lsb(&data, &p.page) {
                     self.assets.prefetch(&n);
                 }
-            }
         }
         self.prefetched_upto.insert(script.name.clone(), end.max(upto));
     }
@@ -151,12 +149,11 @@ impl Vm {
     }
 
     fn assign(&mut self, name: &str, v: Value) {
-        if let Some(f) = self.frames.last_mut() {
-            if let Some(slot) = f.locals.get_mut(name) {
+        if let Some(f) = self.frames.last_mut()
+            && let Some(slot) = f.locals.get_mut(name) {
                 *slot = v;
                 return;
             }
-        }
         self.globals.insert(name.to_string(), v);
     }
 
@@ -273,16 +270,14 @@ impl Vm {
                 self.continue_pending(th);
             }
         }
-        if let State::WaitUntil { until, .. } = self.state {
-            if now >= until || self.skip {
+        if let State::WaitUntil { until, .. } = self.state
+            && (now >= until || self.skip) {
                 self.state = State::Running;
             }
-        }
-        if self.skip {
-            if let State::WaitClick { .. } = self.state {
+        if self.skip
+            && let State::WaitClick { .. } = self.state {
                 self.click();
             }
-        }
         let mut n = 0;
         while matches!(self.state, State::Running) && n < budget {
             self.step();
@@ -423,11 +418,10 @@ impl Vm {
                     let p = c.page().cloned().unwrap_or_default();
                     detail = format!("-> {}:{}", p.page, p.label);
                     self.trace(c, detail);
-                    if !self.goto_script(&p.page, p.label, false, String::new(), vec![]) {
-                        if let Some(f) = self.frames.last_mut() {
+                    if !self.goto_script(&p.page, p.label, false, String::new(), vec![])
+                        && let Some(f) = self.frames.last_mut() {
                             f.pc = next;
                         }
-                    }
                     return;
                 }
             }
@@ -489,11 +483,10 @@ impl Vm {
             CmdType::VarDel => {
                 let name = c.str("Name").unwrap_or("");
                 detail = name.to_string();
-                if let Some(f) = self.frames.last_mut() {
-                    if f.locals.remove(name).is_none() {
+                if let Some(f) = self.frames.last_mut()
+                    && f.locals.remove(name).is_none() {
                         self.globals.remove(name);
                     }
-                }
             }
             CmdType::While => {
                 let ok = self.eval_bool(c.expr("Calc"), true);
@@ -541,11 +534,10 @@ impl Vm {
                 let props = self.props_of(c);
                 let name = props.get(&Prop::NAME).map(|v| v.as_str()).unwrap_or_default();
                 let src = props.get(&Prop::SOURCE).map(|v| v.as_str()).unwrap_or_default();
-                if !src.is_empty() {
-                    if let Some(n) = self.assets.data().resolve(&src, IMAGE_EXTS) {
+                if !src.is_empty()
+                    && let Some(n) = self.assets.data().resolve(&src, IMAGE_EXTS) {
                         self.assets.request(&n);
                     }
-                }
                 detail = format!("name={name:?}{}", if src.is_empty() { String::new() } else { format!(" src={src:?}") });
                 if matches!(kind, CmdType::Timer | CmdType::Cinema | CmdType::ParticleNew | CmdType::FireNew | CmdType::EditNew | CmdType::MemoNew) {
                     self.warn(c.name(), &format!("{} only creates a placeholder object", c.name()));
@@ -562,11 +554,10 @@ impl Vm {
                         v => v.as_str().split(['\n']).map(|s| s.trim_end_matches('\r').to_string()).filter(|s| !s.is_empty()).collect(),
                     })
                     .unwrap_or_default();
-                if choices.is_empty() {
-                    if let Some(Value::Array(a)) = self.lookup("_tmp") {
+                if choices.is_empty()
+                    && let Some(Value::Array(a)) = self.lookup("_tmp") {
                         choices = a.iter().map(|x| x.as_str()).filter(|s| !s.trim().is_empty()).collect();
                     }
-                }
                 self.warn("Menu", "Menu: choices taken from PR_TEXT or _tmp; result stored in 選択値 (heuristic)");
                 detail = format!("name={name:?} choices={}", choices.len());
                 self.scene.create(&name, Kind::Menu, props);
@@ -621,11 +612,10 @@ impl Vm {
                 detail = format!("{obj:?}.{}", p.map(crate::lsb::prop_name).unwrap_or("?"));
                 match p {
                     Some(p) => {
-                        if p == Prop::SOURCE {
-                            if let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
+                        if p == Prop::SOURCE
+                            && let Some(n) = self.assets.data().resolve(&v.as_str(), IMAGE_EXTS) {
                                 self.assets.request(&n);
                             }
-                        }
                         if !self.scene.set(&obj, p, v) {
                             self.warn(&format!("noobj:{obj}"), &format!("SetProp on missing object {obj:?}"));
                         }
@@ -692,11 +682,10 @@ impl Vm {
             }
         }
         self.trace(c, detail);
-        if let Some(f) = self.frames.last_mut() {
-            if Arc::ptr_eq(&f.script, &script) && f.pc == pc {
+        if let Some(f) = self.frames.last_mut()
+            && Arc::ptr_eq(&f.script, &script) && f.pc == pc {
                 f.pc = next;
             }
-        }
     }
 
     fn do_return(&mut self, v: Value) {
@@ -705,11 +694,10 @@ impl Vm {
             self.state = State::Ended;
             return;
         }
-        if let Some(f) = f {
-            if !f.result_var.is_empty() {
+        if let Some(f) = f
+            && !f.result_var.is_empty() {
                 self.assign(&f.result_var, v);
             }
-        }
     }
 
     /// If falso: busca la siguiente rama Elseif/Else del mismo nivel, o el final del bloque.

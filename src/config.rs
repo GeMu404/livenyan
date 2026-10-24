@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub window: WindowCfg,
     pub game: GameCfg,
@@ -79,18 +80,6 @@ pub struct AudioCfg {
     pub volume: f32,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            window: WindowCfg::default(),
-            game: GameCfg::default(),
-            text: TextCfg::default(),
-            keys: KeysCfg::default(),
-            assets: AssetsCfg::default(),
-            audio: AudioCfg::default(),
-        }
-    }
-}
 impl Default for WindowCfg {
     fn default() -> Self {
         Self { width: 0, height: 0, fullscreen: false, vsync: true, scale_filter: "linear".into() }

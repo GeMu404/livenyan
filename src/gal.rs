@@ -357,13 +357,12 @@ fn parse_galex(d: &[u8]) -> R<(Info, Frame)> {
     let bpp = geti(layers_tag, "bpp", info.bpp as i64) as u32;
     info.bpp = bpp;
     let mut palette = Vec::new();
-    if bpp <= 8 {
-        if let (Some(a), Some(b)) = (fx.find("<RGB>"), fx.find("</RGB>")) {
+    if bpp <= 8
+        && let (Some(a), Some(b)) = (fx.find("<RGB>"), fx.find("</RGB>")) {
             let hex = fx[a + 5..b].trim();
             let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect();
             palette = bytes.chunks(3).filter(|c| c.len() == 3).map(|c| [c[2], c[1], c[0]]).collect();
         }
-    }
     let mut layers = Vec::new();
     r.p = hs + 12;
     for lt in tags(fx, "Layer") {
@@ -489,6 +488,28 @@ pub fn decode_any(d: &[u8]) -> R<Image> {
     Ok(Image { w: img.width(), h: img.height(), rgba: img.into_raw() })
 }
 
+/// Lee solo la cabecera para obtener (ancho, alto). `prefix` puede estar truncado.
+pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
+    if d.starts_with(b"GaleX200") && d.len() > 12 {
+        let hs = i32::from_le_bytes(d[8..12].try_into().ok()?) as usize;
+        let z = &d[12..d.len().min(12 + hs)];
+        let mut out = Vec::new();
+        let _ = flate2::read::ZlibDecoder::new(z).take(4096).read_to_end(&mut out);
+        let xml = cp932(&out);
+        let i = xml.find("Width")?;
+        let tag = &xml[i.saturating_sub(1)..];
+        let w = attr(tag, "Width")?.parse().ok()?;
+        let h = attr(tag, "Height")?.parse().ok()?;
+        return Some((w, h));
+    }
+    if d.starts_with(b"Gale") && d.len() >= 7 + 4 + 12 {
+        let ver: u32 = std::str::from_utf8(&d[4..7]).ok()?.parse().ok()?;
+        let u = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        return if ver > 102 { Some((u(11 + 4)?, u(11 + 8)?)) } else { Some((u(7 + 4)?, u(7 + 8)?)) };
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,26 +537,4 @@ mod tests {
         assert_eq!(attr(r#" Width="10" BlockWidth="4""#, "Width").as_deref(), Some("10"));
         assert_eq!(attr(r#" BlockWidth="4" Width="10""#, "Width").as_deref(), Some("10"));
     }
-}
-
-/// Lee solo la cabecera para obtener (ancho, alto). `prefix` puede estar truncado.
-pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
-    if d.starts_with(b"GaleX200") && d.len() > 12 {
-        let hs = i32::from_le_bytes(d[8..12].try_into().ok()?) as usize;
-        let z = &d[12..d.len().min(12 + hs)];
-        let mut out = Vec::new();
-        let _ = flate2::read::ZlibDecoder::new(z).take(4096).read_to_end(&mut out);
-        let xml = cp932(&out);
-        let i = xml.find("Width")?;
-        let tag = &xml[i.saturating_sub(1)..];
-        let w = attr(tag, "Width")?.parse().ok()?;
-        let h = attr(tag, "Height")?.parse().ok()?;
-        return Some((w, h));
-    }
-    if d.starts_with(b"Gale") && d.len() >= 7 + 4 + 12 {
-        let ver: u32 = std::str::from_utf8(&d[4..7]).ok()?.parse().ok()?;
-        let u = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-        return if ver > 102 { Some((u(11 + 4)?, u(11 + 8)?)) } else { Some((u(7 + 4)?, u(7 + 8)?)) };
-    }
-    None
 }

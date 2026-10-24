@@ -143,11 +143,10 @@ fn guess_resolution(p: &Project) -> Option<(u32, u32)> {
 fn guess_from_images(data: &GameData) -> Option<(u32, u32)> {
     let mut counts: std::collections::HashMap<(u32, u32), u32> = Default::default();
     for n in data.names().iter().filter(|n| n.to_lowercase().ends_with(".gal")) {
-        if let Some((w, h)) = data.read_prefix(n, 1024).and_then(|p| crate::gal::peek_size(&p)) {
-            if (640..=4096).contains(&w) && (400..=4096).contains(&h) {
+        if let Some((w, h)) = data.read_prefix(n, 1024).and_then(|p| crate::gal::peek_size(&p))
+            && (640..=4096).contains(&w) && (400..=4096).contains(&h) {
                 *counts.entry((w, h)).or_default() += 1;
             }
-        }
     }
     counts.into_iter().max_by_key(|&((w, h), c)| (c, w * h)).filter(|&(_, c)| c >= 2).map(|(r, _)| r)
 }
