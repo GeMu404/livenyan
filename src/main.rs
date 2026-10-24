@@ -199,15 +199,16 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
         let mut c: std::collections::BTreeMap<&str, u32> = Default::default();
         let mut bad = vec![];
         for n in &gals {
-            let k = game.data.read(n).map(|d| livenyan::gal::quick_class(&d)).unwrap_or("error");
-            *c.entry(k).or_default() += 1;
+            let k = game.data.read(n).map(|d| livenyan::gal::quick_class(&d)).unwrap_or_else(|e| format!("error: read {e}"));
+            let class = if k.starts_with("ok") { "ok" } else if k.starts_with("error") { "error" } else if k == "all-black" { "all-black" } else { "all-transparent" };
+            *c.entry(class).or_default() += 1;
             if k != "ok" {
                 bad.push(format!("{n} ({k})"));
             }
         }
         println!("gal check:   {} decoded: {}", gals.len(), c.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
-        for b in bad.iter().take(10) {
-            println!("  not ok: {b}");
+        for b in bad.iter().take(30) {
+            println!("  note: {b}");
         }
     }
     println!("resolution:  {}x{} (source: {})", game.logical.0, game.logical.1, game.logical_source);
@@ -333,7 +334,7 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         if idle > 0 && idle % 30 == 0 && idle % 60 != 0 {
             if let Some(m) = vm.click_message() {
                 clicks += 1;
-                println!("[{t:>8.0}ms] auto-click on message box {m}");
+                println!("[{t:>8.0}ms] auto-click on screen -> {m}");
             }
         }
         if idle > 0 && idle % 60 == 0 {

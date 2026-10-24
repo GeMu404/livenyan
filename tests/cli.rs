@@ -187,7 +187,7 @@ fn gal_stats_output() {
 fn trace_clicks_message_box_repeatedly() {
     let s = run(&["--trace", "--steps", "20000", &fx("evt9")]);
     assert!(s.contains("Calc done5 = 1"), "{s}");
-    assert!(s.contains("auto-click on message box mb.ONLBTNUP"), "{s}");
+    assert!(s.contains("auto-click on screen -> mb.ONLBTNUP"), "{s}");
     assert!(!s.contains("# stalled"), "{s}");
 }
 
@@ -200,4 +200,13 @@ fn gal_animation_plays_and_ends() {
     let s = run(&["--trace", "--steps", "5000", &fx("evt10")]);
     assert!(s.contains("event logo.ONPLAYEND -> ae.lsc"), "{s}");
     assert!(s.contains("state=ended"), "{s}");
+}
+
+/// Clic de pantalla en --trace: libera texto retenido y llega a una caja OCULTA con ONLBTNUP.
+#[test]
+fn screen_click_reaches_hidden_box() {
+    let s = run(&["--trace", "--steps", "5000", &fx("evt11")]);
+    assert!(s.contains("auto-click on screen -> advance text (released ghost)"), "{s}");
+    assert!(s.contains("auto-click on screen -> mb.ONLBTNUP"), "{s}");
+    assert!(s.contains("Calc released = 1"), "{s}");
 }

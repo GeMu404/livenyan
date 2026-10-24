@@ -82,8 +82,14 @@ pub fn decode(data: &GameData, name: &str) -> Asset {
     };
     let fail = |e: String| Asset::Failed(format!("{name}: {e}").into());
     match ext(name).as_str() {
-        "gal" | "png" | "jpg" | "jpeg" | "bmp" => match gal::decode_any(&raw) {
-            Ok(i) => Asset::Image(Arc::new(i)),
+        "gal" | "png" | "jpg" | "jpeg" | "bmp" => match {
+            log::debug!("decoding image {name} ({} bytes)", raw.len());
+            gal::decode_any(&raw)
+        } {
+            Ok(i) => {
+                log::debug!("decoded image {name}: {}x{}, {} frame(s), delays {:?}", i.w, i.h, i.frames.len() + 1, i.delays);
+                Asset::Image(Arc::new(i))
+            }
             Err(e) => fail(e.to_string()),
         },
         "wav" => decode_wav(&raw).map(|p| Asset::Sound(Arc::new(p))).unwrap_or_else(fail),
@@ -299,5 +305,26 @@ mod tests {
             _ => panic!("wav"),
         }
         assert!(a.script("sub.lsb").is_some());
+    }
+
+    /// El caché (ruta del renderer) decodifica TODOS los frames de un GAL animado, con las
+    /// duraciones de la cabecera de frame (mismo decodificador que --gal-stats/--info).
+    #[test]
+    fn pool_decodes_all_gal_frames() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evt10");
+        let data = GameData::open(&p).unwrap();
+        let raw = data.read("anim.gal").unwrap();
+        let a = Assets::new(data, 2, 64);
+        match a.get("anim.gal") {
+            Asset::Image(img) => {
+                assert_eq!(img.frames.len(), 2);
+                assert_eq!(img.delays, vec![67, 233, 67]);
+                assert_eq!(&img.frames[1][0..4], &[0, 255, 0, 255]);
+                let direct = crate::gal::decode(&raw).unwrap();
+                assert_eq!((direct.frames.len(), &direct.delays), (img.frames.len(), &img.delays));
+            }
+            _ => panic!("anim.gal"),
+        }
+        assert!(crate::gal::quick_class(&raw).starts_with("ok (3 frames"));
     }
 }

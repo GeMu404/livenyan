@@ -491,9 +491,9 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
 /// Estadísticas de un GAL sin exponer su contenido: versión, frames, capas, bpp,
 /// compresión, tamaño y medias de color/alfa por capa (para diagnosticar en el PC del
 /// usuario sin ver la imagen).
-pub fn quick_class(d: &[u8]) -> &'static str {
+pub fn quick_class(d: &[u8]) -> String {
     match decode(d) {
-        Err(_) => "error",
+        Err(e) => format!("error: {e}"),
         Ok(img) => {
             let mut opaque_black = true;
             let mut transparent = true;
@@ -505,10 +505,13 @@ pub fn quick_class(d: &[u8]) -> &'static str {
                     }
                 }
                 if !opaque_black && !transparent {
-                    return "ok";
+                    return if img.frames.is_empty() { "ok".into() } else { format!("ok ({} frames)", img.frames.len() + 1) };
                 }
             }
-            if transparent { "all-transparent" } else { "all-black" }
+            if !img.frames.is_empty() {
+                return format!("ok ({} frames, frame 0 {})", img.frames.len() + 1, if transparent { "transparent" } else { "black" });
+            }
+            (if transparent { "all-transparent" } else { "all-black" }).into()
         }
     }
 }
@@ -669,15 +672,22 @@ pub fn decode(d: &[u8]) -> R<Image> {
         }
     };
     let (w, h, rgba) = compose(&info, &frames[0])?;
+    // Gale binario: los bytes 4..8 de la cabecera de frame (tras la máscara) son la duración
+    // del frame en ms (visto en un juego real: 67 ms y una pausa de 2333 ms).
+    let delay_of = |f: &Frame| {
+        f.delay.or_else(|| {
+            f.raw_hdr.get(4..8).map(|b| u32::from_le_bytes(b.try_into().unwrap())).filter(|d| (1..=600_000).contains(d))
+        })
+    };
     let mut extra = vec![];
     let mut delays = vec![];
     if frames.len() > 1 {
-        delays.push(frames[0].delay.unwrap_or(DEFAULT_FRAME_MS));
+        delays.push(delay_of(&frames[0]).unwrap_or(DEFAULT_FRAME_MS));
         for f in &frames[1..] {
             match compose(&info, f) {
                 Ok((fw, fh, px)) if fw == w && fh == h => {
                     extra.push(px);
-                    delays.push(f.delay.unwrap_or(DEFAULT_FRAME_MS));
+                    delays.push(delay_of(f).unwrap_or(DEFAULT_FRAME_MS));
                 }
                 _ => break,
             }

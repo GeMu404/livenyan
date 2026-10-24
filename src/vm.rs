@@ -119,6 +119,8 @@ pub struct Vm {
     /// Animaciones GAL: objeto -> (archivo, inicio ms o None si aún no cargó).
     anims: HashMap<String, (String, Option<f64>)>,
     anim_clock: f64,
+    /// Última caja que recibió TextIns (la "activa" para clics de pantalla).
+    last_text_target: Option<String>,
     /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
     cinemas: HashMap<String, f64>,
     /// Estado de ítems de PrevMenu/menús: (objeto, índice) -> valor.
@@ -170,6 +172,7 @@ impl Vm {
             timers: HashMap::new(),
             anims: HashMap::new(),
             anim_clock: 0.0,
+            last_text_target: None,
             cinemas: HashMap::new(),
             enabled: HashMap::new(),
             selected: HashMap::new(),
@@ -1275,6 +1278,7 @@ impl Vm {
     }
 
     fn run_text(&mut self, target: &str, tw: &crate::lsb::TpWord, wait: bool) {
+        self.last_text_target = Some(target.to_string());
         if self.scene.get(target).is_none() {
             self.warn(&format!("mes:{target}"), &format!("TextIns into missing message object {target:?}; creating one"));
             self.scene.create(target, Kind::Message, HashMap::new());
@@ -1398,24 +1402,47 @@ impl Vm {
         })
     }
 
-    /// Solo --trace: lo que haría un usuario al hacer clic en la caja de mensajes cuando el
-    /// script espera: su ONLBTNUP/ONLBTNDOWN, o si no tiene, su ONPLAYEND (texto ya
-    /// terminado). Solo cajas sin texto en reproducción.
+    /// Solo --trace: clic global en pantalla, como lo enruta el motor a la caja de mensajes
+    /// activa (la última que recibió TextIns), visible o no:
+    /// 1) libera texto retenido (caja creada implícitamente) y lo completa/avanza;
+    /// 2) si no había nada que avanzar, dispara ONLBTNUP/ONLBTNDOWN de la caja activa
+    ///    o, si no tiene, su ONPLAYEND. Cada candidato descartado se explica en debug.
     pub fn click_message(&mut self) -> Option<String> {
-        let cands: Vec<String> = self
-            .scene
-            .draw_order()
-            .into_iter()
-            .rev()
-            .filter(|o| o.kind == Kind::Message && !self.plays.contains_key(&o.name))
-            .map(|o| o.name.clone())
-            .collect();
+        let held: Vec<String> = self.placeholders.drain().collect();
+        for h in &held {
+            log::debug!("screen click: releasing held text of {h}");
+        }
+        if self.wants_click() || !held.is_empty() {
+            self.click();
+            return Some(format!("advance text{}", if held.is_empty() { String::new() } else { format!(" (released {})", held.join(",")) }));
+        }
+        let mut cands: Vec<String> = vec![];
+        if let Some(t) = self.last_text_target.clone() {
+            cands.push(t);
+        }
+        for o in self.scene.draw_order().into_iter().rev() {
+            if o.kind == Kind::Message && !cands.contains(&o.name) {
+                cands.push(o.name.clone());
+            }
+        }
+        if cands.is_empty() {
+            log::debug!("screen click: no message objects");
+        }
         for n in cands {
+            if self.scene.get(&n).is_none() {
+                log::debug!("screen click: skip {n}: object does not exist");
+                continue;
+            }
+            if self.plays.contains_key(&n) {
+                log::debug!("screen click: skip {n}: text still playing");
+                continue;
+            }
             for p in [Prop::ONLBTNUP, Prop::ONLBTNDOWN, Prop::ONPLAYEND] {
                 if self.fire(&n, p, vec![]) {
                     return Some(format!("{n}.{}", crate::lsb::prop_name(p)));
                 }
             }
+            log::debug!("screen click: skip {n}: no ONLBTNUP/ONLBTNDOWN/ONPLAYEND handler");
         }
         None
     }

@@ -444,17 +444,17 @@ open(os.path.join(e9, "end.lsb"), "wb").write(LMScript(version=117, flags=0, com
 # --- evt10/: GAL animado (3 frames, con bytes intermedios entre frames) en un ImgNew con
 # ONPLAYEND; el script espera a que termine (PR_PLAYING / ONPLAYEND) ---
 e10 = os.path.join(out, "evt10"); os.makedirs(e10, exist_ok=True)
-def galframe(bgr, name):
+def galframe(bgr, name, delay=67):
     raw = bytes(bgr) * (16 * 8)
     z = zlib.compress(raw)
     nm = name.encode()
-    return (struct.pack("<I", len(nm)) + nm + bytes(13) + struct.pack("<IiiI", 1, 16, 8, 24) +
+    return (struct.pack("<I", len(nm)) + nm + b"\xff\xff\xff\xff" + struct.pack("<I", delay) + b"\x02\x00\x00\x00\x00" + struct.pack("<IiiI", 1, 16, 8, 24) +
             struct.pack("<ii", 0, 0) + b"\x01" + struct.pack("<ii", -1, 255) + b"\x00" + struct.pack("<I", 0) +
             struct.pack("<I", len(z)) + z + struct.pack("<I", 0))
 base = gal(16, 8, 24, [bytes([0, 0, 255] * 16) for _ in range(8)])
 hs = struct.unpack("<I", base[7:11])[0]
 hdr = bytearray(base[11:11 + hs]); hdr[0x10:0x14] = struct.pack("<I", 3)
-anim = b"Gale106" + struct.pack("<I", hs) + bytes(hdr) + galframe([0, 0, 0], "Frame0") + galframe([0, 0, 255], "Frame1") + b"\x05\x00\x00\x00junk!" + galframe([0, 255, 0], "Frame2")
+anim = b"Gale106" + struct.pack("<I", hs) + bytes(hdr) + galframe([0, 0, 0], "Frame0") + galframe([0, 0, 255], "Frame1", 233) + b"\x05\x00\x00\x00junk!" + galframe([0, 255, 0], "Frame2")
 open(os.path.join(e10, "anim.gal"), "wb").write(anim)
 enable(C.CommandType.ImgNew, PT.PR_ONPLAYEND)
 cmds = []; n = 0
@@ -468,3 +468,21 @@ cmds = []; n = 0
 add(C.Calc, Calc=expr(to("__ae", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e10, "ae.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+
+# --- evt11/: caja de mensajes OCULTA (VISIBLE=0) con ONLBTNUP; texto a otra caja que nunca
+# se crea (retenida). El clic de pantalla de --trace debe llegar igual ---
+e11 = os.path.join(out, "evt11"); os.makedirs(e11, exist_ok=True)
+enable(C.CommandType.MesNew, PT.PR_VISIBLE)
+cmds = []; n = 0
+add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb")), PT.PR_VISIBLE: lit(B(False)), PT.PR_ONLBTNUP: lit(S("end.lsc"))}))
+add(C.Calc, Calc=expr(to("__end", I(0))))
+add(C.TextIns, Text=tpword("x"), Target=lit(S("ghost")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+add(C.TextIns, Text=TpWord(version=105, decorators=[], conditions=[], links=[], body=[]), Target=lit(S("mb")), Hist=lit(B(True)), Wait=lit(B(False)), StopEvent=expr())
+waitflag("__end")
+add(C.Calc, Calc=expr(to("released", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e11, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
+cmds = []; n = 0
+add(C.Calc, Calc=expr(to("__end", I(1))))
+add(C.Exit, Calc=expr())
+open(os.path.join(e11, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
