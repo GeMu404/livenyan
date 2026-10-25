@@ -4,7 +4,7 @@
 use crate::archive::GameData;
 use crate::gal;
 use crate::lsb::Lsb;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,13 +87,23 @@ pub fn decode(data: &GameData, name: &str) -> Asset {
             gal::decode_any(&raw)
         } {
             Ok(i) => {
-                log::debug!("decoded image {name}: {}x{}, {} frame(s), delays {:?}", i.w, i.h, i.frames.len() + 1, i.delays);
+                log::debug!(
+                    "decoded image {name}: {}x{}, {} frame(s), delays {:?}",
+                    i.w,
+                    i.h,
+                    i.frames.len() + 1,
+                    i.delays
+                );
                 Asset::Image(Arc::new(i))
             }
             Err(e) => fail(e.to_string()),
         },
-        "wav" => decode_wav(&raw).map(|p| Asset::Sound(Arc::new(p))).unwrap_or_else(fail),
-        "ogg" => decode_ogg(&raw).map(|p| Asset::Sound(Arc::new(p))).unwrap_or_else(fail),
+        "wav" => decode_wav(&raw)
+            .map(|p| Asset::Sound(Arc::new(p)))
+            .unwrap_or_else(fail),
+        "ogg" => decode_ogg(&raw)
+            .map(|p| Asset::Sound(Arc::new(p)))
+            .unwrap_or_else(fail),
         "lsb" => match Lsb::parse(name, &raw) {
             Ok(l) => Asset::Script(Arc::new(l)),
             Err(e) => fail(e.0),
@@ -106,25 +116,41 @@ fn decode_wav(d: &[u8]) -> Result<Pcm, String> {
     let r = hound::WavReader::new(Cursor::new(d)).map_err(|e| e.to_string())?;
     let spec = r.spec();
     let samples: Vec<i16> = match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Int, 8) => r.into_samples::<i8>().map(|s| (s.unwrap_or(0) as i16) << 8).collect(),
+        (hound::SampleFormat::Int, 8) => r
+            .into_samples::<i8>()
+            .map(|s| (s.unwrap_or(0) as i16) << 8)
+            .collect(),
         (hound::SampleFormat::Int, 16) => r.into_samples::<i16>().map(|s| s.unwrap_or(0)).collect(),
-        (hound::SampleFormat::Int, b) => r.into_samples::<i32>().map(|s| (s.unwrap_or(0) >> (b - 16)) as i16).collect(),
-        (hound::SampleFormat::Float, _) => {
-            r.into_samples::<f32>().map(|s| (s.unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0) as i16).collect()
-        }
+        (hound::SampleFormat::Int, b) => r
+            .into_samples::<i32>()
+            .map(|s| (s.unwrap_or(0) >> (b - 16)) as i16)
+            .collect(),
+        (hound::SampleFormat::Float, _) => r
+            .into_samples::<f32>()
+            .map(|s| (s.unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect(),
     };
-    Ok(Pcm { rate: spec.sample_rate, channels: spec.channels, samples })
+    Ok(Pcm {
+        rate: spec.sample_rate,
+        channels: spec.channels,
+        samples,
+    })
 }
 
 fn decode_ogg(d: &[u8]) -> Result<Pcm, String> {
-    let mut r = lewton::inside_ogg::OggStreamReader::new(Cursor::new(d)).map_err(|e| e.to_string())?;
+    let mut r =
+        lewton::inside_ogg::OggStreamReader::new(Cursor::new(d)).map_err(|e| e.to_string())?;
     let rate = r.ident_hdr.audio_sample_rate;
     let channels = r.ident_hdr.audio_channels as u16;
     let mut samples = Vec::new();
     while let Some(p) = r.read_dec_packet_itl().map_err(|e| e.to_string())? {
         samples.extend_from_slice(&p);
     }
-    Ok(Pcm { rate, channels, samples })
+    Ok(Pcm {
+        rate,
+        channels,
+        samples,
+    })
 }
 
 impl Assets {
@@ -146,7 +172,11 @@ impl Assets {
                 .spawn(move || worker(sh, urx, prx))
                 .expect("spawn decoder");
         }
-        Self { sh, urgent: utx, prefetch: ptx }
+        Self {
+            sh,
+            urgent: utx,
+            prefetch: ptx,
+        }
     }
 
     pub fn data(&self) -> &Arc<GameData> {
@@ -164,7 +194,11 @@ impl Assets {
         }
         g.0.insert(name.to_string(), Slot::Pending);
         drop(g);
-        let _ = if urgent { self.urgent.send(name.to_string()) } else { self.prefetch.send(name.to_string()) };
+        let _ = if urgent {
+            self.urgent.send(name.to_string())
+        } else {
+            self.prefetch.send(name.to_string())
+        };
     }
 
     /// Pide decodificar en segundo plano (no bloquea). `name` debe ser canónico.
@@ -239,7 +273,9 @@ fn timed_decode(sh: &Shared, name: &str) -> Asset {
     let t = Instant::now();
     let a = decode(&sh.data, name);
     sh.stats.decoded.fetch_add(1, Ordering::Relaxed);
-    sh.stats.decode_us.fetch_add(t.elapsed().as_micros() as usize, Ordering::Relaxed);
+    sh.stats
+        .decode_us
+        .fetch_add(t.elapsed().as_micros() as usize, Ordering::Relaxed);
     if let Asset::Failed(e) = &a {
         log::warn!("decode failed: {e}");
     }
@@ -254,14 +290,15 @@ fn store(sh: &Shared, name: &str, a: Asset) {
     g.0.insert(name.to_string(), Slot::Ready(a, clock));
     // expulsión LRU aproximada si superamos el límite (nunca scripts)
     if g.2 > sh.cap_bytes {
-        let mut v: Vec<(u64, String, usize)> = g
-            .0
-            .iter()
-            .filter_map(|(k, s)| match s {
-                Slot::Ready(a, t) if !matches!(a, Asset::Script(_)) => Some((*t, k.clone(), a.bytes())),
-                _ => None,
-            })
-            .collect();
+        let mut v: Vec<(u64, String, usize)> =
+            g.0.iter()
+                .filter_map(|(k, s)| match s {
+                    Slot::Ready(a, t) if !matches!(a, Asset::Script(_)) => {
+                        Some((*t, k.clone(), a.bytes()))
+                    }
+                    _ => None,
+                })
+                .collect();
         v.sort();
         for (_, k, b) in v {
             if g.2 <= sh.cap_bytes * 3 / 4 {
@@ -294,7 +331,8 @@ mod tests {
     use super::*;
     #[test]
     fn pool_decodes() {
-        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&p).unwrap();
         let a = Assets::new(data, 2, 64);
         a.prefetch("bg.gal");
@@ -321,7 +359,10 @@ mod tests {
                 assert_eq!(img.delays, vec![67, 233, 67]);
                 assert_eq!(&img.frames[1][0..4], &[0, 255, 0, 255]);
                 let direct = crate::gal::decode(&raw).unwrap();
-                assert_eq!((direct.frames.len(), &direct.delays), (img.frames.len(), &img.delays));
+                assert_eq!(
+                    (direct.frames.len(), &direct.delays),
+                    (img.frames.len(), &img.delays)
+                );
             }
             _ => panic!("anim.gal"),
         }

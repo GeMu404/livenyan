@@ -47,6 +47,9 @@ struct Cli {
     /// Incluye el texto del juego en la salida (por defecto se oculta).
     #[arg(long)]
     show_text: bool,
+    /// Dibuja solo contornos y etiquetas de objetos, sin sprites ni animaciones.
+    #[arg(long)]
+    debug_layout: bool,
     /// Archivo de configuración (por defecto $XDG_CONFIG_HOME/livenyan/config.toml).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -72,12 +75,17 @@ struct Cli {
 
 fn parse_res(s: &str) -> Result<(u32, u32), String> {
     let (w, h) = s.split_once(['x', 'X']).ok_or("expected WxH")?;
-    Ok((w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?))
+    Ok((
+        w.parse().map_err(|_| "bad width")?,
+        h.parse().map_err(|_| "bad height")?,
+    ))
 }
 
 fn main() {
     let t0 = Instant::now();
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or("LIVENYAN_LOG", "warn")).format_timestamp_millis().init();
+    env_logger::Builder::from_env(env_logger::Env::new().filter_or("LIVENYAN_LOG", "warn"))
+        .format_timestamp_millis()
+        .init();
     let cli = Cli::parse();
     if let Err(e) = real_main(cli, t0) {
         eprintln!("livenyan: {e}");
@@ -118,7 +126,11 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         game.logical.1,
         game.logical_source
     );
-    let assets = Arc::new(Assets::new(game.data.clone(), cfg.threads(), cfg.assets.cache_mb));
+    let assets = Arc::new(Assets::new(
+        game.data.clone(),
+        cfg.threads(),
+        cfg.assets.cache_mb,
+    ));
 
     if let Some(name) = &cli.gal_stats {
         let n = match game.data.resolve(name, livenyan::assets::IMAGE_EXTS) {
@@ -126,7 +138,10 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
             None => {
                 // por sufijo / nombre base (sin carpetas, con o sin extensión)
                 let want = name.replace('/', "\\").to_lowercase();
-                let stem = want.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(want.clone());
+                let stem = want
+                    .rsplit_once('.')
+                    .map(|(a, _)| a.to_string())
+                    .unwrap_or(want.clone());
                 let c: Vec<&String> = game
                     .data
                     .names()
@@ -146,7 +161,9 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
                         for x in &c {
                             eprintln!("  {x}");
                         }
-                        return Err("ambiguous --gal-stats name; pass one of the paths above".into());
+                        return Err(
+                            "ambiguous --gal-stats name; pass one of the paths above".into()
+                        );
                     }
                 }
             }
@@ -185,10 +202,14 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         log::warn!("cannot create save dir {}: {e}", game.save_dir().display());
     }
     let snap = match cli.snapshot_frame.as_deref() {
-        Some([n, p]) => Some((n.parse::<u64>().map_err(|_| format!("bad frame number {n:?}"))?, PathBuf::from(p))),
+        Some([n, p]) => Some((
+            n.parse::<u64>()
+                .map_err(|_| format!("bad frame number {n:?}"))?,
+            PathBuf::from(p),
+        )),
         _ => None,
     };
-    let r = livenyan::app::run(game, cfg, assets, vm, t0, snap);
+    let r = livenyan::app::run(game, cfg, assets, vm, t0, snap, cli.debug_layout);
     // salir de verdad aunque queden hilos de decodificación/audio vivos
     if let Err(e) = &r {
         eprintln!("error: {e}");
@@ -198,58 +219,123 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     std::process::exit(0)
 }
 
-fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool) -> Result<(), String> {
+fn info(
+    game: &Game,
+    assets: &Assets,
+    cfg: &Config,
+    t0: Instant,
+    show_text: bool,
+) -> Result<(), String> {
     let names = game.data.names();
     let mut exts: HashMap<String, usize> = HashMap::new();
     for n in names {
-        let e = n.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+        let e = n
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_lowercase())
+            .unwrap_or_default();
         *exts.entry(e).or_default() += 1;
     }
     let mut exts: Vec<_> = exts.into_iter().collect();
     exts.sort_by(|a, b| b.1.cmp(&a.1));
     println!("archive:     {}", game.data.describe());
     println!("entries:     {}", names.len());
-    println!("by type:     {}", exts.iter().map(|(e, n)| format!(".{e} {n}")).collect::<Vec<_>>().join(", "));
+    println!(
+        "by type:     {}",
+        exts.iter()
+            .map(|(e, n)| format!(".{e} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     if let Some(p) = &game.project {
-        println!("project:     lpb v{} init={:?} exit={:?} settings={}", p.version, p.init_lsb, p.exit_lsb, p.settings.len());
+        println!(
+            "project:     lpb v{} init={:?} exit={:?} settings={}",
+            p.version,
+            p.init_lsb,
+            p.exit_lsb,
+            p.settings.len()
+        );
         // claves y valores numéricos (las cadenas solo como longitud salvo --show-text): sirve
         // para localizar dónde guarda el .lpb el tamaño de pantalla sin filtrar texto del juego
         println!("  lpb unk:   {:?}", p.unk);
         for (k, v) in &p.settings {
-            let shown = if v.trim().parse::<f64>().is_ok() || show_text { v.clone() } else { format!("<{} chars>", v.chars().count()) };
+            let shown = if v.trim().parse::<f64>().is_ok() || show_text {
+                v.clone()
+            } else {
+                format!("<{} chars>", v.chars().count())
+            };
             println!("  setting {k} = {shown}");
         }
     } else {
         println!("project:     (no .lpb)");
     }
     for f in livenyan::game::exe_forms(&game.path) {
-        println!("  exe form {} {}x{}{}", f.class, f.w, f.h, if f.main { " (largest/main-like; not used)" } else { "" });
+        println!(
+            "  exe form {} {}x{}{}",
+            f.class,
+            f.w,
+            f.h,
+            if f.main {
+                " (largest/main-like; not used)"
+            } else {
+                ""
+            }
+        );
     }
     println!("entry:       {}", game.entry);
     // autocomprobación del decodificador GAL: primeras 30 imágenes
     {
-        let gals: Vec<&String> = names.iter().filter(|n| n.to_lowercase().ends_with(".gal")).take(30).collect();
+        let gals: Vec<&String> = names
+            .iter()
+            .filter(|n| n.to_lowercase().ends_with(".gal"))
+            .take(30)
+            .collect();
         let mut c: std::collections::BTreeMap<&str, u32> = Default::default();
         let mut bad = vec![];
         for n in &gals {
-            let k = game.data.read(n).map(|d| livenyan::gal::quick_class(&d)).unwrap_or_else(|e| format!("error: read {e}"));
-            let class = if k.starts_with("ok") { "ok" } else if k.starts_with("error") { "error" } else if k == "all-black" { "all-black" } else { "all-transparent" };
+            let k = game
+                .data
+                .read(n)
+                .map(|d| livenyan::gal::quick_class(&d))
+                .unwrap_or_else(|e| format!("error: read {e}"));
+            let class = if k.starts_with("ok") {
+                "ok"
+            } else if k.starts_with("error") {
+                "error"
+            } else if k == "all-black" {
+                "all-black"
+            } else {
+                "all-transparent"
+            };
             *c.entry(class).or_default() += 1;
             if k != "ok" {
                 bad.push(format!("{n} ({k})"));
             }
         }
-        println!("gal check:   {} decoded: {}", gals.len(), c.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+        println!(
+            "gal check:   {} decoded: {}",
+            gals.len(),
+            c.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         for b in bad.iter().take(30) {
             println!("  note: {b}");
         }
     }
-    println!("resolution:  {}x{} (source: {})", game.logical.0, game.logical.1, game.logical_source);
+    println!(
+        "resolution:  {}x{} (source: {})",
+        game.logical.0, game.logical.1, game.logical_source
+    );
     println!("save dir:    {}", game.save_dir().display());
     println!("open time:   {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
     // parseo de todos los LSB en paralelo
     let t = Instant::now();
-    let lsbs: Vec<String> = names.iter().filter(|n| n.to_lowercase().ends_with(".lsb")).cloned().collect();
+    let lsbs: Vec<String> = names
+        .iter()
+        .filter(|n| n.to_lowercase().ends_with(".lsb"))
+        .cloned()
+        .collect();
     for n in &lsbs {
         assets.prefetch(n);
     }
@@ -267,7 +353,12 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
             None => failed.push(n.clone()),
         }
     }
-    println!("lsb:         {ok}/{} parsed in {:.1} ms ({} threads)", lsbs.len(), t.elapsed().as_secs_f64() * 1000.0, cfg.threads());
+    println!(
+        "lsb:         {ok}/{} parsed in {:.1} ms ({} threads)",
+        lsbs.len(),
+        t.elapsed().as_secs_f64() * 1000.0,
+        cfg.threads()
+    );
     for f in &failed {
         println!("  FAILED {f}");
     }
@@ -281,36 +372,76 @@ fn info(game: &Game, assets: &Assets, cfg: &Config, t0: Instant, show_text: bool
 }
 
 fn dump(game: &Game, name: &str, show: bool) -> Result<(), String> {
-    let n = livenyan::game::resolve_lsb(&game.data, name).ok_or_else(|| format!("{name}: not found"))?;
+    let n = livenyan::game::resolve_lsb(&game.data, name)
+        .ok_or_else(|| format!("{name}: not found"))?;
     let raw = game.data.read(&n).map_err(|e| e.to_string())?;
     let l = Lsb::parse(&n, &raw).map_err(|e| e.0)?;
-    println!("# {} version={} commands={}", l.name, l.version, l.commands.len());
+    println!(
+        "# {} version={} commands={}",
+        l.name,
+        l.version,
+        l.commands.len()
+    );
     for (i, c) in l.commands.iter().enumerate() {
         let mut parts = vec![];
         for (k, f) in &c.fields {
             let s = match f {
                 Field::Expr(e) if e.is_empty() => continue,
                 // nombres de objeto / destinos no son texto del juego
-                Field::Expr(e) => e.render(!show && !matches!(*k, "Target" | "Name" | "ObjName" | "ObjProp")),
-                Field::Exprs(es) => format!("[{}]", es.iter().map(|e| e.render(!show)).collect::<Vec<_>>().join(", ")),
-                Field::Str(s) if *k == "Name" || *k == "Result" || *k == "VarName" || *k == "Page" => format!("{s:?}"),
-                Field::Str(s) => if show { format!("{s:?}") } else { format!("<{} chars>", s.chars().count()) },
+                Field::Expr(e) => {
+                    e.render(!show && !matches!(*k, "Target" | "Name" | "ObjName" | "ObjProp"))
+                }
+                Field::Exprs(es) => format!(
+                    "[{}]",
+                    es.iter()
+                        .map(|e| e.render(!show))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Field::Str(s)
+                    if *k == "Name" || *k == "Result" || *k == "VarName" || *k == "Page" =>
+                {
+                    format!("{s:?}")
+                }
+                Field::Str(s) => {
+                    if show {
+                        format!("{s:?}")
+                    } else {
+                        format!("<{} chars>", s.chars().count())
+                    }
+                }
                 Field::U32(v) => v.to_string(),
                 Field::Byte(v) => v.to_string(),
                 Field::Page(p) => format!("{}:{}", p.page, p.label),
                 Field::Text(t) => {
-                    if show { format!("{:?}", t.plain_text()) } else { format!("<TpWord v{} {} chars>", t.version, t.char_count()) }
+                    if show {
+                        format!("{:?}", t.plain_text())
+                    } else {
+                        format!("<TpWord v{} {} chars>", t.version, t.char_count())
+                    }
                 }
                 Field::Props(ps) => ps
                     .iter()
                     .filter(|(_, e)| !e.is_empty())
-                    .map(|(p, e)| format!("{}={}", livenyan::lsb::prop_name(*p), e.render(!show_prop(*p, show))))
+                    .map(|(p, e)| {
+                        format!(
+                            "{}={}",
+                            livenyan::lsb::prop_name(*p),
+                            e.render(!show_prop(*p, show))
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" "),
             };
             parts.push(format!("{k}: {s}"));
         }
-        println!("{i:5} L{:<5} {}{} {}", c.line_no, "  ".repeat(c.indent.min(16) as usize), c.name(), parts.join("; "));
+        println!(
+            "{i:5} L{:<5} {}{} {}",
+            c.line_no,
+            "  ".repeat(c.indent.min(16) as usize),
+            c.name(),
+            parts.join("; ")
+        );
     }
     Ok(())
 }
@@ -318,7 +449,8 @@ fn dump(game: &Game, name: &str, show: bool) -> Result<(), String> {
 /// Propiedades cuyo contenido no es texto del juego (nombres, rutas, números).
 fn show_prop(p: u8, show: bool) -> bool {
     use livenyan::lsb::Prop;
-    show || matches!(p, Prop::NAME | Prop::SOURCE | Prop::PARENT) || p != Prop::TEXT && p != Prop::CAPTUREMASK
+    show || matches!(p, Prop::NAME | Prop::SOURCE | Prop::PARENT)
+        || p != Prop::TEXT && p != Prop::CAPTUREMASK
 }
 
 fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
@@ -403,22 +535,44 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         }
     }
     println!("# auto-clicks on objects: {fired}");
-    let mut uniq: Vec<&String> = vm.script_log.iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let mut uniq: Vec<&String> = vm
+        .script_log
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     uniq.sort();
-    println!("# scripts entered: {} ({} distinct)", vm.script_log.len(), uniq.len());
+    println!(
+        "# scripts entered: {} ({} distinct)",
+        vm.script_log.len(),
+        uniq.len()
+    );
     match vm.cycle() {
         Some((p, reps)) => {
             let tail = &vm.script_log[vm.script_log.len() - p..];
-            println!("# cycling: last {p} script entries repeated {reps}x: {}", tail.join(" > "));
+            println!(
+                "# cycling: last {p} script entries repeated {reps}x: {}",
+                tail.join(" > ")
+            );
         }
         None => println!("# cycling: no"),
     }
     let mut edges: Vec<(&String, &u64)> = vm.edges.iter().collect();
     edges.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    println!("# jump/call chain ({} distinct edges, most used first):", edges.len());
+    println!(
+        "# jump/call chain ({} distinct edges, most used first):",
+        edges.len()
+    );
     for (e, n) in edges.iter().take(40) {
         println!("#   {e} x{n}");
     }
-    println!("# counts: {}", vm.counts_sorted().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+    println!(
+        "# counts: {}",
+        vm.counts_sorted()
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     Ok(())
 }

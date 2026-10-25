@@ -1,8 +1,8 @@
 //! Audio vía SDL3: un AudioStream por canal (nombre de objeto Sound), mezclado por SDL.
 
 use crate::assets::{Asset, Assets, Pcm};
-use sdl3::audio::{AudioDevice, AudioFormat, AudioSpec, AudioStreamOwner};
 use sdl3::AudioSubsystem;
+use sdl3::audio::{AudioDevice, AudioFormat, AudioSpec, AudioStreamOwner};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -30,15 +30,30 @@ pub struct Audio {
 impl Audio {
     pub fn new(sub: AudioSubsystem, master: f32) -> Result<Self, String> {
         let device = sub
-            .open_playback_device(&AudioSpec { freq: None, channels: None, format: None })
+            .open_playback_device(&AudioSpec {
+                freq: None,
+                channels: None,
+                format: None,
+            })
             .map_err(|e| e.to_string())?;
-        Ok(Self { sub, device, chans: HashMap::new(), pending: vec![], master })
+        Ok(Self {
+            sub,
+            device,
+            chans: HashMap::new(),
+            pending: vec![],
+            master,
+        })
     }
 
     pub fn play(&mut self, channel: String, file: String, volume: f32, repeat: bool) {
         self.pending.retain(|p| p.channel != channel);
         self.chans.remove(&channel);
-        self.pending.push(PendingPlay { channel, file, volume, repeat });
+        self.pending.push(PendingPlay {
+            channel,
+            file,
+            volume,
+            repeat,
+        });
     }
 
     pub fn stop(&mut self, channel: &str) {
@@ -71,13 +86,33 @@ impl Audio {
     }
 
     fn start(&mut self, p: &PendingPlay, pcm: Arc<Pcm>) -> Result<(), String> {
-        let spec = AudioSpec { freq: Some(pcm.rate as i32), channels: Some(pcm.channels as i32), format: Some(AudioFormat::S16LE) };
-        let stream = self.sub.new_stream(Some(&spec), None).map_err(|e| e.to_string())?;
+        let spec = AudioSpec {
+            freq: Some(pcm.rate as i32),
+            channels: Some(pcm.channels as i32),
+            format: Some(AudioFormat::S16LE),
+        };
+        let stream = self
+            .sub
+            .new_stream(Some(&spec), None)
+            .map_err(|e| e.to_string())?;
         // enlazar primero: el formato de destino lo fija el dispositivo
-        self.device.bind_stream(&stream).map_err(|e| e.to_string())?;
-        stream.set_gain(p.volume * self.master).map_err(|e| e.to_string())?;
-        stream.put_data_i16(&pcm.samples).map_err(|e| e.to_string())?;
-        self.chans.insert(p.channel.clone(), Chan { stream, pcm, repeat: p.repeat });
+        self.device
+            .bind_stream(&stream)
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_gain(p.volume * self.master)
+            .map_err(|e| e.to_string())?;
+        stream
+            .put_data_i16(&pcm.samples)
+            .map_err(|e| e.to_string())?;
+        self.chans.insert(
+            p.channel.clone(),
+            Chan {
+                stream,
+                pcm,
+                repeat: p.repeat,
+            },
+        );
         Ok(())
     }
 }

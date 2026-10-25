@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 /// Decodifica CP932 (Windows-31J / MS Shift-JIS).
 pub fn cp932(b: &[u8]) -> String {
-    encoding_rs::SHIFT_JIS.decode_without_bom_handling(b).0.into_owned()
+    encoding_rs::SHIFT_JIS
+        .decode_without_bom_handling(b)
+        .0
+        .into_owned()
 }
 
 #[cfg(unix)]
@@ -38,7 +41,9 @@ fn env_dir(var: &str, fallback: &[&str]) -> PathBuf {
     if let Some(a) = std::env::var_os("APPDATA") {
         return PathBuf::from(a);
     }
-    let mut p = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let mut p = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     for f in fallback {
         p.push(f);
     }

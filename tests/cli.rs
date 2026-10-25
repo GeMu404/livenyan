@@ -2,8 +2,15 @@
 use std::process::Command;
 
 fn run(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_livenyan")).args(args).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap()
 }
 
@@ -70,7 +77,16 @@ fn paramstr_per_frame() {
 #[test]
 fn while_end_listcompo_props_timer() {
     let s = run(&["--trace", "--steps", "5000", &fx("evt4")]);
-    for want in ["SetProp \"c1\".LEFT", "SetProp \"c2\".TOP", "While -> false", "Calc after = 1", "Calc delim = 1", "event tm.ONPLAYEND -> tick.lsc", "state=ended", "# unimplemented: none"] {
+    for want in [
+        "SetProp \"c1\".LEFT",
+        "SetProp \"c2\".TOP",
+        "While -> false",
+        "Calc after = 1",
+        "Calc delim = 1",
+        "event tm.ONPLAYEND -> tick.lsc",
+        "state=ended",
+        "# unimplemented: none",
+    ] {
         assert!(s.contains(want), "missing {want:?}\n{s}");
     }
     assert_eq!(s.matches("While -> true").count() >= 2, true);
@@ -87,7 +103,13 @@ fn trace_detects_busy_loop() {
 #[test]
 fn cinema_and_prevmenu_autoselect() {
     let s = run(&["--trace", "--steps", "20000", &fx("evt6")]);
-    for want in ["event mv.ONPLAYEND -> mvend.lsc", "auto-select menu title[1]", "event title.ONSELECT -> sel.lsc", "Calc primary = 1", "state=ended"] {
+    for want in [
+        "event mv.ONPLAYEND -> mvend.lsc",
+        "auto-select menu title[1]",
+        "event title.ONSELECT -> sel.lsc",
+        "Calc primary = 1",
+        "state=ended",
+    ] {
         assert!(s.contains(want), "missing {want:?}\n{s}");
     }
 }
@@ -97,7 +119,10 @@ fn cinema_and_prevmenu_autoselect() {
 fn trace_reports_cycle() {
     let s = run(&["--trace", "--steps", "3000", &fx("evt7")]);
     assert!(s.contains("(3 distinct)"), "{s}");
-    assert!(s.contains("# cycling: last 3 script entries repeated"), "{s}");
+    assert!(
+        s.contains("# cycling: last 3 script entries repeated"),
+        "{s}"
+    );
     let t = run(&["--trace", &fx("evt6")]);
     assert!(t.contains("# cycling: no"), "{t}");
 }
@@ -109,17 +134,30 @@ fn snapshot_renders_child_image() {
     let out = std::env::temp_dir().join(format!("livenyan-snap-{}.png", std::process::id()));
     let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
         .env("SDL_VIDEODRIVER", "offscreen")
-        .args(["--mute", "--snapshot-frame", "20", out.to_str().unwrap(), &fx("render")])
+        .args([
+            "--mute",
+            "--snapshot-frame",
+            "20",
+            out.to_str().unwrap(),
+            &fx("render"),
+        ])
         .output()
         .unwrap();
     if !r.status.success() {
-        eprintln!("skipping: offscreen video unavailable: {}", String::from_utf8_lossy(&r.stderr));
+        eprintln!(
+            "skipping: offscreen video unavailable: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         return;
     }
     let img = image::open(&out).unwrap().to_rgba8();
     let _ = std::fs::remove_file(&out);
     assert_eq!(img.dimensions(), (800, 600));
-    assert_eq!(img.get_pixel(15, 12).0, [255, 0, 0, 255], "child image not visible");
+    assert_eq!(
+        img.get_pixel(15, 12).0,
+        [255, 0, 0, 255],
+        "child image not visible"
+    );
     assert_eq!(img.get_pixel(5, 5).0, [0, 0, 0, 255]);
 }
 
@@ -128,11 +166,17 @@ fn snapshot_renders_child_image() {
 fn trace_conds_and_jump_chain() {
     let s = run(&["--trace", "--trace-conds", "--steps", "3000", &fx("evt7")]);
     assert!(s.contains("# jump/call chain"), "{s}");
-    assert!(s.contains("Jump ゲームメイン.lsb:3 -> ゲームメイン.lsb:0 x"), "{s}");
+    assert!(
+        s.contains("Jump ゲームメイン.lsb:3 -> ゲームメイン.lsb:0 x"),
+        "{s}"
+    );
     let t = run(&["--trace", "--trace-conds", &fx("evt4")]);
     assert!(t.contains("cond ゲームメイン.lsb:6 While"), "{t}");
     assert!(t.contains("i=Int(0)"), "{t}");
-    assert!(t.matches("cond ゲームメイン.lsb:6 While").count() <= 4, "{t}");
+    assert!(
+        t.matches("cond ゲームメイン.lsb:6 While").count() <= 4,
+        "{t}"
+    );
 }
 
 /// Capa raíz "\x01" (PARENT y SetProp), COLOR como TColor BGR, GetProp de PARENT ausente = "".
@@ -144,7 +188,15 @@ fn root_layer_tcolor_and_getprop_defaults() {
     let out = std::env::temp_dir().join(format!("livenyan-snap2-{}.png", std::process::id()));
     let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
         .env("SDL_VIDEODRIVER", "offscreen")
-        .args(["--mute", "--renderer", "software", "--snapshot-frame", "10", out.to_str().unwrap(), &fx("render2")])
+        .args([
+            "--mute",
+            "--renderer",
+            "software",
+            "--snapshot-frame",
+            "10",
+            out.to_str().unwrap(),
+            &fx("render2"),
+        ])
         .output()
         .unwrap();
     if !r.status.success() {
@@ -153,8 +205,16 @@ fn root_layer_tcolor_and_getprop_defaults() {
     }
     let img = image::open(&out).unwrap().to_rgba8();
     let _ = std::fs::remove_file(&out);
-    assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255], "TColor 0x0000FF must be red");
-    assert_eq!(img.get_pixel(105, 103).0, [0, 0, 255, 255], "image under root layer must draw above the box");
+    assert_eq!(
+        img.get_pixel(5, 5).0,
+        [255, 0, 0, 255],
+        "TColor 0x0000FF must be red"
+    );
+    assert_eq!(
+        img.get_pixel(105, 103).0,
+        [0, 0, 255, 255],
+        "image under root layer must draw above the box"
+    );
 }
 
 /// Regresión: un título en bucle que pide clics de texto cada vuelta. --trace debe seguir
@@ -165,17 +225,33 @@ fn title_loop_clicks_and_menu_pick() {
     assert!(s.contains("auto-select menu title[1]"), "{s}");
     assert!(s.contains("Calc started = 1"), "{s}");
     assert!(s.contains("state=ended"), "{s}");
-    let clicks: u32 = s.split(" clicks").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
+    let clicks: u32 = s
+        .split(" clicks")
+        .next()
+        .unwrap()
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(clicks > 10, "text clicks must keep advancing: {clicks}");
     let p0 = run(&["--trace", "--pick", "0", "--steps", "3000", &fx("evt8")]);
-    assert!(p0.contains("auto-select menu title[0]") && !p0.contains("started = 1") && !p0.contains("# stalled"), "{p0}");
+    assert!(
+        p0.contains("auto-select menu title[0]")
+            && !p0.contains("started = 1")
+            && !p0.contains("# stalled"),
+        "{p0}"
+    );
 }
 
 /// --gal-stats solo imprime estadísticas.
 #[test]
 fn gal_stats_output() {
     let s = run(&["--gal-stats", "pic.gal", &fx("render2")]);
-    assert!(s.contains("version Gale106 size 16x8 bpp 24 frames 1"), "{s}");
+    assert!(
+        s.contains("version Gale106 size 16x8 bpp 24 frames 1"),
+        "{s}"
+    );
     assert!(s.contains("avg rgb (0,0,255) avg alpha 255"), "{s}");
     let i = run(&["--info", &fx("game.exe")]);
     assert!(i.contains("gal check:   1 decoded: ok=1"), "{i}");
@@ -206,7 +282,10 @@ fn gal_animation_plays_and_ends() {
 #[test]
 fn screen_click_reaches_hidden_box() {
     let s = run(&["--trace", "--steps", "5000", &fx("evt11")]);
-    assert!(s.contains("auto-click on screen -> advance text (released ghost)"), "{s}");
+    assert!(
+        s.contains("auto-click on screen -> advance text (released ghost)"),
+        "{s}"
+    );
     assert!(s.contains("auto-click on screen -> mb.ONLBTNUP"), "{s}");
     assert!(s.contains("Calc released = 1"), "{s}");
 }
@@ -226,11 +305,22 @@ fn createcg_text_event_draws_color_background() {
     let out = std::env::temp_dir().join(format!("livenyan-cg-{}.png", std::process::id()));
     let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
         .env("SDL_VIDEODRIVER", "offscreen")
-        .args(["--mute", "--res", "800x600", "--snapshot-frame", "90", out.to_str().unwrap(), &fx("evt13")])
+        .args([
+            "--mute",
+            "--res",
+            "800x600",
+            "--snapshot-frame",
+            "90",
+            out.to_str().unwrap(),
+            &fx("evt13"),
+        ])
         .output()
         .unwrap();
     if !r.status.success() {
-        eprintln!("skipping: offscreen video unavailable: {}", String::from_utf8_lossy(&r.stderr));
+        eprintln!(
+            "skipping: offscreen video unavailable: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         return;
     }
     let img = image::open(&out).unwrap().to_rgba8();
@@ -245,7 +335,15 @@ fn createcg_wait_holds_text_until_animation_ends() {
     let r = Command::new(env!("CARGO_BIN_EXE_livenyan"))
         .env("SDL_VIDEODRIVER", "offscreen")
         .env("LIVENYAN_LOG", "debug")
-        .args(["--mute", "--res", "800x600", "--snapshot-frame", "200", out.to_str().unwrap(), &fx("evt14")])
+        .args([
+            "--mute",
+            "--res",
+            "800x600",
+            "--snapshot-frame",
+            "200",
+            out.to_str().unwrap(),
+            &fx("evt14"),
+        ])
         .output()
         .unwrap();
     let _ = std::fs::remove_file(&out);

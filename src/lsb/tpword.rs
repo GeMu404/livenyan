@@ -11,16 +11,34 @@ pub struct Decorator {
 
 #[derive(Debug, Clone)]
 pub enum Glyph {
-    Char { ch: String, decorator: i32, link: i32, speed: u32, condition: i32 },
+    Char {
+        ch: String,
+        decorator: i32,
+        link: i32,
+        speed: u32,
+        condition: i32,
+    },
     /// Cambio de alineación/div.
-    Div { align: u8 },
+    Div {
+        align: u8,
+    },
     /// 0=línea 1=página 2=pausa 3=borrar
-    Return { kind: u8 },
+    Return {
+        kind: u8,
+    },
     Indent,
     Undent,
-    Event { event: String },
-    Var { name: String, hist: bool },
-    Img { src: String, align: u8 },
+    Event {
+        event: String,
+    },
+    Var {
+        name: String,
+        hist: bool,
+    },
+    Img {
+        src: String,
+        align: u8,
+    },
     Unknown(u8),
 }
 
@@ -51,7 +69,10 @@ impl TpWord {
             .ok()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| ParseError("bad TpWord version".into()))?;
-        let mut tw = TpWord { version: v, ..Default::default() };
+        let mut tw = TpWord {
+            version: v,
+            ..Default::default()
+        };
         let n = r.count()?;
         for _ in 0..n {
             let _count = r.u32()?;
@@ -67,7 +88,10 @@ impl TpWord {
                 r.u32()?;
                 r.u32()?;
             }
-            tw.decorators.push(Decorator { ruby, raw: [a, b, c, u7] });
+            tw.decorators.push(Decorator {
+                ruby,
+                raw: [a, b, c, u7],
+            });
         }
         if v >= 104 {
             let n = r.count()?;
@@ -105,7 +129,10 @@ impl TpWord {
     }
 
     pub fn char_count(&self) -> usize {
-        self.body.iter().filter(|g| matches!(g, Glyph::Char { .. })).count()
+        self.body
+            .iter()
+            .filter(|g| matches!(g, Glyph::Char { .. }))
+            .count()
     }
 
     pub fn images(&self) -> impl Iterator<Item = &str> {
@@ -136,9 +163,19 @@ fn parse_glyph(r: &mut Reader, v: u32) -> Result<Glyph> {
         1 => {
             let (link, speed) = real(r)?;
             let raw = r.u16()?;
-            let ch = if raw >> 8 == 0 { cp932(&[raw as u8]) } else { cp932(&[(raw >> 8) as u8, raw as u8]) };
+            let ch = if raw >> 8 == 0 {
+                cp932(&[raw as u8])
+            } else {
+                cp932(&[(raw >> 8) as u8, raw as u8])
+            };
             let decorator = r.i32()?;
-            Glyph::Char { ch, decorator, link, speed, condition }
+            Glyph::Char {
+                ch,
+                decorator,
+                link,
+                speed,
+                condition,
+            }
         }
         2 => {
             let align = r.u8()?;
@@ -164,8 +201,15 @@ fn parse_glyph(r: &mut Reader, v: u32) -> Result<Glyph> {
             if v >= 105 {
                 r.i32()?;
             }
-            let name = if v < 102 { LiveParser::parse(r)?.render(false) } else { r.string()? };
-            Glyph::Var { name, hist: t == 10 }
+            let name = if v < 102 {
+                LiveParser::parse(r)?.render(false)
+            } else {
+                r.string()?
+            };
+            Glyph::Var {
+                name,
+                hist: t == 10,
+            }
         }
         9 => {
             real(r)?;

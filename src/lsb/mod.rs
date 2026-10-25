@@ -5,7 +5,7 @@ pub mod names;
 pub mod tpword;
 
 use crate::util::cp932;
-pub use names::{cmd_name, func_name, prop_name, CmdType, Prop};
+pub use names::{CmdType, Prop, cmd_name, func_name, prop_name};
 pub use tpword::{Glyph, TpWord};
 
 pub const MIN_LSB_VERSION: u32 = 103;
@@ -73,7 +73,11 @@ pub fn extended_to_f64(b: &[u8]) -> f64 {
         return 0.0 * sign;
     }
     if exp == 0x7FFF {
-        return if mant << 1 == 0 { sign * f64::INFINITY } else { f64::NAN };
+        return if mant << 1 == 0 {
+            sign * f64::INFINITY
+        } else {
+            f64::NAN
+        };
     }
     sign * (mant as f64 / (1u64 << 63) as f64) * 2f64.powi(exp - 16383)
 }
@@ -151,7 +155,12 @@ impl LiveParser {
             for _ in 0..count {
                 operands.push(Param::parse(r)?);
             }
-            entries.push(OpeData { op, name, func, operands });
+            entries.push(OpeData {
+                op,
+                name,
+                func,
+                operands,
+            });
         }
         Ok(Self { entries })
     }
@@ -167,10 +176,13 @@ impl LiveParser {
     }
     /// Todos los literales de cadena (para prefetch de recursos).
     pub fn strings(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().flat_map(|e| e.operands.iter()).filter_map(|p| match p {
-            Param::Str(s) => Some(s.as_str()),
-            _ => None,
-        })
+        self.entries
+            .iter()
+            .flat_map(|e| e.operands.iter())
+            .filter_map(|p| match p {
+                Param::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
     }
     /// Representación legible (sin literales de texto si `redact`).
     pub fn render(&self, redact: bool) -> String {
@@ -178,7 +190,9 @@ impl LiveParser {
         let mut m: HashMap<&str, String> = HashMap::new();
         let p = |m: &HashMap<&str, String>, x: &Param| -> String {
             match x {
-                Param::Var(v) if v.starts_with("____") => m.get(v.as_str()).cloned().unwrap_or_else(|| v.clone()),
+                Param::Var(v) if v.starts_with("____") => {
+                    m.get(v.as_str()).cloned().unwrap_or_else(|| v.clone())
+                }
                 Param::Var(v) => v.clone(),
                 Param::Int(i) => i.to_string(),
                 Param::Float(f) => f.to_string(),
@@ -190,7 +204,13 @@ impl LiveParser {
         let mut last = String::new();
         for e in &self.entries {
             let a: Vec<String> = e.operands.iter().map(|x| p(&m, x)).collect();
-            let bin = |s: &str| format!("({} {s} {})", a.first().cloned().unwrap_or_default(), a.get(1).cloned().unwrap_or_default());
+            let bin = |s: &str| {
+                format!(
+                    "({} {s} {})",
+                    a.first().cloned().unwrap_or_default(),
+                    a.get(1).cloned().unwrap_or_default()
+                )
+            };
             let s = match e.op {
                 op::TO => a.last().cloned().unwrap_or_default(),
                 op::PLUS => bin("+"),
@@ -221,7 +241,11 @@ impl LiveParser {
                 _ => format!("?op{}", e.op),
             };
             last = if e.name.starts_with("____") || e.op != op::TO {
-                if e.name == "____arg" || e.name.starts_with("____") { s.clone() } else { format!("{} = {s}", e.name) }
+                if e.name == "____arg" || e.name.starts_with("____") {
+                    s.clone()
+                } else {
+                    format!("{} = {s}", e.name)
+                }
             } else {
                 format!("{} = {s}", e.name)
             };
@@ -374,7 +398,13 @@ fn spec(kind: u8) -> &'static [(&'static str, F)] {
         T::TextIns => &[("Text", T), ("Target", E), ("Hist", E), ("Wait", E), STOP],
         T::MovieStop => &[("Target", E), ("Time", E), ("Wait", E), STOP],
         T::MenuClose | T::TextClr | T::MediaPlay => &[("Target", E)],
-        T::CallHist => &[("Target", E), ("Index", E), ("Count", E), ("CutBreak", E), ("FormatName", EIf(0x6E))],
+        T::CallHist => &[
+            ("Target", E),
+            ("Index", E),
+            ("Count", E),
+            ("CutBreak", E),
+            ("FormatName", EIf(0x6E)),
+        ],
         T::While | T::Break => &[("Calc", E), ("End", U)],
         T::WhileLoop | T::Continue => &[("Calc", E), ("Start", U)],
         T::GameSave => &[("No", E), ("Page", S), ("Label", UIf(0x68)), ("Caption", E)],
@@ -391,7 +421,14 @@ fn spec(kind: u8) -> &'static [(&'static str, F)] {
         ],
         T::FormatHist => &[("Name", E), ("Target", EIf(0x6E))],
         T::SaveCabinet | T::LoadCabinet => &[("components", C), ("Act", E), ("Targets", EA)],
-        T::Else | T::ClrHist | T::Terminate | T::DoEvent | T::ClrRead | T::IFDEF | T::IFNDEF | T::ENDIF => &[],
+        T::Else
+        | T::ClrHist
+        | T::Terminate
+        | T::DoEvent
+        | T::ClrRead
+        | T::IFDEF
+        | T::IFNDEF
+        | T::ENDIF => &[],
         // resto: comandos de componentes
         _ => &[("components", C)],
     }
@@ -411,7 +448,9 @@ pub struct Lsb {
 impl Lsb {
     pub fn parse(name: &str, data: &[u8]) -> Result<Self> {
         if data.starts_with(b"LiveMaker") || data.starts_with(b"<?xml") {
-            return Err(ParseError("LSC/XML text scripts are not supported (expected binary LSB)".into()));
+            return Err(ParseError(
+                "LSC/XML text scripts are not supported (expected binary LSB)".into(),
+            ));
         }
         let mut r = Reader::new(data);
         let version = r.u32()?;
@@ -441,7 +480,13 @@ impl Lsb {
                 .map_err(|e| ParseError(format!("{name}: command #{i}: {}", e.0)))?;
             commands.push(c);
         }
-        Ok(Self { name: name.to_string(), version, flags, command_params, commands })
+        Ok(Self {
+            name: name.to_string(),
+            version,
+            flags,
+            command_params,
+            commands,
+        })
     }
 
     /// Índice del comando con un LineNo dado.
@@ -472,9 +517,17 @@ fn parse_command(r: &mut Reader, version: u32, cparams: &[Vec<u8>]) -> Result<Co
             }
             F::EA => {
                 let n = r.count()?;
-                Field::Exprs((0..n).map(|_| LiveParser::parse(r)).collect::<Result<_>>()?)
+                Field::Exprs(
+                    (0..n)
+                        .map(|_| LiveParser::parse(r))
+                        .collect::<Result<_>>()?,
+                )
             }
-            F::EA2 => Field::Exprs((0..2).map(|_| LiveParser::parse(r)).collect::<Result<_>>()?),
+            F::EA2 => Field::Exprs(
+                (0..2)
+                    .map(|_| LiveParser::parse(r))
+                    .collect::<Result<_>>()?,
+            ),
             F::S => Field::Str(r.string()?),
             F::U => Field::U32(r.u32()?),
             F::UIf(min) => {
@@ -496,7 +549,10 @@ fn parse_command(r: &mut Reader, version: u32, cparams: &[Vec<u8>]) -> Result<Co
                 Field::Text(Box::new(TpWord::parse(sub)?))
             }
             F::C => {
-                let enabled = cparams.get(kind as usize).map(|v| v.as_slice()).unwrap_or(&[]);
+                let enabled = cparams
+                    .get(kind as usize)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 let mut v = Vec::with_capacity(enabled.len());
                 for &p in enabled {
                     v.push((p, LiveParser::parse(r)?));
@@ -506,14 +562,26 @@ fn parse_command(r: &mut Reader, version: u32, cparams: &[Vec<u8>]) -> Result<Co
         };
         fields.push((name, v));
     }
-    Ok(Command { kind, indent, mute, not_update, line_no, fields })
+    Ok(Command {
+        kind,
+        indent,
+        mute,
+        not_update,
+        line_no,
+        fields,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn fx(n: &str) -> Vec<u8> {
-        std::fs::read(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(n)).unwrap()
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(n),
+        )
+        .unwrap()
     }
     #[test]
     fn parse_main() {
@@ -523,13 +591,37 @@ mod tests {
         assert_eq!(
             names,
             [
-                "VarNew", "VarNew", "Label", "Calc", "If", "Jump", "Else", "Calc", "ImgNew", "MesNew", "Sound", "Call",
-                "TextIns", "Wait", "WhileInit", "While", "Calc", "WhileLoop", "ObjDel", "Exit"
+                "VarNew",
+                "VarNew",
+                "Label",
+                "Calc",
+                "If",
+                "Jump",
+                "Else",
+                "Calc",
+                "ImgNew",
+                "MesNew",
+                "Sound",
+                "Call",
+                "TextIns",
+                "Wait",
+                "WhileInit",
+                "While",
+                "Calc",
+                "WhileLoop",
+                "ObjDel",
+                "Exit"
             ]
         );
         let img = &l.commands[8];
-        assert_eq!(img.prop(Prop::SOURCE).and_then(|e| e.literal()), Some(&Param::Str("bg.gal".into())));
-        assert_eq!(l.commands[3].expr("Calc").unwrap().render(false), "count = (count + 1)");
+        assert_eq!(
+            img.prop(Prop::SOURCE).and_then(|e| e.literal()),
+            Some(&Param::Str("bg.gal".into()))
+        );
+        assert_eq!(
+            l.commands[3].expr("Calc").unwrap().render(false),
+            "count = (count + 1)"
+        );
         let t = l.commands[12].text().unwrap();
         assert_eq!(t.version, 105);
         assert_eq!(t.plain_text(), "こんにちは、世界\nテスト\n");

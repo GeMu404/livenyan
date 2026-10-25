@@ -55,10 +55,15 @@ struct Obfuscator {
 }
 impl Obfuscator {
     fn new() -> Self {
-        Self { key: 0, seed: XOR_SEED }
+        Self {
+            key: 0,
+            seed: XOR_SEED,
+        }
     }
     fn next(&mut self) -> u32 {
-        self.key = (self.key << 2).wrapping_add(self.key).wrapping_add(self.seed);
+        self.key = (self.key << 2)
+            .wrapping_add(self.key)
+            .wrapping_add(self.seed);
         self.key
     }
 }
@@ -70,7 +75,10 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
         if self.p + n > self.d.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "VF directory truncated"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "VF directory truncated",
+            ));
         }
         let s = &self.d[self.p..self.p + n];
         self.p += n;
@@ -160,7 +168,11 @@ pub fn checksum(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -188,7 +200,8 @@ impl Scramble {
     }
     fn rand(&mut self) -> u32 {
         let s = &mut self.state;
-        let x = (s[3] as u64).wrapping_mul(0x7DD4_FFC7)
+        let x = (s[3] as u64)
+            .wrapping_mul(0x7DD4_FFC7)
             .wrapping_add((s[2] as u64).wrapping_mul(0x5D4))
             .wrapping_add((s[1] as u64).wrapping_mul(0x6F0))
             .wrapping_add((s[0] as u64).wrapping_mul(0x13FB))
@@ -212,7 +225,11 @@ fn randseq(count: usize, seed: u32) -> Vec<usize> {
     let mut seq = vec![0; count];
     let mut i = 0;
     while !values.is_empty() {
-        let n = if values.len() == 1 { 0 } else { sc.randint(0, values.len() - 2) };
+        let n = if values.len() == 1 {
+            0
+        } else {
+            sc.randint(0, values.len() - 2)
+        };
         seq[values.remove(n)] = i;
         i += 1;
     }
@@ -245,7 +262,9 @@ pub fn unscramble(data: &[u8]) -> io::Result<Vec<u8>> {
 pub fn decompress(entry: &Entry, raw: Vec<u8>) -> io::Result<Vec<u8>> {
     let data = match entry.compress {
         Compress::Encrypted | Compress::EncryptedZlib => unscramble(&raw)?,
-        Compress::Unknown => return Err(bad(format!("unsupported compression for {}", entry.name))),
+        Compress::Unknown => {
+            return Err(bad(format!("unsupported compression for {}", entry.name)));
+        }
         _ => raw,
     };
     match entry.compress {
@@ -284,7 +303,10 @@ impl VfArchive {
             if &tail[4..6] != b"lv" {
                 return Err(bad("EXE does not contain a LiveMaker archive"));
             }
-            (true, u32::from_le_bytes(tail[0..4].try_into().unwrap()) as u64)
+            (
+                true,
+                u32::from_le_bytes(tail[0..4].try_into().unwrap()) as u64,
+            )
         } else {
             (false, 0)
         };
@@ -299,20 +321,28 @@ impl VfArchive {
             read_at(&f, &mut buf, archive_offset)?;
             match parse_directory(&buf) {
                 Ok(r) => break r,
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof && (n as u64) < len - archive_offset => {
+                Err(e)
+                    if e.kind() == io::ErrorKind::UnexpectedEof
+                        && (n as u64) < len - archive_offset =>
+                {
                     want *= 4;
                 }
                 Err(e) => return Err(e),
             }
         };
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let mut parts = Vec::new();
         let split = !is_exe && (ext == "dat" || ext == "ext");
         if split {
             let base = path.with_extension("");
             if ext == "ext" {
                 let dat = base.with_extension("dat");
-                parts.push(File::open(&dat).map_err(|_| bad(format!("missing {}", dat.display())))?);
+                parts
+                    .push(File::open(&dat).map_err(|_| bad(format!("missing {}", dat.display())))?);
             } else {
                 parts.push(f.try_clone()?);
             }
@@ -326,7 +356,15 @@ impl VfArchive {
         } else {
             parts.push(f);
         }
-        Ok(Self { path: path.to_path_buf(), version, is_exe, archive_offset, entries, parts, split })
+        Ok(Self {
+            path: path.to_path_buf(),
+            version,
+            is_exe,
+            archive_offset,
+            entries,
+            parts,
+            split,
+        })
     }
 
     pub fn read_raw(&self, e: &Entry) -> io::Result<Vec<u8>> {
@@ -341,7 +379,10 @@ impl VfArchive {
             let idx = (off / SPLIT_PART_SIZE) as usize;
             let within = off % SPLIT_PART_SIZE;
             let n = ((SPLIT_PART_SIZE - within) as usize).min(out.len() - done);
-            let part = self.parts.get(idx).ok_or_else(|| bad("missing split part"))?;
+            let part = self
+                .parts
+                .get(idx)
+                .ok_or_else(|| bad("missing split part"))?;
             read_at(part, &mut out[done..done + n], within)?;
             done += n;
             off += n as u64;
@@ -369,7 +410,9 @@ pub struct GameData {
 }
 
 pub fn normalize(name: &str) -> String {
-    name.replace('/', "\\").trim_start_matches(".\\").to_lowercase()
+    name.replace('/', "\\")
+        .trim_start_matches(".\\")
+        .to_lowercase()
 }
 
 impl GameData {
@@ -379,16 +422,27 @@ impl GameData {
             let mut candidates: Vec<PathBuf> = std::fs::read_dir(path)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| {
-                    let e = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                    let e = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     e == "exe" || e == "dat" || e == "ext"
                 })
                 .collect();
             candidates.sort();
             // .ext antes que .dat (índice partido), luego exe
-            candidates.sort_by_key(|p| match p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
-                Some("ext") => 0,
-                Some("dat") => 1,
-                _ => 2,
+            candidates.sort_by_key(|p| {
+                match p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("ext") => 0,
+                    Some("dat") => 1,
+                    _ => 2,
+                }
             });
             for c in candidates {
                 if let Ok(a) = VfArchive::open(&c) {
@@ -403,8 +457,16 @@ impl GameData {
 
     pub fn from_vf(a: VfArchive) -> Self {
         let names: Vec<String> = a.entries.iter().map(|e| e.name.clone()).collect();
-        let index = names.iter().enumerate().map(|(i, n)| (normalize(n), i)).collect();
-        Self { source: Source::Vf(a), index, names }
+        let index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (normalize(n), i))
+            .collect();
+        Self {
+            source: Source::Vf(a),
+            index,
+            names,
+        }
     }
 
     pub fn from_dir(root: &Path) -> io::Result<Self> {
@@ -421,8 +483,16 @@ impl GameData {
             }
         }
         names.sort();
-        let index = names.iter().enumerate().map(|(i, n)| (normalize(n), i)).collect();
-        Ok(Self { source: Source::Dir(root.to_path_buf()), index, names })
+        let index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (normalize(n), i))
+            .collect();
+        Ok(Self {
+            source: Source::Dir(root.to_path_buf()),
+            index,
+            names,
+        })
     }
 
     pub fn names(&self) -> &[String] {
@@ -439,7 +509,9 @@ impl GameData {
 
     /// Busca un nombre (exacto, normalizado). Devuelve el nombre canónico.
     pub fn find(&self, name: &str) -> Option<&str> {
-        self.index.get(&normalize(name)).map(|&i| self.names[i].as_str())
+        self.index
+            .get(&normalize(name))
+            .map(|&i| self.names[i].as_str())
     }
 
     /// Resuelve referencias sin extensión probando extensiones conocidas.
@@ -458,14 +530,40 @@ impl GameData {
         None
     }
 
+    /// Resolves a resource reference first from the archive root, then relative to its owner.
+    pub fn resolve_relative(&self, owner: &str, name: &str, exts: &[&str]) -> Option<String> {
+        self.resolve(name, exts).or_else(|| {
+            if name.starts_with(['\\', '/']) || name.as_bytes().get(1) == Some(&b':') {
+                return None;
+            }
+            let (directory, _) = owner.rsplit_once(['\\', '/'])?;
+            let mut parts: Vec<&str> = directory
+                .split(['\\', '/'])
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect();
+            for part in name.split(['\\', '/']) {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop()?;
+                    }
+                    part => parts.push(part),
+                }
+            }
+            let relative = parts.join("\\");
+            self.resolve(&relative, exts)
+        })
+    }
+
     pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
-        let i = *self
-            .index
-            .get(&normalize(name))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{name} not in archive")))?;
+        let i = *self.index.get(&normalize(name)).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} not in archive"))
+        })?;
         match &self.source {
             Source::Vf(a) => a.read(&a.entries[i]),
-            Source::Dir(root) => std::fs::read(root.join(self.names[i].replace('\\', std::path::MAIN_SEPARATOR_STR))),
+            Source::Dir(root) => {
+                std::fs::read(root.join(self.names[i].replace('\\', std::path::MAIN_SEPARATOR_STR)))
+            }
         }
     }
 
@@ -480,13 +578,19 @@ impl GameData {
                 }
                 let mut buf = vec![0u8; (e.size as usize).min(n)];
                 if a.split {
-                    return a.read_raw(e).ok().map(|mut v| { v.truncate(n); v });
+                    return a.read_raw(e).ok().map(|mut v| {
+                        v.truncate(n);
+                        v
+                    });
                 }
                 read_at(&a.parts[0], &mut buf, a.archive_offset + e.offset).ok()?;
                 Some(buf)
             }
             Source::Dir(root) => {
-                let f = File::open(root.join(self.names[i].replace('\\', std::path::MAIN_SEPARATOR_STR))).ok()?;
+                let f = File::open(
+                    root.join(self.names[i].replace('\\', std::path::MAIN_SEPARATOR_STR)),
+                )
+                .ok()?;
                 let mut buf = Vec::with_capacity(n);
                 f.take(n as u64).read_to_end(&mut buf).ok()?;
                 Some(buf)
@@ -519,7 +623,9 @@ impl GameData {
 mod tests {
     use super::*;
     fn fx(n: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(n)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(n)
     }
 
     #[test]
@@ -541,6 +647,84 @@ mod tests {
         let gd = GameData::from_vf(exe);
         assert_eq!(gd.read("BG.GAL").unwrap(), on_disk);
         assert_eq!(gd.resolve("bg", &[".gal"]).as_deref(), Some("bg.gal"));
+    }
+
+    #[test]
+    fn resolves_archive_root_then_owner_relative() {
+        let names = vec![
+            "ui\\buttons\\start.gal".to_string(),
+            "start.gal".to_string(),
+        ];
+        let index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (normalize(n), i))
+            .collect();
+        let data = GameData {
+            source: Source::Dir(PathBuf::new()),
+            index,
+            names,
+        };
+
+        assert_eq!(
+            data.resolve_relative("ui\\buttons\\menu.lpm", "start.gal", &[".gal"])
+                .as_deref(),
+            Some("start.gal")
+        );
+        assert_eq!(
+            data.resolve_relative("ui\\buttons\\menu.lpm", "missing.gal", &[".gal"]),
+            None
+        );
+
+        let names = vec!["ui\\buttons\\start.gal".to_string()];
+        let index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (normalize(n), i))
+            .collect();
+        let data = GameData {
+            source: Source::Dir(PathBuf::new()),
+            index,
+            names,
+        };
+        assert_eq!(
+            data.resolve_relative("ui\\buttons\\menu.lpm", "start.gal", &[".gal"])
+                .as_deref(),
+            Some("ui\\buttons\\start.gal")
+        );
+    }
+
+    #[test]
+    fn resolves_parent_relative_paths_without_escaping_archive_root() {
+        let names = vec![
+            "ui\\buttons\\start.gal".to_string(),
+            "ui\\start.gal".to_string(),
+        ];
+        let index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (normalize(n), i))
+            .collect();
+        let data = GameData {
+            source: Source::Dir(PathBuf::new()),
+            index,
+            names,
+        };
+
+        assert_eq!(
+            data.resolve_relative("ui\\buttons\\menu.lpm", "..\\start.gal", &[".gal"])
+                .as_deref(),
+            Some("ui\\start.gal")
+        );
+        assert_eq!(
+            data.resolve_relative("ui\\buttons\\menu.lpm", ".\\start.gal", &[".gal"])
+                .as_deref(),
+            Some("ui\\buttons\\start.gal")
+        );
+        assert_eq!(
+            data.resolve_relative("ui\\menu.lpm", "..\\..\\outside.gal", &[".gal"]),
+            None
+        );
     }
 
     #[test]

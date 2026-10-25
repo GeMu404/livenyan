@@ -23,6 +23,7 @@ pub struct WindowCfg {
     pub height: u32,
     pub fullscreen: bool,
     pub vsync: bool,
+    pub interpolate_animations: bool,
     /// "linear" o "nearest" para el escalado.
     pub scale_filter: String,
     /// Driver de render de SDL: "" = automático, o "opengl", "vulkan", "software", "gpu"...
@@ -43,7 +44,12 @@ pub struct GameCfg {
 
 impl Default for GameCfg {
     fn default() -> Self {
-        Self { cinema_placeholder_ms: 3000.0, logical_width: 0, logical_height: 0, entry: None }
+        Self {
+            cinema_placeholder_ms: 3000.0,
+            logical_width: 0,
+            logical_height: 0,
+            entry: None,
+        }
     }
 }
 
@@ -92,12 +98,27 @@ pub struct AudioCfg {
 
 impl Default for WindowCfg {
     fn default() -> Self {
-        Self { width: 0, height: 0, fullscreen: false, vsync: true, scale_filter: "linear".into(), renderer: String::new() }
+        Self {
+            width: 0,
+            height: 0,
+            fullscreen: false,
+            vsync: true,
+            interpolate_animations: false,
+            scale_filter: "linear".into(),
+            renderer: String::new(),
+        }
     }
 }
 impl Default for TextCfg {
     fn default() -> Self {
-        Self { font: None, font_index: 0, size: 24.0, speed_cps: 60.0, color: [255, 255, 255, 255], shadow: true }
+        Self {
+            font: None,
+            font_index: 0,
+            size: 24.0,
+            speed_cps: 60.0,
+            color: [255, 255, 255, 255],
+            shadow: true,
+        }
     }
 }
 fn v(a: &[&str]) -> Vec<String> {
@@ -117,12 +138,19 @@ impl Default for KeysCfg {
 }
 impl Default for AssetsCfg {
     fn default() -> Self {
-        Self { threads: 0, prefetch_lookahead: 200, cache_mb: 768 }
+        Self {
+            threads: 0,
+            prefetch_lookahead: 200,
+            cache_mb: 768,
+        }
     }
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { enabled: true, volume: 1.0 }
+        Self {
+            enabled: true,
+            volume: 1.0,
+        }
     }
 }
 
@@ -132,7 +160,9 @@ impl Config {
     }
     /// Carga la config; si no existe devuelve valores por defecto.
     pub fn load(path: Option<&Path>) -> Result<Self, String> {
-        let p = path.map(Path::to_path_buf).unwrap_or_else(Self::default_path);
+        let p = path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(Self::default_path);
         match std::fs::read_to_string(&p) {
             Ok(s) => toml::from_str(&s).map_err(|e| format!("{}: {e}", p.display())),
             Err(_) if path.is_none() => Ok(Self::default()),
@@ -143,7 +173,10 @@ impl Config {
         if self.assets.threads > 0 {
             self.assets.threads
         } else {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 8)
         }
     }
 }

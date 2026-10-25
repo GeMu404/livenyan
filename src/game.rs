@@ -1,7 +1,7 @@
 //! Apertura de un juego: datos, proyecto (`.lpb`), script de entrada y resolución.
 
 use crate::archive::GameData;
-use crate::lsb::{extended_to_f64, Reader};
+use crate::lsb::{Reader, extended_to_f64};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,14 +35,22 @@ pub fn parse_lpb(d: &[u8]) -> Result<Project, String> {
         *u = i32::from_le_bytes(ub[i * 4..i * 4 + 4].try_into().unwrap());
     }
     let init_lsb = r.string().map_err(e)?;
-    let exit_lsb = if version > 0x6D { r.string().map_err(e)? } else { String::new() };
+    let exit_lsb = if version > 0x6D {
+        r.string().map_err(e)?
+    } else {
+        String::new()
+    };
     let _dir = r.string().map_err(e)?;
     r.u32().map_err(e)?;
     r.u8().map_err(e)?;
     if version >= 0x6A {
         r.u8().map_err(e)?;
     }
-    let audio_formats = if version >= 0x6D { r.string().map_err(e)? } else { String::new() };
+    let audio_formats = if version >= 0x6D {
+        r.string().map_err(e)?
+    } else {
+        String::new()
+    };
     for min in [0x71, 0x72, 0x74] {
         if version >= min {
             r.u8().map_err(e)?;
@@ -65,7 +73,15 @@ pub fn parse_lpb(d: &[u8]) -> Result<Project, String> {
             settings.push((k, v));
         }
     }
-    Ok(Project { version, name, init_lsb, exit_lsb, audio_formats, settings, unk })
+    Ok(Project {
+        version,
+        name,
+        init_lsb,
+        exit_lsb,
+        audio_formats,
+        settings,
+        unk,
+    })
 }
 
 pub struct Game {
@@ -92,18 +108,34 @@ impl Game {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "game".into());
-        let title = project.as_ref().map(|p| p.name.clone()).filter(|s| !s.is_empty()).unwrap_or(stem.clone());
+        let title = project
+            .as_ref()
+            .map(|p| p.name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(stem.clone());
         let slug = crate::util::slug(&stem);
         let entry = cfg
             .game
             .entry
             .clone()
-            .or_else(|| project.as_ref().map(|p| p.init_lsb.clone()).filter(|s| !s.is_empty()).and_then(|s| resolve_lsb(&data, &s)))
+            .or_else(|| {
+                project
+                    .as_ref()
+                    .map(|p| p.init_lsb.clone())
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| resolve_lsb(&data, &s))
+            })
             .or_else(|| resolve_lsb(&data, "ゲームメイン.lsb"))
             .or_else(|| resolve_lsb(&data, "00000001.lsb"))
-            .or_else(|| data.names().iter().find(|n| n.to_lowercase().ends_with(".lsb")).cloned())
+            .or_else(|| {
+                data.names()
+                    .iter()
+                    .find(|n| n.to_lowercase().ends_with(".lsb"))
+                    .cloned()
+            })
             .ok_or("no .lsb scripts found")?;
-        let (logical, logical_source) = if cfg.game.logical_width > 0 && cfg.game.logical_height > 0 {
+        let (logical, logical_source) = if cfg.game.logical_width > 0 && cfg.game.logical_height > 0
+        {
             ((cfg.game.logical_width, cfg.game.logical_height), "config")
         } else if let Some(r) = project.as_ref().and_then(lpb_resolution) {
             (r, "lpb-header")
@@ -112,11 +144,29 @@ impl Game {
         } else if let Some(r) = guess_from_images(&data) {
             (r, "images")
         } else {
-            log::warn!("could not determine the game's resolution; using fallback {}x{} (override with --res)", DEFAULT_RES.0, DEFAULT_RES.1);
+            log::warn!(
+                "could not determine the game's resolution; using fallback {}x{} (override with --res)",
+                DEFAULT_RES.0,
+                DEFAULT_RES.1
+            );
             (DEFAULT_RES, "fallback")
         };
-        log::info!("logical resolution {}x{} from {}", logical.0, logical.1, logical_source);
-        Ok(Self { path: path.to_path_buf(), data, project, title, slug, entry, logical, logical_source })
+        log::info!(
+            "logical resolution {}x{} from {}",
+            logical.0,
+            logical.1,
+            logical_source
+        );
+        Ok(Self {
+            path: path.to_path_buf(),
+            data,
+            project,
+            title,
+            slug,
+            entry,
+            logical,
+            logical_source,
+        })
     }
 
     pub fn save_dir(&self) -> PathBuf {
@@ -138,11 +188,10 @@ pub fn resolve_lsb(data: &GameData, name: &str) -> Option<String> {
     } else {
         n
     };
-    data.resolve(n, &[".lsb"])
-        .or_else(|| {
-            let base = n.rsplit(['\\', '/']).next().unwrap_or(n);
-            data.resolve(base, &[".lsb"])
-        })
+    data.resolve(n, &[".lsb"]).or_else(|| {
+        let base = n.rsplit(['\\', '/']).next().unwrap_or(n);
+        data.resolve(base, &[".lsb"])
+    })
 }
 
 /// Heurística: busca ajustes del proyecto con nombres de ancho/alto de pantalla.
@@ -150,7 +199,11 @@ fn guess_resolution(p: &Project) -> Option<(u32, u32)> {
     let find = |keys: &[&str]| {
         p.settings.iter().find_map(|(k, v)| {
             let kl = k.to_lowercase();
-            if keys.iter().any(|x| kl.contains(x)) { v.parse::<u32>().ok().filter(|&n| (160..=8192).contains(&n)) } else { None }
+            if keys.iter().any(|x| kl.contains(x)) {
+                v.parse::<u32>().ok().filter(|&n| (160..=8192).contains(&n))
+            } else {
+                None
+            }
         })
     };
     let w = find(&["screenwidth", "画面幅", "画面横", "width"])?;
@@ -161,13 +214,25 @@ fn guess_resolution(p: &Project) -> Option<(u32, u32)> {
 /// Heurística: tamaño más frecuente entre imágenes grandes (fondos), leyendo solo cabeceras.
 fn guess_from_images(data: &GameData) -> Option<(u32, u32)> {
     let mut counts: std::collections::HashMap<(u32, u32), u32> = Default::default();
-    for n in data.names().iter().filter(|n| n.to_lowercase().ends_with(".gal")) {
-        if let Some((w, h)) = data.read_prefix(n, 1024).and_then(|p| crate::gal::peek_size(&p))
-            && (640..=4096).contains(&w) && (400..=4096).contains(&h) {
-                *counts.entry((w, h)).or_default() += 1;
-            }
+    for n in data
+        .names()
+        .iter()
+        .filter(|n| n.to_lowercase().ends_with(".gal"))
+    {
+        if let Some((w, h)) = data
+            .read_prefix(n, 1024)
+            .and_then(|p| crate::gal::peek_size(&p))
+            && (640..=4096).contains(&w)
+            && (400..=4096).contains(&h)
+        {
+            *counts.entry((w, h)).or_default() += 1;
+        }
     }
-    counts.into_iter().max_by_key(|&((w, h), c)| (c, w * h)).filter(|&(_, c)| c >= 2).map(|(r, _)| r)
+    counts
+        .into_iter()
+        .max_by_key(|&((w, h), c)| (c, w * h))
+        .filter(|&(_, c)| c >= 2)
+        .map(|(r, _)| r)
 }
 
 /// Tamaño de pantalla desde la cabecera del .lpb (los 16 bytes "unk" de pylivemaker:
@@ -177,9 +242,18 @@ pub fn lpb_resolution(p: &Project) -> Option<(u32, u32)> {
     let a = (p.unk[0], p.unk[1]);
     let b = (p.unk[2], p.unk[3]);
     if ok(a.0, a.1) && ok(b.0, b.1) && a != b {
-        log::info!("lpb header has two different sizes {}x{} and {}x{}; using the first", a.0, a.1, b.0, b.1);
+        log::info!(
+            "lpb header has two different sizes {}x{} and {}x{}; using the first",
+            a.0,
+            a.1,
+            b.0,
+            b.1
+        );
     }
-    [a, b].into_iter().find(|&(w, h)| ok(w, h)).map(|(w, h)| (w as u32, h as u32))
+    [a, b]
+        .into_iter()
+        .find(|&(w, h)| ok(w, h))
+        .map(|(w, h)| (w as u32, h as u32))
 }
 
 /// Formulario Delphi (TPF0) (solo diagnóstico en --info: suelen ser ventanas del depurador) hallado en los recursos del .exe con ClientWidth/ClientHeight.
@@ -199,11 +273,15 @@ pub fn exe_forms(path: &Path) -> Vec<ExeForm> {
         Some(path.to_path_buf())
     } else {
         std::fs::read_dir(path).ok().and_then(|rd| {
-            rd.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+            rd.flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
         })
     };
     let Some(exe) = exe else { return vec![] };
-    let Ok(mut b) = std::fs::read(&exe) else { return vec![] };
+    let Ok(mut b) = std::fs::read(&exe) else {
+        return vec![];
+    };
     if !b.starts_with(b"MZ") {
         return vec![];
     }
@@ -234,7 +312,8 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
         let start = i + p;
         i = start + 4;
         let Some(&cl) = b.get(i) else { break };
-        let class = String::from_utf8_lossy(b.get(i + 1..i + 1 + cl as usize).unwrap_or_default()).to_string();
+        let class = String::from_utf8_lossy(b.get(i + 1..i + 1 + cl as usize).unwrap_or_default())
+            .to_string();
         // propiedades del formulario raíz: dentro de una ventana razonable
         let end = (start + 4096).min(b.len());
         let next = find(&b[i..end], b"TPF0").map(|q| i + q).unwrap_or(end);
@@ -246,15 +325,29 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
         };
         if let (Some(w), Some(h)) = (get(b"ClientWidth"), get(b"ClientHeight")) {
             if (160..=8192).contains(&w) && (120..=8192).contains(&h) {
-                out.push(ExeForm { class, w: w as u32, h: h as u32, main: false });
+                out.push(ExeForm {
+                    class,
+                    w: w as u32,
+                    h: h as u32,
+                    main: false,
+                });
             }
         }
     }
     // principal: clase con "Main"/"Live"/"Novel"; si no, la primera de mayor área
     let pick = out
         .iter()
-        .position(|f| ["main", "live", "novel", "game"].iter().any(|k| f.class.to_lowercase().contains(k)))
-        .or_else(|| out.iter().enumerate().max_by_key(|(_, f)| f.w * f.h).map(|(i, _)| i));
+        .position(|f| {
+            ["main", "live", "novel", "game"]
+                .iter()
+                .any(|k| f.class.to_lowercase().contains(k))
+        })
+        .or_else(|| {
+            out.iter()
+                .enumerate()
+                .max_by_key(|(_, f)| f.w * f.h)
+                .map(|(i, _)| i)
+        });
     if let Some(k) = pick {
         out[k].main = true;
     }

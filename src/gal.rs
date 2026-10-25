@@ -103,7 +103,10 @@ fn inflate(d: &[u8]) -> R<Vec<u8>> {
         // Algunos GAL traen el flujo zlib sin cerrar (sin el bloque final/Adler32): se usa
         // lo descomprimido; el resto del búfer queda a cero.
         Err(e) if !out.is_empty() => {
-            log::debug!("GAL: truncated zlib stream ({e}); using {} bytes", out.len());
+            log::debug!(
+                "GAL: truncated zlib stream ({e}); using {} bytes",
+                out.len()
+            );
             Ok(out)
         }
         Err(e) => {
@@ -137,13 +140,29 @@ struct Prev<'a> {
 impl Prev<'_> {
     fn block_src(&self, fr: i32, lr: i32) -> Option<&[u8]> {
         let fr = usize::try_from(fr).ok()?;
-        let layers: &[(Layer, Vec<u8>, Option<Vec<u8>>)] = if fr == self.frames.len() { self.cur } else { &self.frames.get(fr)?.layers };
+        let layers: &[(Layer, Vec<u8>, Option<Vec<u8>>)] = if fr == self.frames.len() {
+            self.cur
+        } else {
+            &self.frames.get(fr)?.layers
+        };
         let (_, d, a) = layers.get(usize::try_from(lr).ok()?)?;
-        if self.alpha { a.as_deref() } else { Some(d.as_slice()) }
+        if self.alpha {
+            a.as_deref()
+        } else {
+            Some(d.as_slice())
+        }
     }
 }
 
-fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &Info, prev: Prev) -> R<Vec<u8>> {
+fn unpack_blocks(
+    packed: &[u8],
+    w: u32,
+    h: u32,
+    bpp: u32,
+    stride: usize,
+    info: &Info,
+    prev: Prev,
+) -> R<Vec<u8>> {
     let (bw, bh) = (info.block_w, info.block_h);
     if bw <= 0 || bh <= 0 {
         return Ok(packed.to_vec());
@@ -188,7 +207,9 @@ fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &
                 _ => {
                     // bloque igual al del frame `fr`, capa `lr`, misma posición
                     let Some(src) = prev.block_src(fr, lr) else {
-                        return err(format!("block references frame {fr} layer {lr}, not available"));
+                        return err(format!(
+                            "block references frame {fr} layer {lr}, not available"
+                        ));
                     };
                     for _ in 0..rh {
                         if dst + chunk > src.len() {
@@ -207,8 +228,20 @@ fn unpack_blocks(packed: &[u8], w: u32, h: u32, bpp: u32, stride: usize, info: &
 
 type LayerData = (Layer, Vec<u8>, Option<Vec<u8>>);
 
-fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Frame], cur: &[LayerData]) -> R<Vec<u8>> {
-    let prev = Prev { frames: prev, alpha: false, cur };
+fn layer_payload(
+    r: &mut Rd,
+    info: &Info,
+    w: u32,
+    h: u32,
+    bpp: u32,
+    prev: &[Frame],
+    cur: &[LayerData],
+) -> R<Vec<u8>> {
+    let prev = Prev {
+        frames: prev,
+        alpha: false,
+        cur,
+    };
     let n = r.usize()?;
     if n == 0 {
         // capa vacía (GaleX: capas sin contenido en este frame)
@@ -242,15 +275,38 @@ fn layer_payload(r: &mut Rd, info: &Info, w: u32, h: u32, bpp: u32, prev: &[Fram
     }
 }
 
-fn alpha_payload(r: &mut Rd, info: &Info, w: u32, h: u32, prev: &[Frame], cur: &[LayerData]) -> R<Option<Vec<u8>>> {
+fn alpha_payload(
+    r: &mut Rd,
+    info: &Info,
+    w: u32,
+    h: u32,
+    prev: &[Frame],
+    cur: &[LayerData],
+) -> R<Option<Vec<u8>>> {
     let n = r.usize()?;
     if n == 0 {
         return Ok(None);
     }
     // GARbro: el alfa va en zlib con CompType 0 y 2 (JPEG); con otros tipos, bloques crudos
-    let packed = if matches!(info.compression, Some(0) | Some(2)) { zlib_block(r, n)? } else { r.take(n)?.to_vec() };
+    let packed = if matches!(info.compression, Some(0) | Some(2)) {
+        zlib_block(r, n)?
+    } else {
+        r.take(n)?.to_vec()
+    };
     let st = (w as usize + 3) & !3;
-    Ok(Some(unpack_blocks(&packed, w, h, 8, st, info, Prev { frames: prev, alpha: true, cur })?))
+    Ok(Some(unpack_blocks(
+        &packed,
+        w,
+        h,
+        8,
+        st,
+        info,
+        Prev {
+            frames: prev,
+            alpha: true,
+            cur,
+        },
+    )?))
 }
 
 /// Bloque zlib de tamaño declarado `n`. Si ese tamaño no cuadra con el flujo (flujo
@@ -292,7 +348,11 @@ fn inflate_stream(d: &[u8]) -> R<(Vec<u8>, usize)> {
         let before_in = z.total_in();
         let before_out = z.total_out();
         let st = z
-            .decompress_vec(&d[z.total_in() as usize..], &mut out, flate2::FlushDecompress::None)
+            .decompress_vec(
+                &d[z.total_in() as usize..],
+                &mut out,
+                flate2::FlushDecompress::None,
+            )
             .map_err(|e| GalError(format!("zlib: {e}")))?;
         if st == flate2::Status::StreamEnd {
             return Ok((out, z.total_in() as usize));
@@ -303,12 +363,14 @@ fn inflate_stream(d: &[u8]) -> R<(Vec<u8>, usize)> {
     }
 }
 
-
 /// Gale binario: hasta `max` frames (los frames van seguidos en el archivo).
 fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut r = Rd { d, p: 0 };
     let hdr = r.take(7)?;
-    let ver: u32 = std::str::from_utf8(&hdr[4..7]).ok().and_then(|s| s.parse().ok()).ok_or(GalError("bad version".into()))?;
+    let ver: u32 = std::str::from_utf8(&hdr[4..7])
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or(GalError("bad version".into()))?;
     let mut info = Info::default();
     let frame_count;
     if ver > 102 {
@@ -383,7 +445,11 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
                 r.p = np;
                 frames.push(f);
             }
-            None => return err(format!("frame {i}: no valid frame header found ({last_err})")),
+            None => {
+                return err(format!(
+                    "frame {i}: no valid frame header found ({last_err})"
+                ));
+            }
         }
     }
     info.frames = frame_count as u32;
@@ -391,17 +457,22 @@ fn parse_gale_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     Ok((info, frames))
 }
 
-
 /// Comprueba barato si en `p` empieza una cabecera de frame Gale con tamaño w0 x h0.
 fn frame_header_ok(d: &[u8], p: usize, w0: u32, h0: u32) -> bool {
-    let rd = |o: usize| d.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+    let rd = |o: usize| {
+        d.get(o..o + 4)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+    };
     let Some(nl) = rd(p) else { return false };
     if !(0..=256).contains(&nl) {
         return false;
     }
     let q = p + 4 + nl as usize + 4 + 9;
-    let (Some(lc), Some(w), Some(h), Some(bpp)) = (rd(q), rd(q + 4), rd(q + 8), rd(q + 12)) else { return false };
-    let sane = |v: i32, v0: u32| v as u32 == v0 || (1..=(v0.max(1) as i32 * 4).max(64)).contains(&v);
+    let (Some(lc), Some(w), Some(h), Some(bpp)) = (rd(q), rd(q + 4), rd(q + 8), rd(q + 12)) else {
+        return false;
+    };
+    let sane =
+        |v: i32, v0: u32| v as u32 == v0 || (1..=(v0.max(1) as i32 * 4).max(64)).contains(&v);
     (1..=64).contains(&lc) && sane(w, w0) && sane(h, h0) && [1, 4, 8, 16, 24, 32].contains(&bpp)
 }
 
@@ -443,10 +514,29 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame
         let data = layer_payload(r, info, w, h, bpp, prev, &layers)?;
         let a = alpha_payload(r, info, w, h, prev, &layers)?;
         let a = if alpha_on { a } else { None };
-        layers.push((Layer { left, top, visible, alpha, alpha_on, trans }, data, a));
+        layers.push((
+            Layer {
+                left,
+                top,
+                visible,
+                alpha,
+                alpha_on,
+                trans,
+            },
+            data,
+            a,
+        ));
     }
     let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    Ok(Frame { w, h, bpp, palette, layers, delay: None, raw_hdr })
+    Ok(Frame {
+        w,
+        h,
+        bpp,
+        palette,
+        layers,
+        delay: None,
+        raw_hdr,
+    })
 }
 
 /// Atributo XML mínimo (el XML de GaleX es simple y plano).
@@ -486,7 +576,6 @@ fn tags<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     v
 }
 
-
 fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let mut r = Rd { d, p: 0 };
     let hdr = r.take(8)?;
@@ -510,7 +599,11 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         }
         found
     };
-    let geti = |t: &str, k: &str, def: i64| attr(t, k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(def);
+    let geti = |t: &str, k: &str, def: i64| {
+        attr(t, k)
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(def)
+    };
     let mut info = Info {
         w: geti(root, "Width", 0) as u32,
         h: geti(root, "Height", 0) as u32,
@@ -545,50 +638,77 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
         return err("no Frame");
     }
     while let Some(frame_start) = next {
-    if frames.len() >= max.max(1) {
-        break;
-    }
-    let frame_end = find_frame(frame_start + 6).unwrap_or(xml.len());
-    next = find_frame(frame_start + 6);
-    let fx = &xml[frame_start..frame_end];
-    let ftag = &fx[..fx.find('>').unwrap_or(fx.len())];
-    let fdelay = ["Delay", "Wait", "Interval", "Time"].iter().find_map(|k| attr(ftag, k)).and_then(|v| v.parse::<u32>().ok());
-    let layers_tag = tags(fx, "Layers").into_iter().next().unwrap_or("");
-    let w = geti(layers_tag, "Width", info.w as i64) as u32;
-    let h = geti(layers_tag, "Height", info.h as i64) as u32;
-    let bpp = geti(layers_tag, "bpp", base_bpp as i64) as u32;
-    info.bpp = bpp;
-    let mut palette = frames.last().map(|f: &Frame| f.palette.clone()).unwrap_or_default();
-    let pal_src: &str = if fx.contains("<RGB>") { fx } else { &xml };
-    if bpp <= 8
-        && let (Some(a), Some(b)) = (pal_src.find("<RGB>"), pal_src.find("</RGB>")) {
+        if frames.len() >= max.max(1) {
+            break;
+        }
+        let frame_end = find_frame(frame_start + 6).unwrap_or(xml.len());
+        next = find_frame(frame_start + 6);
+        let fx = &xml[frame_start..frame_end];
+        let ftag = &fx[..fx.find('>').unwrap_or(fx.len())];
+        let fdelay = ["Delay", "Wait", "Interval", "Time"]
+            .iter()
+            .find_map(|k| attr(ftag, k))
+            .and_then(|v| v.parse::<u32>().ok());
+        let layers_tag = tags(fx, "Layers").into_iter().next().unwrap_or("");
+        let w = geti(layers_tag, "Width", info.w as i64) as u32;
+        let h = geti(layers_tag, "Height", info.h as i64) as u32;
+        let bpp = geti(layers_tag, "bpp", base_bpp as i64) as u32;
+        info.bpp = bpp;
+        let mut palette = frames
+            .last()
+            .map(|f: &Frame| f.palette.clone())
+            .unwrap_or_default();
+        let pal_src: &str = if fx.contains("<RGB>") { fx } else { &xml };
+        if bpp <= 8
+            && let (Some(a), Some(b)) = (pal_src.find("<RGB>"), pal_src.find("</RGB>"))
+        {
             let fx = pal_src;
             let hex = fx[a + 5..b].trim();
-            let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect();
-            palette = bytes.chunks(3).filter(|c| c.len() == 3).map(|c| [c[2], c[1], c[0]]).collect();
+            let bytes: Vec<u8> = (0..hex.len() / 2)
+                .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                .collect();
+            palette = bytes
+                .chunks(3)
+                .filter(|c| c.len() == 3)
+                .map(|c| [c[2], c[1], c[0]])
+                .collect();
         }
-    let mut layers = Vec::new();
-    for lt in tags(fx, "Layer") {
-        let l = Layer {
-            left: geti(lt, "Left", 0) as i32,
-            top: geti(lt, "Top", 0) as i32,
-            visible: geti(lt, "Visible", 1) != 0,
-            alpha: geti(lt, "Alpha", 255) as i32,
-            alpha_on: geti(lt, "AlphaOn", 0) != 0,
-            trans: geti(lt, "TransColor", -1) as i32,
-        };
-        let data = layer_payload(&mut r, &info, w, h, bpp, &frames, &layers)?;
-        let a = if l.alpha_on { alpha_payload(&mut r, &info, w, h, &frames, &layers)? } else { None };
-        layers.push((l, data, a));
-    }
-    if layers.is_empty() {
-        return err("no layers");
-    }
-    let bpp = if info.compression == Some(2) { 24 } else { bpp };
-    // BGColor (GaleX) no se usa como color clave; TransColor del frame sí (como la máscara
-    // de la cabecera binaria; -1 = ninguno)
-    let ftrans = attr(ftag, "TransColor").and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1) as i32;
-    frames.push(Frame { w, h, bpp, palette, layers, delay: fdelay, raw_hdr: ftrans.to_le_bytes().to_vec() });
+        let mut layers = Vec::new();
+        for lt in tags(fx, "Layer") {
+            let l = Layer {
+                left: geti(lt, "Left", 0) as i32,
+                top: geti(lt, "Top", 0) as i32,
+                visible: geti(lt, "Visible", 1) != 0,
+                alpha: geti(lt, "Alpha", 255) as i32,
+                alpha_on: geti(lt, "AlphaOn", 0) != 0,
+                trans: geti(lt, "TransColor", -1) as i32,
+            };
+            let data = layer_payload(&mut r, &info, w, h, bpp, &frames, &layers)?;
+            let a = if l.alpha_on {
+                alpha_payload(&mut r, &info, w, h, &frames, &layers)?
+            } else {
+                None
+            };
+            layers.push((l, data, a));
+        }
+        if layers.is_empty() {
+            return err("no layers");
+        }
+        let bpp = if info.compression == Some(2) { 24 } else { bpp };
+        // BGColor (GaleX) no se usa como color clave; TransColor del frame sí (como la máscara
+        // de la cabecera binaria; -1 = ninguno)
+        let ftrans = attr(ftag, "TransColor")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(-1) as i32;
+        frames.push(Frame {
+            w,
+            h,
+            bpp,
+            palette,
+            layers,
+            delay: fdelay,
+            raw_hdr: ftrans.to_le_bytes().to_vec(),
+        });
     }
     Ok((info, frames))
 }
@@ -610,13 +730,26 @@ pub fn quick_class(d: &[u8]) -> String {
                     }
                 }
                 if !opaque_black && !transparent {
-                    return if img.frames.is_empty() { "ok".into() } else { format!("ok ({} frames)", img.frames.len() + 1) };
+                    return if img.frames.is_empty() {
+                        "ok".into()
+                    } else {
+                        format!("ok ({} frames)", img.frames.len() + 1)
+                    };
                 }
             }
             if !img.frames.is_empty() {
-                return format!("ok ({} frames, frame 0 {})", img.frames.len() + 1, if transparent { "transparent" } else { "black" });
+                return format!(
+                    "ok ({} frames, frame 0 {})",
+                    img.frames.len() + 1,
+                    if transparent { "transparent" } else { "black" }
+                );
             }
-            (if transparent { "all-transparent" } else { "all-black" }).into()
+            (if transparent {
+                "all-transparent"
+            } else {
+                "all-black"
+            })
+            .into()
         }
     }
 }
@@ -626,39 +759,76 @@ pub fn quick_class(d: &[u8]) -> String {
 pub fn dump(d: &[u8]) -> String {
     let mut o = String::new();
     if d.starts_with(b"GaleX") {
-        let rd = |p: usize| d.get(p..p + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+        let rd = |p: usize| {
+            d.get(p..p + 4)
+                .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+        };
         let hs = rd(8).unwrap_or(0).max(0) as usize;
         o += &format!("dump: GaleX file {} B, xml header @12 size {hs}\n", d.len());
-        let Some(zx) = d.get(12..12 + hs) else { return o + "  truncated header\n" };
+        let Some(zx) = d.get(12..12 + hs) else {
+            return o + "  truncated header\n";
+        };
         let xml = match inflate(zx) {
             Ok(x) => cp932(&x),
             Err(e) => return o + &format!("  xml: {e}\n"),
         };
         let strip_names = |t: &str| {
             // atributos sin Name (los nombres de capa podrían ser texto del juego)
-            t.split_whitespace().filter(|kv| !kv.starts_with("Name")).collect::<Vec<_>>().join(" ")
+            t.split_whitespace()
+                .filter(|kv| !kv.starts_with("Name"))
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         for t in tags(&xml, "Frames") {
             o += &format!("  <Frames {}>\n", strip_names(t));
         }
-        let comp = tags(&xml, "Frames").first().and_then(|t| attr(t, "CompType")).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let comp = tags(&xml, "Frames")
+            .first()
+            .and_then(|t| attr(t, "CompType"))
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0);
         let mut p = 12 + hs;
-        for (fi, fx) in xml.split("<Frame").skip(1).filter(|x| x.starts_with(|c: char| c.is_whitespace() || c == '>')).enumerate() {
-            o += &format!("  frame {fi}: <Frame {}>\n", strip_names(&fx[..fx.find('>').unwrap_or(0)]));
+        for (fi, fx) in xml
+            .split("<Frame")
+            .skip(1)
+            .filter(|x| x.starts_with(|c: char| c.is_whitespace() || c == '>'))
+            .enumerate()
+        {
+            o += &format!(
+                "  frame {fi}: <Frame {}>\n",
+                strip_names(&fx[..fx.find('>').unwrap_or(0)])
+            );
             for lt in tags(fx, "Layers") {
                 o += &format!("    <Layers {}>\n", strip_names(lt));
             }
             for (li, lt) in tags(fx, "Layer").into_iter().enumerate() {
                 o += &format!("    layer {li}: <Layer {}>\n", strip_names(lt));
                 let alpha_on = attr(lt, "AlphaOn").is_some_and(|v| v != "0");
-                for what in if alpha_on { &["data", "alpha"][..] } else { &["data"][..] } {
-                    let Some(n) = rd(p) else { return o + &format!("  EOF @{p}\n") };
+                for what in if alpha_on {
+                    &["data", "alpha"][..]
+                } else {
+                    &["data"][..]
+                } {
+                    let Some(n) = rd(p) else {
+                        return o + &format!("  EOF @{p}\n");
+                    };
                     let body = (p + 4).min(d.len());
                     let mut extra = String::new();
                     if n > 0 && (comp == 0 || (*what == "alpha" && comp == 2)) {
                         extra = match inflate_stream(&d[body..]) {
-                            Ok((out, used)) => format!(" | zlib stream {used} B -> {} B{}", out.len(), if used as i64 != n as i64 { " (MISMATCH)" } else { "" }),
-                            Err(e) => format!(" | zlib: {e} (first bytes {:02x?})", &d[body..(body + 2).min(d.len())]),
+                            Ok((out, used)) => format!(
+                                " | zlib stream {used} B -> {} B{}",
+                                out.len(),
+                                if used as i64 != n as i64 {
+                                    " (MISMATCH)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            Err(e) => format!(
+                                " | zlib: {e} (first bytes {:02x?})",
+                                &d[body..(body + 2).min(d.len())]
+                            ),
                         };
                     }
                     o += &format!("      {what} size @{p} = {n}{extra}\n");
@@ -671,8 +841,15 @@ pub fn dump(d: &[u8]) -> String {
         }
         return o + &format!("  walk stopped @{p} of {}\n", d.len());
     }
-    let rd = |p: usize| d.get(p..p + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
-    let ver: u32 = d.get(4..7).and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let rd = |p: usize| {
+        d.get(p..p + 4)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let ver: u32 = d
+        .get(4..7)
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     o += &format!("dump: file {} B, version {ver}\n", d.len());
     if ver <= 102 {
         return o + "  (old Gale, not dumped)\n";
@@ -681,7 +858,14 @@ pub fn dump(d: &[u8]) -> String {
     let h = |off: usize| rd(11 + off).unwrap_or(-1);
     o += &format!(
         "  header @7 size {hs}: w {} h {} bpp {} frames {} randomized {} compression {} blocks {}x{}\n",
-        h(4), h(8), h(0xC), h(0x10), d.get(11 + 0x15).copied().unwrap_or(0), d.get(11 + 0x16).copied().unwrap_or(0), h(0x1C), h(0x20)
+        h(4),
+        h(8),
+        h(0xC),
+        h(0x10),
+        d.get(11 + 0x15).copied().unwrap_or(0),
+        d.get(11 + 0x16).copied().unwrap_or(0),
+        h(0x1C),
+        h(0x20)
     );
     let comp = d.get(11 + 0x16).copied();
     let frames = h(0x10).max(0) as usize;
@@ -697,8 +881,15 @@ pub fn dump(d: &[u8]) -> String {
         p += 4 + nl as usize;
         let hdr: Vec<u8> = d.get(p..p + 13).map(|x| x.to_vec()).unwrap_or_default();
         p += 13;
-        let (lc, w, hh, bpp) = (rd(p).unwrap_or(-1), rd(p + 4).unwrap_or(-1), rd(p + 8).unwrap_or(-1), rd(p + 12).unwrap_or(-1));
-        o += &format!("  frame {f} @{start}: name_len {nl} hdr {hdr:02x?} layers {lc} size {w}x{hh} bpp {bpp}\n");
+        let (lc, w, hh, bpp) = (
+            rd(p).unwrap_or(-1),
+            rd(p + 4).unwrap_or(-1),
+            rd(p + 8).unwrap_or(-1),
+            rd(p + 12).unwrap_or(-1),
+        );
+        o += &format!(
+            "  frame {f} @{start}: name_len {nl} hdr {hdr:02x?} layers {lc} size {w}x{hh} bpp {bpp}\n"
+        );
         p += 16;
         if (1..=8).contains(&bpp) {
             p += (1usize << bpp) * 4;
@@ -720,11 +911,23 @@ pub fn dump(d: &[u8]) -> String {
                 let mut extra = String::new();
                 if n > 0 && (comp == Some(0) || what == "alpha") {
                     match inflate_stream(&d[body.min(d.len())..]) {
-                        Ok((out, used)) => extra = format!(" | zlib stream {used} B -> {} B{}", out.len(), if used as i64 != n as i64 { " (MISMATCH)" } else { "" }),
+                        Ok((out, used)) => {
+                            extra = format!(
+                                " | zlib stream {used} B -> {} B{}",
+                                out.len(),
+                                if used as i64 != n as i64 {
+                                    " (MISMATCH)"
+                                } else {
+                                    ""
+                                }
+                            )
+                        }
                         Err(e) => extra = format!(" | zlib: {e}"),
                     }
                 }
-                o += &format!("    layer {li} @{ls}: pos ({left},{top}) visible {vis} alpha_on {alpha_on} name_len {lnl} | {what} size @{p} = {n}{extra}\n");
+                o += &format!(
+                    "    layer {li} @{ls}: pos ({left},{top}) visible {vis} alpha_on {alpha_on} name_len {lnl} | {what} size @{p} = {n}{extra}\n"
+                );
                 if n < 0 {
                     break 'outer;
                 }
@@ -745,18 +948,39 @@ pub fn dump(d: &[u8]) -> String {
                     continue;
                 }
                 let r0 = q + 4 + nl as usize + 13;
-                let (Some(lc), Some(w2), Some(h2), Some(b2)) = (rd(r0), rd(r0 + 4), rd(r0 + 8), rd(r0 + 12)) else { continue };
-                if (1..=64).contains(&lc) && (1..=16384).contains(&w2) && (1..=16384).contains(&h2) && [1, 4, 8, 16, 24, 32].contains(&b2) {
-                    cands.push(format!("+{off} (name_len {nl} layers {lc} {w2}x{h2} bpp {b2})"));
+                let (Some(lc), Some(w2), Some(h2), Some(b2)) =
+                    (rd(r0), rd(r0 + 4), rd(r0 + 8), rd(r0 + 12))
+                else {
+                    continue;
+                };
+                if (1..=64).contains(&lc)
+                    && (1..=16384).contains(&w2)
+                    && (1..=16384).contains(&h2)
+                    && [1, 4, 8, 16, 24, 32].contains(&b2)
+                {
+                    cands.push(format!(
+                        "+{off} (name_len {nl} layers {lc} {w2}x{h2} bpp {b2})"
+                    ));
                 }
             }
-            o += &format!("  next-frame header candidates after @{p}: {}\n", if cands.is_empty() { "none".to_string() } else { cands.join(", ") });
-            if let Some(first) = cands.first()
-                && let Some(off) = first.strip_prefix('+').and_then(|x| x.split(' ').next()).and_then(|x| x.parse::<usize>().ok()) {
-                    p += off;
+            o += &format!(
+                "  next-frame header candidates after @{p}: {}\n",
+                if cands.is_empty() {
+                    "none".to_string()
                 } else {
-                    break;
+                    cands.join(", ")
                 }
+            );
+            if let Some(first) = cands.first()
+                && let Some(off) = first
+                    .strip_prefix('+')
+                    .and_then(|x| x.split(' ').next())
+                    .and_then(|x| x.parse::<usize>().ok())
+            {
+                p += off;
+            } else {
+                break;
+            }
         }
         f += 1;
     }
@@ -768,10 +992,19 @@ pub fn stats(d: &[u8]) -> R<String> {
     if !d.starts_with(b"Gale") {
         return err("not a GAL file");
     }
-    let all = |m| if d.starts_with(b"GaleX") { parse_galex_all(d, m) } else { parse_gale_all(d, m) };
+    let all = |m| {
+        if d.starts_with(b"GaleX") {
+            parse_galex_all(d, m)
+        } else {
+            parse_gale_all(d, m)
+        }
+    };
     let (mut note, (info, frames)) = match all(64) {
         Ok(v) => (String::new(), v),
-        Err(e) => (format!("note: only frame 0 parsed; later frames failed: {e}\n"), all(1)?),
+        Err(e) => (
+            format!("note: only frame 0 parsed; later frames failed: {e}\n"),
+            all(1)?,
+        ),
     };
     let comp = match info.compression {
         Some(0) => "0 (zlib)".to_string(),
@@ -781,13 +1014,27 @@ pub fn stats(d: &[u8]) -> R<String> {
     };
     let mut out = format!(
         "version {} size {}x{} bpp {} frames {} (parsed {}) compression {} blocks {}x{}\n",
-        info.version, info.w, info.h, info.bpp, info.frames, frames.len(), comp, info.block_w, info.block_h
+        info.version,
+        info.w,
+        info.h,
+        info.bpp,
+        info.frames,
+        frames.len(),
+        comp,
+        info.block_w,
+        info.block_h
     );
     out += &std::mem::take(&mut note);
     for (fi, f) in frames.iter().enumerate() {
         out += &format!(
             "frame {fi}: {}x{} bpp {} palette {} layers {} delay {:?} hdr {:02x?}\n",
-            f.w, f.h, f.bpp, f.palette.len(), f.layers.len(), f.delay, f.raw_hdr
+            f.w,
+            f.h,
+            f.bpp,
+            f.palette.len(),
+            f.layers.len(),
+            f.delay,
+            f.raw_hdr
         );
         for (li, (l, data, a)) in f.layers.iter().enumerate() {
             let mut px = to_rgba(f, data, a.as_deref());
@@ -806,7 +1053,19 @@ pub fn stats(d: &[u8]) -> R<String> {
             }
             out += &format!(
                 "  layer {li}: pos ({},{}) visible {} alpha {} alpha_on {} mask {} colorkey {} | data {} B | avg rgb ({},{},{}) avg alpha {} | non-black px {:.1}%\n",
-                l.left, l.top, l.visible, l.alpha, l.alpha_on, a.is_some(), key.map(|k| format!("{k:06x}")).unwrap_or("none".into()), data.len(), r / n, g / n, b / n, al / n, nz as f64 * 100.0 / n as f64
+                l.left,
+                l.top,
+                l.visible,
+                l.alpha,
+                l.alpha_on,
+                a.is_some(),
+                key.map(|k| format!("{k:06x}")).unwrap_or("none".into()),
+                data.len(),
+                r / n,
+                g / n,
+                b / n,
+                al / n,
+                nz as f64 * 100.0 / n as f64
             );
         }
     }
@@ -820,11 +1079,15 @@ fn color_key(f: &Frame, l: &Layer, has_alpha: bool) -> Option<u32> {
         return None;
     }
     // -1 / 0xFFFFFFFF / 0x00FFFFFF = ninguno. Con bpp <= 8 el valor es un índice de paleta.
-    let valid = |v: u32| v != 0xFFFF_FFFF && v != 0x00FF_FFFF && v >> 24 == 0 && (f.bpp > 8 || v < 256);
+    let valid =
+        |v: u32| v != 0xFFFF_FFFF && v != 0x00FF_FFFF && v >> 24 == 0 && (f.bpp > 8 || v < 256);
     if valid(l.trans as u32) {
         return Some(l.trans as u32);
     }
-    let m = f.raw_hdr.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))?;
+    let m = f
+        .raw_hdr
+        .get(0..4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))?;
     valid(m).then_some(m)
 }
 
@@ -838,7 +1101,8 @@ fn apply_key_frame(f: &Frame, data: &[u8], px: &mut [u8], key: Option<u32>) {
                 let idx = if f.bpp == 8 {
                     data.get(y * st + x).copied()
                 } else {
-                    data.get(y * st + x / 2).map(|b| if x % 2 == 0 { b >> 4 } else { b & 15 })
+                    data.get(y * st + x / 2)
+                        .map(|b| if x % 2 == 0 { b >> 4 } else { b & 15 })
                 };
                 if idx == Some(k as u8) {
                     px[(y * f.w as usize + x) * 4 + 3] = 0;
@@ -852,7 +1116,11 @@ fn apply_key_frame(f: &Frame, data: &[u8], px: &mut [u8], key: Option<u32>) {
 
 fn apply_key(px: &mut [u8], key: Option<u32>) {
     let Some(k) = key else { return };
-    let (r, g, b) = ((k & 0xFF) as u8, ((k >> 8) & 0xFF) as u8, ((k >> 16) & 0xFF) as u8);
+    let (r, g, b) = (
+        (k & 0xFF) as u8,
+        ((k >> 8) & 0xFF) as u8,
+        ((k >> 16) & 0xFF) as u8,
+    );
     for p in px.chunks_mut(4) {
         if p[0] == r && p[1] == g && p[2] == b {
             p[3] = 0;
@@ -871,8 +1139,14 @@ fn to_rgba(f: &Frame, data: &[u8], alpha: Option<&[u8]>) -> Vec<u8> {
         for x in 0..w {
             let o = (y * w + x) * 4;
             let (r, g, b, a) = match f.bpp {
-                32 => row.get(x * 4..x * 4 + 4).map(|p| (p[2], p[1], p[0], p[3])).unwrap_or_default(),
-                24 => row.get(x * 3..x * 3 + 3).map(|p| (p[2], p[1], p[0], 255)).unwrap_or_default(),
+                32 => row
+                    .get(x * 4..x * 4 + 4)
+                    .map(|p| (p[2], p[1], p[0], p[3]))
+                    .unwrap_or_default(),
+                24 => row
+                    .get(x * 3..x * 3 + 3)
+                    .map(|p| (p[2], p[1], p[0], 255))
+                    .unwrap_or_default(),
                 16 => row
                     .get(x * 2..x * 2 + 2)
                     .map(|p| {
@@ -903,15 +1177,29 @@ fn to_rgba(f: &Frame, data: &[u8], alpha: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// Compone las capas visibles de un frame en RGBA.
-fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
+fn compose(info: &Info, frame: &Frame, previous: Option<&[u8]>) -> R<(u32, u32, Vec<u8>)> {
     let (cw, ch) = (info.w.max(frame.w), info.h.max(frame.h));
     if cw == 0 || ch == 0 || (cw as u64 * ch as u64) > 16384 * 16384 {
         return err("invalid dimensions");
     }
-    let visible: Vec<_> = frame.layers.iter().filter(|(l, d, _)| l.visible && !d.is_empty()).collect();
+    if frame.layers.iter().all(|(_, data, _)| data.is_empty())
+        && let Some(previous) = previous
+        && previous.len() == (frame.w as usize * frame.h as usize * 4)
+    {
+        return Ok((frame.w, frame.h, previous.to_vec()));
+    }
+    let visible: Vec<_> = frame
+        .layers
+        .iter()
+        .filter(|(l, d, _)| l.visible && !d.is_empty())
+        .collect();
     // caso rápido: una sola capa a tamaño completo
     if visible.is_empty() {
-        return Ok((frame.w, frame.h, vec![0u8; (frame.w * frame.h * 4) as usize]));
+        return Ok((
+            frame.w,
+            frame.h,
+            vec![0u8; (frame.w * frame.h * 4) as usize],
+        ));
     }
     if visible.len() == 1 && visible[0].0.left == 0 && visible[0].0.top == 0 {
         let (l, data, a) = visible.first().copied().unwrap_or(&frame.layers[0]);
@@ -947,7 +1235,11 @@ fn compose(info: &Info, frame: &Frame) -> R<(u32, u32, Vec<u8>)> {
                 for c in 0..3 {
                     let sc = px[s + c] as u32;
                     let dc = canvas[dpos + c] as u32;
-                    canvas[dpos + c] = if oa == 0 { 0 } else { ((sc * sa + dc * da * (255 - sa) / 255) / oa) as u8 };
+                    canvas[dpos + c] = if oa == 0 {
+                        0
+                    } else {
+                        ((sc * sa + dc * da * (255 - sa) / 255) / oa) as u8
+                    };
                 }
                 canvas[dpos + 3] = oa as u8;
             }
@@ -965,7 +1257,13 @@ pub fn decode(d: &[u8]) -> R<Image> {
         return err("not a GAL file");
     }
     let x = d.starts_with(b"GaleX");
-    let all = |m| if x { parse_galex_all(d, m) } else { parse_gale_all(d, m) };
+    let all = |m| {
+        if x {
+            parse_galex_all(d, m)
+        } else {
+            parse_gale_all(d, m)
+        }
+    };
     let (info, frames) = match all(1024) {
         Ok(v) => v,
         Err(e) => {
@@ -973,21 +1271,26 @@ pub fn decode(d: &[u8]) -> R<Image> {
             all(1)?
         }
     };
-    let (w, h, rgba) = compose(&info, &frames[0])?;
+    let (w, h, rgba) = compose(&info, &frames[0], None)?;
     // Gale binario: los bytes 4..8 de la cabecera de frame (tras la máscara) son la duración
     // del frame en ms (visto en un juego real: 67 ms y una pausa de 2333 ms).
     let delay_of = |f: &Frame| {
         f.delay.or_else(|| {
-            f.raw_hdr.get(4..8).map(|b| u32::from_le_bytes(b.try_into().unwrap())).filter(|d| (1..=600_000).contains(d))
+            f.raw_hdr
+                .get(4..8)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .filter(|d| (1..=600_000).contains(d))
         })
     };
     let mut extra = vec![];
     let mut delays = vec![];
     if frames.len() > 1 {
         delays.push(delay_of(&frames[0]).unwrap_or(DEFAULT_FRAME_MS));
+        let mut previous = rgba.clone();
         for f in &frames[1..] {
-            match compose(&info, f) {
+            match compose(&info, f, Some(&previous)) {
                 Ok((fw, fh, px)) if fw == w && fh == h => {
+                    previous = px.clone();
                     extra.push(px);
                     delays.push(delay_of(f).unwrap_or(DEFAULT_FRAME_MS));
                 }
@@ -998,7 +1301,13 @@ pub fn decode(d: &[u8]) -> R<Image> {
             delays.clear();
         }
     }
-    Ok(Image { w, h, rgba, frames: extra, delays })
+    Ok(Image {
+        w,
+        h,
+        rgba,
+        frames: extra,
+        delays,
+    })
 }
 
 /// Decodifica GAL o, como alternativa, PNG/JPEG/BMP (juegos extraídos/parcheados).
@@ -1006,8 +1315,16 @@ pub fn decode_any(d: &[u8]) -> R<Image> {
     if d.starts_with(b"Gale") {
         return decode(d);
     }
-    let img = image::load_from_memory(d).map_err(|e| GalError(format!("image: {e}")))?.to_rgba8();
-    Ok(Image { w: img.width(), h: img.height(), rgba: img.into_raw(), frames: vec![], delays: vec![] })
+    let img = image::load_from_memory(d)
+        .map_err(|e| GalError(format!("image: {e}")))?
+        .to_rgba8();
+    Ok(Image {
+        w: img.width(),
+        h: img.height(),
+        rgba: img.into_raw(),
+        frames: vec![],
+        delays: vec![],
+    })
 }
 
 /// Lee solo la cabecera para obtener (ancho, alto). `prefix` puede estar truncado.
@@ -1016,7 +1333,9 @@ pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
         let hs = i32::from_le_bytes(d[8..12].try_into().ok()?) as usize;
         let z = &d[12..d.len().min(12 + hs)];
         let mut out = Vec::new();
-        let _ = flate2::read::ZlibDecoder::new(z).take(4096).read_to_end(&mut out);
+        let _ = flate2::read::ZlibDecoder::new(z)
+            .take(4096)
+            .read_to_end(&mut out);
         let xml = cp932(&out);
         let i = xml.find("Width")?;
         let tag = &xml[i.saturating_sub(1)..];
@@ -1026,8 +1345,15 @@ pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
     }
     if d.starts_with(b"Gale") && d.len() >= 7 + 4 + 12 {
         let ver: u32 = std::str::from_utf8(&d[4..7]).ok()?.parse().ok()?;
-        let u = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-        return if ver > 102 { Some((u(11 + 4)?, u(11 + 8)?)) } else { Some((u(7 + 4)?, u(7 + 8)?)) };
+        let u = |o: usize| {
+            d.get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        };
+        return if ver > 102 {
+            Some((u(11 + 4)?, u(11 + 8)?))
+        } else {
+            Some((u(7 + 4)?, u(7 + 8)?))
+        };
     }
     None
 }
@@ -1036,8 +1362,66 @@ pub fn peek_size(d: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
     #[test]
+    fn empty_animation_frame_keeps_previous_pixels() {
+        let info = Info {
+            w: 1,
+            h: 1,
+            ..Info::default()
+        };
+        let layer = Layer {
+            left: 0,
+            top: 0,
+            visible: true,
+            alpha: 255,
+            alpha_on: false,
+            trans: -1,
+        };
+        let empty = Frame {
+            w: 1,
+            h: 1,
+            bpp: 24,
+            palette: vec![],
+            layers: vec![(layer, vec![], None)],
+            delay: None,
+            raw_hdr: vec![],
+        };
+        let previous = [255, 0, 0, 255];
+
+        assert_eq!(compose(&info, &empty, Some(&previous)).unwrap().2, previous);
+        assert_eq!(compose(&info, &empty, None).unwrap().2, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn galex_omitted_frame_retains_previous_image() {
+        use std::io::Write;
+        let z = |data: &[u8]| {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        };
+        let xml = r#"<Frames Version="200" Width="1" Height="1" Bpp="8" Count="2" Randomized="0" CompType="0" BlockWidth="0" BlockHeight="0"><Frame Delay="67" TransColor="-1"><Layers Width="1" Height="1" Bpp="8"><RGB>000000FF0000</RGB><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/></Layers></Frame><Frame Delay="67" TransColor="-1"><Layers Width="1" Height="1" Bpp="8"><RGB>000000FF0000</RGB><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/></Layers></Frame></Frames>"#;
+        let zx = z(xml.as_bytes());
+        let mut data = b"GaleX200".to_vec();
+        data.extend((zx.len() as u32).to_le_bytes());
+        data.extend(zx);
+        let pixels = z(&[1, 0, 0, 0]);
+        data.extend((pixels.len() as u32).to_le_bytes());
+        data.extend(pixels);
+        data.extend(0u32.to_le_bytes());
+
+        let image = decode(&data).unwrap();
+        assert_eq!(image.frames.len(), 1);
+        assert_eq!(image.frames[0], image.rgba);
+        assert_eq!(image.delays, [67, 67]);
+    }
+
+    #[test]
     fn gale106_rgb_alpha() {
-        let d = std::fs::read(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bg.gal")).unwrap();
+        let d = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bg.gal"),
+        )
+        .unwrap();
         let img = decode(&d).unwrap();
         assert_eq!((img.w, img.h), (4, 3));
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
@@ -1150,7 +1534,12 @@ mod tests {
         let mut d = b"Gale106".to_vec();
         d.extend((hs as u32).to_le_bytes());
         d.extend(&hdr);
-        d.extend(frame([(-1, 0), (-1, 0)], &[[0, 0, 255], [0, 255, 0]], "F0", false));
+        d.extend(frame(
+            [(-1, 0), (-1, 0)],
+            &[[0, 0, 255], [0, 255, 0]],
+            "F0",
+            false,
+        ));
         d.extend(frame([(0, 0), (-1, 0)], &[[255, 0, 0]], "F1", true));
         let img = decode(&d).unwrap();
         assert_eq!(img.frames.len(), 1);
@@ -1194,7 +1583,13 @@ mod tests {
     }
     #[test]
     fn xml_attr() {
-        assert_eq!(attr(r#" Width="10" BlockWidth="4""#, "Width").as_deref(), Some("10"));
-        assert_eq!(attr(r#" BlockWidth="4" Width="10""#, "Width").as_deref(), Some("10"));
+        assert_eq!(
+            attr(r#" Width="10" BlockWidth="4""#, "Width").as_deref(),
+            Some("10")
+        );
+        assert_eq!(
+            attr(r#" BlockWidth="4" Width="10""#, "Width").as_deref(),
+            Some("10")
+        );
     }
 }

@@ -43,7 +43,10 @@ pub fn parse(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
     if !d.starts_with(b"LivePrevMenu") {
         return Err("not an LPM file".into());
     }
-    let v: u32 = std::str::from_utf8(d.get(12..15).ok_or("short")?).ok().and_then(|s| s.parse().ok()).ok_or("bad version")?;
+    let v: u32 = std::str::from_utf8(d.get(12..15).ok_or("short")?)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or("bad version")?;
     let mut r = Rd { d, p: 15 + 8 };
     let n = r.u32().ok_or("short")? as usize;
     let mut out = Vec::new();
@@ -84,7 +87,13 @@ pub fn parse(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
         if v > 105 {
             r.s().ok_or_else(e)?;
         }
-        out.push(Button { a, b, src, name, src_selected });
+        out.push(Button {
+            a,
+            b,
+            src,
+            name,
+            src_selected,
+        });
     }
     Ok((v, out))
 }
@@ -100,14 +109,28 @@ fn xml_tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
 /// Variante XML de .lpm (`<PrevMenu>` con `<Item>`), texto en Shift-JIS.
 pub fn parse_xml(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
     let s = encoding_rs::SHIFT_JIS.decode(d).0;
-    let v: u32 = xml_tag(&s, "Version").and_then(|t| t.trim().parse().ok()).ok_or("xml: bad version")?;
-    let num = |it: &str, n: &str| xml_tag(it, n).and_then(|t| t.trim().parse::<i32>().ok()).unwrap_or(0);
-    let txt = |it: &str, n: &str| xml_tag(it, n).map(|t| t.trim().to_string()).unwrap_or_default();
+    let v: u32 = xml_tag(&s, "Version")
+        .and_then(|t| t.trim().parse().ok())
+        .ok_or("xml: bad version")?;
+    let num = |it: &str, n: &str| {
+        xml_tag(it, n)
+            .and_then(|t| t.trim().parse::<i32>().ok())
+            .unwrap_or(0)
+    };
+    let txt = |it: &str, n: &str| {
+        xml_tag(it, n)
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default()
+    };
     let mut out = Vec::new();
     for chunk in s.split("<Item>").skip(1) {
         let it = chunk.split("</Item>").next().unwrap_or("");
         let settle = txt(it, "SettleImagePath");
-        let src_selected = if settle.is_empty() { txt(it, "InImagePath") } else { settle };
+        let src_selected = if settle.is_empty() {
+            txt(it, "InImagePath")
+        } else {
+            settle
+        };
         out.push(Button {
             a: (num(it, "Left"), num(it, "Top")),
             b: (num(it, "PrevLeft"), num(it, "PrevTop")),
@@ -153,6 +176,9 @@ mod tests {
         let (v, b) = super::parse(&d).unwrap();
         assert_eq!(v, 106);
         assert_eq!(b.len(), 2);
-        assert_eq!((b[1].a, b[1].b, b[1].src_selected.as_str()), ((101, 200), (7, 8), "a2.gal"));
+        assert_eq!(
+            (b[1].a, b[1].b, b[1].src_selected.as_str()),
+            ((101, 200), (7, 8), "a2.gal")
+        );
     }
 }

@@ -5,6 +5,7 @@ width = 0            # 0 = resolución lógica del juego
 height = 0
 fullscreen = false
 vsync = true
+interpolate_animations = false # funde cuadros en GAL animados grandes de escena
 scale_filter = "linear"   # o "nearest"
 
 [game]

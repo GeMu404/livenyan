@@ -1,7 +1,7 @@
 //! Evaluador de expresiones `TLiveParser` y tipo de valor dinámico.
 
 use super::names::Func;
-use super::{op, LiveParser, Param};
+use super::{LiveParser, Param, op};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -49,9 +49,19 @@ impl Value {
             Value::Empty => String::new(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(),
-            Value::Bool(b) => if *b { "1".into() } else { "0".into() },
+            Value::Bool(b) => {
+                if *b {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
+            }
             Value::Str(s) => s.clone(),
-            Value::Array(a) => a.iter().map(|v| v.as_str()).collect::<Vec<_>>().join("\r\n"),
+            Value::Array(a) => a
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\r\n"),
         }
     }
     pub fn from_param(p: &Param) -> Value {
@@ -74,7 +84,10 @@ impl Value {
         }
     }
     fn is_num(&self) -> bool {
-        matches!(self, Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Empty)
+        matches!(
+            self,
+            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Empty
+        )
     }
 }
 
@@ -90,7 +103,9 @@ pub trait Env {
 
 fn cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     if a.is_num() && b.is_num() {
-        a.as_f64().partial_cmp(&b.as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        a.as_f64()
+            .partial_cmp(&b.as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
     } else {
         a.as_str().cmp(&b.as_str())
     }
@@ -114,7 +129,9 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
         let mut args = Vec::with_capacity(e.operands.len());
         for p in &e.operands {
             args.push(match p {
-                Param::Var(n) if n.starts_with("____") => temps.get(n.as_str()).cloned().unwrap_or_default(),
+                Param::Var(n) if n.starts_with("____") => {
+                    temps.get(n.as_str()).cloned().unwrap_or_default()
+                }
                 Param::Var(n) => env.get_var(n),
                 other => Value::from_param(other),
             });
@@ -165,7 +182,10 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
                 let mut cur = a;
                 for idx in &args[1.min(args.len())..] {
                     cur = match cur {
-                        Value::Array(v) => v.get(idx.as_int().max(0) as usize).cloned().unwrap_or_default(),
+                        Value::Array(v) => v
+                            .get(idx.as_int().max(0) as usize)
+                            .cloned()
+                            .unwrap_or_default(),
                         _ => Value::Empty,
                     };
                 }
@@ -211,7 +231,11 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
         Func::INTTOHEX => Value::Str(format!("{:X}", n(0))),
         Func::LENGTH | Func::JLENGTH => match g(0) {
             Value::Array(v) => Value::Int(v.len() as i64),
-            v => Value::Int(if f == Func::LENGTH { encoding_rs::SHIFT_JIS.encode(&v.as_str()).0.len() } else { v.as_str().chars().count() } as i64),
+            v => Value::Int(if f == Func::LENGTH {
+                encoding_rs::SHIFT_JIS.encode(&v.as_str()).0.len()
+            } else {
+                v.as_str().chars().count()
+            } as i64),
         },
         Func::GETARRAYSIZE => Value::Int(match g(0) {
             Value::Array(v) => v.len() as i64,
@@ -239,7 +263,11 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             }
             Value::Str(c.into_iter().collect())
         }
-        Func::POS | Func::JPOS => Value::Int(s(1).find(&s(0)).map(|b| s(1)[..b].chars().count() as i64 + 1).unwrap_or(0)),
+        Func::POS | Func::JPOS => Value::Int(
+            s(1).find(&s(0))
+                .map(|b| s(1)[..b].chars().count() as i64 + 1)
+                .unwrap_or(0),
+        ),
         Func::COMPARESTR => Value::Int(s(0).cmp(&s(1)) as i64),
         Func::COMPARETEXT => Value::Int(s(0).to_lowercase().cmp(&s(1).to_lowercase()) as i64),
         Func::TRIM | Func::JTRIM => match g(0) {
@@ -273,7 +301,11 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
         Func::UPPERCASE => Value::Str(s(0).to_uppercase()),
         Func::STRINGOFCHAR => Value::Str(s(0).repeat(n(1).max(0) as usize)),
         Func::STRINGREPLACE => Value::Str(s(0).replace(&s(1), &s(2))),
-        Func::CHR => Value::Str(char::from_u32(n(0) as u32).map(String::from).unwrap_or_default()),
+        Func::CHR => Value::Str(
+            char::from_u32(n(0) as u32)
+                .map(String::from)
+                .unwrap_or_default(),
+        ),
         // Delphi IsDelimiter(Delimiters, S, Index): ¿S[Index] (base 1) está en Delimiters?
         Func::ISDELIMITER => {
             let c = chars(&s(1));
@@ -281,15 +313,25 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             Value::Bool(i >= 1 && (i as usize) <= c.len() && s(0).contains(c[i as usize - 1]))
         }
         Func::ORD => Value::Int(s(0).chars().next().map(|c| c as i64).unwrap_or(0)),
-        Func::EXTRACTFILENAME => Value::Str(s(0).rsplit(['\\', '/']).next().unwrap_or("").to_string()),
+        Func::EXTRACTFILENAME => {
+            Value::Str(s(0).rsplit(['\\', '/']).next().unwrap_or("").to_string())
+        }
         Func::EXTRACTFILEEXT => {
             let f = s(0);
             let base = f.rsplit(['\\', '/']).next().unwrap_or("");
-            Value::Str(base.rfind('.').map(|i| base[i..].to_string()).unwrap_or_default())
+            Value::Str(
+                base.rfind('.')
+                    .map(|i| base[i..].to_string())
+                    .unwrap_or_default(),
+            )
         }
         Func::EXTRACTFILEPATH => {
             let f = s(0);
-            Value::Str(f.rfind(['\\', '/']).map(|i| f[..=i].to_string()).unwrap_or_default())
+            Value::Str(
+                f.rfind(['\\', '/'])
+                    .map(|i| f[..=i].to_string())
+                    .unwrap_or_default(),
+            )
         }
         Func::CHANGEFILEEXT => {
             let f = s(0);
@@ -304,24 +346,47 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             Value::Str(if f.ends_with('\\') { f } else { f + "\\" })
         }
         Func::INDEXOFSTR => match g(0) {
-            Value::Array(v) => Value::Int(v.iter().position(|e| e.as_str() == s(1)).map(|i| i as i64).unwrap_or(-1)),
+            Value::Array(v) => Value::Int(
+                v.iter()
+                    .position(|e| e.as_str() == s(1))
+                    .map(|i| i as i64)
+                    .unwrap_or(-1),
+            ),
             _ => Value::Int(-1),
         },
         Func::ARRAYTOSTRING => Value::Str(match g(0) {
-            Value::Array(v) => v.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(&if a.len() > 1 { s(1) } else { "\r\n".into() }),
+            Value::Array(v) => v
+                .iter()
+                .map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(&if a.len() > 1 { s(1) } else { "\r\n".into() }),
             v => v.as_str(),
         }),
         Func::STRINGTOARRAY => {
-            let sep = if a.len() > 2 { s(2) } else { "\r\n".to_string() };
-            let arr: Vec<Value> = s(0).split(sep.as_str()).map(|p| Value::Str(p.to_string())).collect();
+            let sep = if a.len() > 2 {
+                s(2)
+            } else {
+                "\r\n".to_string()
+            };
+            let arr: Vec<Value> = s(0)
+                .split(sep.as_str())
+                .map(|p| Value::Str(p.to_string()))
+                .collect();
             if let Some(name) = var_name(raw, 1) {
                 env.set_var(name, Value::Array(arr.clone()));
             }
             Value::Int(arr.len() as i64)
         }
-        Func::ADDARRAY | Func::INSERTARRAY | Func::DELETEARRAY | Func::SETARRAY | Func::TRIMARRAY | Func::UNIQUEARRAY
+        Func::ADDARRAY
+        | Func::INSERTARRAY
+        | Func::DELETEARRAY
+        | Func::SETARRAY
+        | Func::TRIMARRAY
+        | Func::UNIQUEARRAY
         | Func::SORTSTR => {
-            let Some(name) = var_name(raw, 0) else { return Value::Empty };
+            let Some(name) = var_name(raw, 0) else {
+                return Value::Empty;
+            };
             let mut arr = match env.get_var(name) {
                 Value::Array(v) => v,
                 Value::Empty => vec![],
@@ -409,7 +474,12 @@ mod tests {
         fn warn_once(&mut self, _: &str, _: &str) {}
     }
     fn od(op: u8, name: &str, func: Option<u8>, ops: Vec<Param>) -> OpeData {
-        OpeData { op, name: name.into(), func, operands: ops }
+        OpeData {
+            op,
+            name: name.into(),
+            func,
+            operands: ops,
+        }
     }
     #[test]
     fn basic_ops() {
@@ -417,8 +487,18 @@ mod tests {
         e.0.insert("a".into(), Value::Int(5));
         let lp = LiveParser {
             entries: vec![
-                od(op::MUL, "____1", None, vec![Param::Var("a".into()), Param::Int(3)]),
-                od(op::PLUS, "____2", None, vec![Param::Var("____1".into()), Param::Int(1)]),
+                od(
+                    op::MUL,
+                    "____1",
+                    None,
+                    vec![Param::Var("a".into()), Param::Int(3)],
+                ),
+                od(
+                    op::PLUS,
+                    "____2",
+                    None,
+                    vec![Param::Var("____1".into()), Param::Int(1)],
+                ),
                 od(op::TO, "b", None, vec![Param::Var("____2".into())]),
             ],
         };
@@ -426,14 +506,38 @@ mod tests {
         assert_eq!(e.0["b"], Value::Int(16));
         let lp = LiveParser {
             entries: vec![
-                od(op::FUNC, "____1", Some(Func::ADDARRAY), vec![Param::Var("_tmp".into()), Param::Str("x".into())]),
-                od(op::FUNC, "____2", Some(Func::ADDARRAY), vec![Param::Var("_tmp".into()), Param::Str("y".into())]),
-                od(op::FUNC, "____arg", Some(Func::GETARRAYSIZE), vec![Param::Var("_tmp".into())]),
+                od(
+                    op::FUNC,
+                    "____1",
+                    Some(Func::ADDARRAY),
+                    vec![Param::Var("_tmp".into()), Param::Str("x".into())],
+                ),
+                od(
+                    op::FUNC,
+                    "____2",
+                    Some(Func::ADDARRAY),
+                    vec![Param::Var("_tmp".into()), Param::Str("y".into())],
+                ),
+                od(
+                    op::FUNC,
+                    "____arg",
+                    Some(Func::GETARRAYSIZE),
+                    vec![Param::Var("_tmp".into())],
+                ),
             ],
         };
         assert_eq!(eval(&lp, &mut e), Value::Int(2));
         let lp = LiveParser {
-            entries: vec![od(op::FUNC, "____arg", Some(Func::COPY), vec![Param::Str("あいうえお".into()), Param::Int(2), Param::Int(2)])],
+            entries: vec![od(
+                op::FUNC,
+                "____arg",
+                Some(Func::COPY),
+                vec![
+                    Param::Str("あいうえお".into()),
+                    Param::Int(2),
+                    Param::Int(2),
+                ],
+            )],
         };
         assert_eq!(eval(&lp, &mut e), Value::Str("いう".into()));
     }

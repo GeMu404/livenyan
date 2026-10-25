@@ -29,8 +29,14 @@ impl Table {
         }
     }
     fn get(&self, row: usize, f: &str) -> Value {
-        let Some(c) = self.fields.iter().position(|x| x.eq_ignore_ascii_case(f)) else { return Value::Empty };
-        self.rows.get(row).and_then(|r| r.get(c)).cloned().unwrap_or_default()
+        let Some(c) = self.fields.iter().position(|x| x.eq_ignore_ascii_case(f)) else {
+            return Value::Empty;
+        };
+        self.rows
+            .get(row)
+            .and_then(|r| r.get(c))
+            .cloned()
+            .unwrap_or_default()
     }
     fn set(&mut self, row: usize, f: &str, v: Value) {
         let c = self.col(f);
@@ -95,7 +101,12 @@ impl Db {
     }
 
     /// Ejecuta una función DB*. `load` lee un fichero del juego (para DBLoadTsvFile).
-    pub fn call(&mut self, f: u8, a: &[Value], load: &dyn Fn(&str) -> Option<String>) -> Option<Value> {
+    pub fn call(
+        &mut self,
+        f: u8,
+        a: &[Value],
+        load: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Value> {
         let s = |v: &[Value], i: usize| v.get(i).map(|x| x.as_str()).unwrap_or_default();
         let n = |v: &[Value], i: usize| v.get(i).map(|x| x.as_int()).unwrap_or(0);
         Some(match f {
@@ -114,7 +125,13 @@ impl Db {
             }
             Func::DBGETACTIVE => Value::Str(self.active.clone()),
             Func::DBGETTABLECOUNT => Value::Int(self.tables.len() as i64),
-            Func::DBGETTABLE => Value::Str(self.tables.keys().nth(n(a, 0).max(0) as usize).cloned().unwrap_or_default()),
+            Func::DBGETTABLE => Value::Str(
+                self.tables
+                    .keys()
+                    .nth(n(a, 0).max(0) as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
             Func::DBCOPYTABLE => {
                 let src = self.tables.get(&s(a, 0)).cloned().unwrap_or_default();
                 self.tables.insert(s(a, 1), src);
@@ -122,7 +139,11 @@ impl Db {
             }
             Func::DBLOADTSVFILE => {
                 let (t, r) = self.split(a);
-                let (t, file) = if r.len() >= 2 { (s(r, 0), s(r, 1)) } else { (t, s(r, 0)) };
+                let (t, file) = if r.len() >= 2 {
+                    (s(r, 0), s(r, 1))
+                } else {
+                    (t, s(r, 0))
+                };
                 match load(&file) {
                     Some(text) => Value::Int(self.load_tsv(&t, &text) as i64),
                     None => Value::Int(0),
@@ -164,43 +185,69 @@ impl Db {
                         tb.recno = 0;
                         Value::Bool(true)
                     }
-                    Func::DBGETINT | Func::DBGETFLOAT | Func::DBGETBOOL | Func::DBGETSTR => typed(f, tb.get(tb.recno, &s(r, 0))),
+                    Func::DBGETINT | Func::DBGETFLOAT | Func::DBGETBOOL | Func::DBGETSTR => {
+                        typed(f, tb.get(tb.recno, &s(r, 0)))
+                    }
                     Func::DBSETINT | Func::DBSETFLOAT | Func::DBSETBOOL | Func::DBSETSTR => {
                         let rn = tb.recno;
                         tb.set(rn, &s(r, 0), r.get(1).cloned().unwrap_or_default());
                         Value::Bool(true)
                     }
                     // DBDirectGet*(tabla, campo, registro)
-                    Func::DBDIRECTGETINT | Func::DBDIRECTGETFLOAT | Func::DBDIRECTGETBOOL | Func::DBDIRECTGETSTR => {
-                        typed(f, tb.get(n(r, 1).max(0) as usize, &s(r, 0)))
-                    }
-                    Func::DBDIRECTSETINT | Func::DBDIRECTSETFLOAT | Func::DBDIRECTSETBOOL | Func::DBDIRECTSETSTR => {
-                        tb.set(n(r, 1).max(0) as usize, &s(r, 0), r.get(2).cloned().unwrap_or_default());
+                    Func::DBDIRECTGETINT
+                    | Func::DBDIRECTGETFLOAT
+                    | Func::DBDIRECTGETBOOL
+                    | Func::DBDIRECTGETSTR => typed(f, tb.get(n(r, 1).max(0) as usize, &s(r, 0))),
+                    Func::DBDIRECTSETINT
+                    | Func::DBDIRECTSETFLOAT
+                    | Func::DBDIRECTSETBOOL
+                    | Func::DBDIRECTSETSTR => {
+                        tb.set(
+                            n(r, 1).max(0) as usize,
+                            &s(r, 0),
+                            r.get(2).cloned().unwrap_or_default(),
+                        );
                         Value::Bool(true)
                     }
                     Func::DBFINDFIRST | Func::DBLOCATE => {
-                        let i = tb.find(&s(r, 0), r.get(1).unwrap_or(&Value::Empty), 0..tb.rows.len());
+                        let i = tb.find(
+                            &s(r, 0),
+                            r.get(1).unwrap_or(&Value::Empty),
+                            0..tb.rows.len(),
+                        );
                         if i >= 0 {
                             tb.recno = i as usize;
                         }
                         Value::Int(i)
                     }
                     Func::DBFINDLAST => {
-                        let i = tb.find(&s(r, 0), r.get(1).unwrap_or(&Value::Empty), (0..tb.rows.len()).rev());
+                        let i = tb.find(
+                            &s(r, 0),
+                            r.get(1).unwrap_or(&Value::Empty),
+                            (0..tb.rows.len()).rev(),
+                        );
                         if i >= 0 {
                             tb.recno = i as usize;
                         }
                         Value::Int(i)
                     }
                     Func::DBFINDNEXT => {
-                        let i = tb.find(&s(r, 0), r.get(1).unwrap_or(&Value::Empty), tb.recno + 1..tb.rows.len());
+                        let i = tb.find(
+                            &s(r, 0),
+                            r.get(1).unwrap_or(&Value::Empty),
+                            tb.recno + 1..tb.rows.len(),
+                        );
                         if i >= 0 {
                             tb.recno = i as usize;
                         }
                         Value::Int(i)
                     }
                     Func::DBFINDPRIOR => {
-                        let i = tb.find(&s(r, 0), r.get(1).unwrap_or(&Value::Empty), (0..tb.recno).rev());
+                        let i = tb.find(
+                            &s(r, 0),
+                            r.get(1).unwrap_or(&Value::Empty),
+                            (0..tb.recno).rev(),
+                        );
                         if i >= 0 {
                             tb.recno = i as usize;
                         }
@@ -211,8 +258,12 @@ impl Db {
                         let desc = r.get(1).is_some_and(|v| !v.truthy());
                         tb.rows.sort_by(|x, y| {
                             let (a, b) = (&x[c], &y[c]);
-                            let o = if matches!(a, Value::Int(_) | Value::Float(_)) || a.as_str().parse::<f64>().is_ok() {
-                                a.as_f64().partial_cmp(&b.as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+                            let o = if matches!(a, Value::Int(_) | Value::Float(_))
+                                || a.as_str().parse::<f64>().is_ok()
+                            {
+                                a.as_f64()
+                                    .partial_cmp(&b.as_f64())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
                             } else {
                                 a.as_str().cmp(&b.as_str())
                             };
@@ -238,9 +289,45 @@ mod tests {
         let mut db = Db::default();
         let load = |_: &str| Some("id\tname\n1\ta\n2\tb\n".to_string());
         db.call(Func::DBCREATETABLE, &[Value::Str("t".into())], &load);
-        assert_eq!(db.call(Func::DBLOADTSVFILE, &[Value::Str("t".into()), Value::Str("x.tsv".into())], &load), Some(Value::Int(2)));
-        assert_eq!(db.call(Func::DBFINDFIRST, &[Value::Str("t".into()), Value::Str("name".into()), Value::Str("b".into())], &load), Some(Value::Int(1)));
-        assert_eq!(db.call(Func::DBGETINT, &[Value::Str("t".into()), Value::Str("id".into())], &load), Some(Value::Int(2)));
-        assert_eq!(db.call(Func::DBDIRECTGETSTR, &[Value::Str("t".into()), Value::Str("name".into()), Value::Int(0)], &load), Some(Value::Str("a".into())));
+        assert_eq!(
+            db.call(
+                Func::DBLOADTSVFILE,
+                &[Value::Str("t".into()), Value::Str("x.tsv".into())],
+                &load
+            ),
+            Some(Value::Int(2))
+        );
+        assert_eq!(
+            db.call(
+                Func::DBFINDFIRST,
+                &[
+                    Value::Str("t".into()),
+                    Value::Str("name".into()),
+                    Value::Str("b".into())
+                ],
+                &load
+            ),
+            Some(Value::Int(1))
+        );
+        assert_eq!(
+            db.call(
+                Func::DBGETINT,
+                &[Value::Str("t".into()), Value::Str("id".into())],
+                &load
+            ),
+            Some(Value::Int(2))
+        );
+        assert_eq!(
+            db.call(
+                Func::DBDIRECTGETSTR,
+                &[
+                    Value::Str("t".into()),
+                    Value::Str("name".into()),
+                    Value::Int(0)
+                ],
+                &load
+            ),
+            Some(Value::Str("a".into()))
+        );
     }
 }
