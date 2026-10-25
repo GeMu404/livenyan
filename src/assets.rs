@@ -118,17 +118,23 @@ fn decode_wav(d: &[u8]) -> Result<Pcm, String> {
     let samples: Vec<i16> = match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Int, 8) => r
             .into_samples::<i8>()
-            .map(|s| (s.unwrap_or(0) as i16) << 8)
-            .collect(),
-        (hound::SampleFormat::Int, 16) => r.into_samples::<i16>().map(|s| s.unwrap_or(0)).collect(),
+            .map(|s| s.map(|sample| (sample as i16) << 8))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
+        (hound::SampleFormat::Int, 16) => r
+            .into_samples::<i16>()
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
         (hound::SampleFormat::Int, b) => r
             .into_samples::<i32>()
-            .map(|s| (s.unwrap_or(0) >> (b - 16)) as i16)
-            .collect(),
+            .map(|s| s.map(|sample| (sample >> (b - 16)) as i16))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
         (hound::SampleFormat::Float, _) => r
             .into_samples::<f32>()
-            .map(|s| (s.unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0) as i16)
-            .collect(),
+            .map(|s| s.map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?,
     };
     Ok(Pcm {
         rate: spec.sample_rate,
@@ -329,6 +335,25 @@ fn worker(sh: Arc<Shared>, urgent: Receiver<String>, prefetch: Receiver<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wav_decode_rejects_truncated_samples() {
+        let mut buffer = Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 22_050,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(&mut buffer, spec).unwrap();
+        writer.write_sample(123_i16).unwrap();
+        writer.finalize().unwrap();
+        let mut wav = buffer.into_inner();
+        wav.pop();
+
+        assert!(decode_wav(&wav).is_err());
+    }
+
     #[test]
     fn pool_decodes() {
         let p =

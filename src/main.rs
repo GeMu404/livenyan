@@ -23,6 +23,9 @@ struct Cli {
     /// Lista los comandos del script LSB indicado y sale.
     #[arg(long)]
     dump_lsb: bool,
+    /// Exporta un catálogo de textos para traducción en la carpeta indicada.
+    #[arg(long, value_name = "DIR")]
+    dump_texts: Option<PathBuf>,
     /// Ejecuta el VM sin ventana registrando los comandos.
     #[arg(long)]
     trace: bool,
@@ -32,9 +35,17 @@ struct Cli {
     /// Decodifica una imagen GAL del archivo y muestra solo estadísticas (sin imagen).
     #[arg(long, value_name = "ARCHIVE_PATH")]
     gal_stats: Option<String>,
-    /// Driver de render de SDL (opengl, vulkan, software, gpu...).
+    /// Driver de render de SDL (opengl, vulkan, software, gpu...; predeterminado: vulkan).
     #[arg(long)]
     renderer: Option<String>,
+    /// Interpola cuadros de animaciones GAL de pantalla completa con NVIDIA Optical Flow
+    /// (requiere compilar con --features nvidia-optical-flow).
+    #[arg(long)]
+    #[cfg(feature = "nvidia-optical-flow")]
+    optical_flow: bool,
+    /// Muestra el medidor de FPS (también se puede alternar con F3).
+    #[arg(long)]
+    fps_meter: bool,
     /// Con --trace: ítem que se elige en los menús (0 = primero habilitado).
     #[arg(long)]
     pick: Option<i64>,
@@ -98,6 +109,11 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     if let Some(r) = &cli.renderer {
         cfg.window.renderer = r.clone();
     }
+    #[cfg(feature = "nvidia-optical-flow")]
+    if cli.optical_flow {
+        cfg.window.optical_flow = true;
+    }
+    cfg.window.fps_meter |= cli.fps_meter;
     if let Some((w, h)) = cli.res {
         cfg.game.logical_width = w;
         cfg.game.logical_height = h;
@@ -126,6 +142,18 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         game.logical.1,
         game.logical_source
     );
+    if let Some(directory) = &cli.dump_texts {
+        let summary = livenyan::text_export::export(&game.data, directory)?;
+        println!(
+            "translation catalog: {} entries ({} dialogues, {} menu options, {} LCM files) -> {}",
+            summary.entries,
+            summary.dialogues,
+            summary.menu_items,
+            summary.movies,
+            directory.join("texts.toml").display()
+        );
+        return Ok(());
+    }
     let assets = Arc::new(Assets::new(
         game.data.clone(),
         cfg.threads(),
@@ -209,7 +237,21 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         )),
         _ => None,
     };
-    let r = livenyan::app::run(game, cfg, assets, vm, t0, snap, cli.debug_layout);
+    let languages = if snap.is_some() {
+        Vec::new()
+    } else {
+        livenyan::text_export::load_languages(&game.translations_dir())?
+    };
+    if languages.is_empty() {
+        log::info!("no translated language catalogs found");
+    } else {
+        log::info!(
+            "found {} translated language catalog(s) in {}",
+            languages.len(),
+            game.translations_dir().display()
+        );
+    }
+    let r = livenyan::app::run(game, cfg, assets, vm, languages, t0, snap, cli.debug_layout);
     // salir de verdad aunque queden hilos de decodificación/audio vivos
     if let Err(e) = &r {
         eprintln!("error: {e}");

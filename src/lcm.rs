@@ -1,4 +1,4 @@
-//! Reader and sampler for image and text tracks in LiveCinema 112.
+//! Reader and sampler for LiveCinema 108-112 image and text tracks.
 
 use encoding_rs::SHIFT_JIS;
 
@@ -40,6 +40,7 @@ pub enum TrackContent {
         font_style: i32,
         color: i32,
     },
+    Opaque,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +72,13 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
         let end = self.offset.checked_add(len).ok_or("LCM offset overflow")?;
-        let bytes = self.bytes.get(self.offset..end).ok_or("truncated LCM")?;
+        let bytes = self.bytes.get(self.offset..end).ok_or_else(|| {
+            format!(
+                "truncated LCM at byte {} (need {len}, file has {})",
+                self.offset,
+                self.bytes.len()
+            )
+        })?;
         self.offset = end;
         Ok(bytes)
     }
@@ -101,9 +108,12 @@ impl<'a> Reader<'a> {
     }
 
     fn curve(&mut self) -> Result<u8, String> {
+        let offset = self.offset;
         let value = self.take(1)?[0];
         if value > 2 {
-            return Err("unsupported LCM interpolation curve".into());
+            return Err(format!(
+                "unsupported LCM interpolation curve {value} at byte {offset}"
+            ));
         }
         Ok(value)
     }
@@ -132,12 +142,13 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn common_header(bytes: &[u8], at: usize, index: usize, tracks: &[Track]) -> bool {
+fn common_header(bytes: &[u8], at: usize, index: usize, version: u32, tracks: &[Track]) -> bool {
     let Some(header) = bytes.get(at..at + 28) else {
         return false;
     };
     let kind = header[0];
-    if !matches!(kind, 0 | 1) {
+    let is_text = kind == 1;
+    if kind != 0 && !is_text {
         return false;
     }
     let int_at = |offset: usize| i32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
@@ -157,13 +168,14 @@ fn common_header(bytes: &[u8], at: usize, index: usize, tracks: &[Track]) -> boo
     if previous >= 0 {
         let predecessor = &tracks[previous as usize];
         if !matches!(
-            (&predecessor.content, kind),
+            (&predecessor.content, if is_text { 1 } else { 0 }),
             (TrackContent::Image(_), 0) | (TrackContent::Text { .. }, 1)
         ) {
             return false;
         }
     }
-    let Some(payload) = at.checked_add(163) else {
+    let header_size = if version < 112 { 139 } else { 163 };
+    let Some(payload) = at.checked_add(header_size) else {
         return false;
     };
     let Some(length_bytes) = bytes.get(payload..payload + 4) else {
@@ -205,8 +217,16 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
         return Err("LCM exceeds 1 MiB limit".into());
     }
     let mut r = Reader { bytes, offset: 0 };
-    if r.take(13)? != b"LiveCinema112" {
-        return Err("unsupported LCM version (expected LiveCinema112)".into());
+    let signature = r.take(10)?;
+    let version_bytes = r.take(3)?;
+    let version = std::str::from_utf8(version_bytes)
+        .ok()
+        .and_then(|text| text.parse::<u32>().ok())
+        .ok_or("invalid LCM version")?;
+    if signature != b"LiveCinema" || !(108..=112).contains(&version) {
+        return Err(format!(
+            "unsupported LCM version {version} (supported: 108-112)"
+        ));
     }
     let width = r.int()?;
     let height = r.int()?;
@@ -232,7 +252,9 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
     let mut duration_frames = 0;
     for index in 0..count as usize {
         let kind = r.take(1)?[0];
-        if !matches!(kind, 0 | 1) {
+        let is_text = kind == 1;
+        let is_opaque_legacy = version < 112 && kind == 2;
+        if kind != 0 && !is_text && !is_opaque_legacy {
             return Err(format!("unsupported LCM clip type {kind} at index {index}"));
         }
         let previous_raw = r.int()?;
@@ -273,18 +295,52 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
 
         if previous.is_some_and(|prev| {
             !matches!(
-                (&clips[prev].content, kind),
+                (&clips[prev].content, if is_text { 1 } else { 0 }),
                 (TrackContent::Image(_), 0) | (TrackContent::Text { .. }, 1)
             )
         }) {
             return Err("invalid LCM predecessor clip type".into());
         }
 
+        if is_opaque_legacy {
+            duration_frames = duration_frames.max(end);
+            clips.push(Track {
+                previous,
+                start,
+                duration: duration as u32,
+                order,
+                position_start: [0, 0],
+                position_end: [0, 0],
+                position_curve: [0, 0],
+                scale_x: [1.0, 1.0],
+                scale_y: [1.0, 1.0],
+                scale_curve: [0, 0],
+                opacity_start: 255,
+                opacity_end: 255,
+                content: TrackContent::Opaque,
+            });
+            if index + 1 < count as usize {
+                let next = (r.offset..bytes.len())
+                    .find(|at| common_header(bytes, *at, index + 1, version, &clips))
+                    .ok_or_else(|| {
+                        format!("could not locate next LCM clip after opaque legacy clip {index}")
+                    })?;
+                r.offset = next;
+            } else {
+                r.offset = bytes.len();
+            }
+            continue;
+        }
+
         let pivot = r.point()?;
         let position_start = r.point()?;
         let position_end = r.point()?;
         let position_curve = [r.curve()?, r.curve()?];
-        let angle = [r.real()?, r.real()?];
+        let angle = if version < 112 {
+            [r.real()?, 0.0]
+        } else {
+            [r.real()?, r.real()?]
+        };
         let scale_x = [r.real()?, r.real()?];
         let scale_x_curve = r.curve()?;
         let opacity_start = r.int()?;
@@ -295,8 +351,12 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
         let _clip_curve = [r.curve()?, r.curve()?];
         let scale_y = [r.real()?, r.real()?];
         let scale_y_curve = r.curve()?;
-        let extra = [r.int()?, r.int()?, r.int()?, r.int()?];
-        let content = if kind == 0 {
+        let extra = if version < 112 {
+            [0; 4]
+        } else {
+            [r.int()?, r.int()?, r.int()?, r.int()?]
+        };
+        let content = if !is_text {
             TrackContent::Image(r.media()?)
         } else {
             let value = r.string()?;
@@ -315,7 +375,7 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
             }
         };
 
-        if pivot != [0, 0]
+        if (version >= 112 && pivot != [0, 0])
             || angle != [0.0, 0.0]
             || scale_x
                 .iter()
@@ -347,15 +407,15 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
             opacity_end,
             content,
         });
-        if kind == 1 && index + 1 < count as usize {
+        if is_text && index + 1 < count as usize {
             let from = r.offset;
             let next = (from..bytes.len())
-                .find(|at| common_header(bytes, *at, index + 1, &clips))
+                .find(|at| common_header(bytes, *at, index + 1, version, &clips))
                 .ok_or_else(|| {
                     format!("could not locate next LCM text clip after index {index}")
                 })?;
             r.offset = next;
-        } else if kind == 1 {
+        } else if is_text {
             r.offset = bytes.len();
         }
     }
@@ -611,7 +671,12 @@ mod tests {
     }
 
     fn text_movie() -> Vec<u8> {
-        let mut out = b"LiveCinema112".to_vec();
+        text_movie_version(112)
+    }
+
+    fn text_movie_version(version: u32) -> Vec<u8> {
+        let signature = format!("LiveCinema{version}");
+        let mut out = signature.into_bytes();
         push_point(&mut out, [80, 24]);
         push_i32(&mut out, -1);
         out.push(0);
@@ -629,7 +694,9 @@ mod tests {
             push_point(&mut out, [16, 0]);
             out.extend_from_slice(&[0; 2]);
             push_real(&mut out, 0.0);
-            push_real(&mut out, 0.0);
+            if version >= 112 {
+                push_real(&mut out, 0.0);
+            }
             push_real(&mut out, 1.0);
             push_real(&mut out, 1.0);
             out.push(0);
@@ -643,8 +710,10 @@ mod tests {
             push_real(&mut out, 1.0);
             push_real(&mut out, 1.0);
             out.push(0);
-            for _ in 0..4 {
-                push_i32(&mut out, 0);
+            if version >= 112 {
+                for _ in 0..4 {
+                    push_i32(&mut out, 0);
+                }
             }
             push_i32(&mut out, text.len() as i32);
             out.extend_from_slice(text.as_bytes());
@@ -655,6 +724,23 @@ mod tests {
             push_i32(&mut out, 0x00FF_FFFF);
             out.push(0);
         }
+        out
+    }
+
+    fn legacy_opaque_movie() -> Vec<u8> {
+        let mut out = b"LiveCinema108".to_vec();
+        push_point(&mut out, [80, 24]);
+        push_i32(&mut out, -1);
+        out.push(0);
+        push_point(&mut out, [0, 0]);
+        push_i32(&mut out, 0);
+        push_i32(&mut out, 1);
+        out.push(2);
+        for value in [-1, 1, 0, 0, 0, 0] {
+            push_i32(&mut out, value);
+        }
+        out.extend_from_slice(&[0; 3]);
+        out.extend_from_slice(&[0; 128]);
         out
     }
 
@@ -693,9 +779,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_108_text_tracks() {
+        let movie = parse(&text_movie_version(108)).unwrap();
+        assert_eq!(movie.clips.len(), 2);
+        assert_eq!(movie.texts_at(0.0)[0].value, "scene A");
+        assert_eq!(movie.texts_at(2.0 * 1000.0 / 60.0)[0].value, "scene B");
+    }
+
+    #[test]
+    fn keeps_opaque_legacy_tracks_without_breaking_movie_parsing() {
+        let movie = parse(&legacy_opaque_movie()).unwrap();
+        assert_eq!(movie.clips.len(), 1);
+        assert!(matches!(movie.clips[0].content, TrackContent::Opaque));
+    }
+
+    #[test]
     fn rejects_unsupported_lcm_versions() {
         assert!(
-            parse(b"LiveCinema111")
+            parse(b"LiveCinema107")
+                .unwrap_err()
+                .contains("unsupported LCM version")
+        );
+        assert!(
+            parse(b"LiveCinema113")
                 .unwrap_err()
                 .contains("unsupported LCM version")
         );

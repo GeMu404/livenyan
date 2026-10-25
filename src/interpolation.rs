@@ -3,6 +3,8 @@ pub enum InterpolationMode {
     #[default]
     Off,
     Crossfade,
+    #[cfg(feature = "nvidia-optical-flow")]
+    OpticalFlow,
 }
 
 impl InterpolationMode {
@@ -10,6 +12,8 @@ impl InterpolationMode {
         match value {
             "off" => Some(Self::Off),
             "crossfade" => Some(Self::Crossfade),
+            #[cfg(feature = "nvidia-optical-flow")]
+            "optical-flow" => Some(Self::OpticalFlow),
             _ => None,
         }
     }
@@ -18,6 +22,8 @@ impl InterpolationMode {
         match self {
             Self::Off => "off",
             Self::Crossfade => "crossfade",
+            #[cfg(feature = "nvidia-optical-flow")]
+            Self::OpticalFlow => "optical-flow",
         }
     }
 }
@@ -28,7 +34,15 @@ mod tests {
 
     #[test]
     fn interpolation_mode_names_roundtrip() {
-        for mode in [InterpolationMode::Off, InterpolationMode::Crossfade] {
+        #[cfg(feature = "nvidia-optical-flow")]
+        let modes = vec![
+            InterpolationMode::Off,
+            InterpolationMode::Crossfade,
+            InterpolationMode::OpticalFlow,
+        ];
+        #[cfg(not(feature = "nvidia-optical-flow"))]
+        let modes = vec![InterpolationMode::Off, InterpolationMode::Crossfade];
+        for mode in modes {
             assert_eq!(InterpolationMode::parse(mode.as_str()), Some(mode));
         }
         assert_eq!(InterpolationMode::parse("motion"), None);

@@ -93,11 +93,7 @@ struct Glyph {
     cov: Vec<u8>,
 }
 
-pub struct Rendered {
-    pub w: u32,
-    pub h: u32,
-    pub rgba: Vec<u8>,
-}
+pub type Rendered = crate::renderer::RgbaImage;
 
 impl TextRenderer {
     /// Carga perezosa (ab_glyph/ttf-parser): casi instantánea incluso con TTC CJK grandes.
@@ -278,7 +274,7 @@ impl TextRenderer {
                 }
             }
         }
-        Rendered { w, h, rgba }
+        Rendered::new(w, h, rgba).expect("text rasterizer creates a valid RGBA image")
     }
 }
 

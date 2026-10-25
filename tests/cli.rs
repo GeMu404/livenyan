@@ -42,6 +42,37 @@ fn dump_hides_text() {
     assert!(!s.contains("こんにちは"));
 }
 
+#[test]
+fn dump_texts_writes_translation_catalog() {
+    let directory = std::env::temp_dir().join(format!(
+        "livenyan-cli-text-export-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_livenyan"))
+        .args(["--dump-texts", directory.to_str().unwrap()])
+        .arg(fx("game.exe"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("translation catalog:"));
+    let catalog_path = directory.join("texts.toml");
+    let catalog = std::fs::read_to_string(&catalog_path).unwrap();
+    assert!(catalog.contains("id = "));
+    assert!(catalog.contains("text = "));
+    assert!(!catalog.contains("source = "));
+    assert!(!catalog.contains("translation = "));
+    std::fs::remove_file(catalog_path).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}
+
 /// Regresión v0.1: TextIns a un objeto aún inexistente + MesNew con ONPLAYEND + While de espera
 /// (patrón de 終了待ち.lsb de LiveNovel). El manejador debe dispararse y el bucle terminar.
 #[test]

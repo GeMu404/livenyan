@@ -10,8 +10,23 @@ use crate::lsb::tpword::{Glyph, brk};
 use crate::lsb::{CmdType, Command, LiveParser, Lsb, Param, Prop};
 use crate::scene::{Kind, Motion, Scene, TextItem, prop_of};
 use crate::slider::{SliderPart, slider_size};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+fn translate_menu_choices(
+    source: &[String],
+    translations: &HashMap<String, String>,
+) -> Vec<String> {
+    source
+        .iter()
+        .map(|choice| {
+            translations
+                .get(&crate::text_export::menu_item_id(choice))
+                .cloned()
+                .unwrap_or_else(|| choice.clone())
+        })
+        .collect()
+}
 
 /// Nombre de la capa raíz (pantalla) en LiveMaker: el carácter 0x01. Siempre existe;
 /// sus hijos son de nivel superior.
@@ -30,6 +45,10 @@ pub enum Event {
     StopSound {
         channel: String,
     },
+    FadeSound {
+        channel: String,
+        duration_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +65,7 @@ pub enum State {
     Menu {
         name: String,
         choices: Vec<String>,
+        values: Vec<String>,
         var: String,
     },
     Ended,
@@ -119,11 +139,63 @@ pub struct CinemaPlayback {
 
 struct VideoPlayback {
     decoder: Option<crate::video::Decoder>,
-    frame: Option<Arc<[u8]>>,
+    frames: VecDeque<VideoFrame>,
     frame_seq: u64,
     generation: u64,
     width: u32,
     height: u32,
+    started_at_ms: f64,
+    first_pts_seconds: Option<f64>,
+    paused_at_ms: Option<f64>,
+}
+
+struct VideoFrame {
+    pixels: Arc<[u8]>,
+    pts_seconds: f64,
+    duplicate: bool,
+    sequence: u64,
+}
+
+pub struct VideoFramePair<'a> {
+    pub generation: u64,
+    pub sequence: u64,
+    pub previous: Option<(&'a [u8], f64, bool, u64)>,
+    pub current: &'a [u8],
+    pub current_pts_seconds: f64,
+    pub current_duplicate: bool,
+    pub progress: f64,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn video_pair_progress(
+    now_ms: f64,
+    started_at_ms: f64,
+    first_pts_seconds: f64,
+    previous_pts_seconds: f64,
+    current_pts_seconds: f64,
+) -> f64 {
+    let interval = current_pts_seconds - previous_pts_seconds;
+    if !interval.is_finite() || interval <= 0.0 {
+        return 1.0;
+    }
+    let playhead = first_pts_seconds + ((now_ms - started_at_ms).max(0.0) / 1000.0);
+    ((playhead - previous_pts_seconds) / interval).clamp(0.0, 1.0)
+}
+
+fn variable_scope_is_persistent(scope: u32) -> bool {
+    matches!(scope, 0 | 3)
+}
+
+fn volume_gain(volume: f64) -> f32 {
+    (volume / 1000.0).clamp(0.0, 1.0) as f32
+}
+
+fn resolve_system_sound(data: &crate::archive::GameData, source: &str) -> Option<String> {
+    data.resolve(source, SOUND_EXTS).or_else(|| {
+        let source = source.trim_start_matches(['\\', '/']);
+        data.resolve(&format!("サウンド\\{source}"), SOUND_EXTS)
+    })
 }
 
 impl CinemaPlayback {
@@ -157,6 +229,7 @@ pub struct Options {
 
 pub struct Vm {
     assets: Arc<Assets>,
+    translations: HashMap<String, String>,
     frames: Vec<Frame>,
     globals: HashMap<String, Value>,
     pub scene: Scene,
@@ -180,6 +253,8 @@ pub struct Vm {
     plays: HashMap<String, Playback>,
     pub queue: std::collections::VecDeque<ObjEvent>,
     yielded: bool,
+    budget_location: Option<String>,
+    last_budget_report_ms: f64,
     pressed_keys: HashSet<usize>,
     wheel_up: bool,
     wheel_down: bool,
@@ -276,6 +351,7 @@ impl Vm {
             .ok_or_else(|| format!("cannot load entry script {entry}"))?;
         let mut vm = Self {
             assets,
+            translations: HashMap::new(),
             frames: vec![],
             globals: HashMap::new(),
             scene: Scene::default(),
@@ -299,6 +375,8 @@ impl Vm {
             plays: HashMap::new(),
             queue: Default::default(),
             yielded: false,
+            budget_location: None,
+            last_budget_report_ms: f64::NEG_INFINITY,
             pressed_keys: HashSet::new(),
             wheel_up: false,
             wheel_down: false,
@@ -345,11 +423,31 @@ impl Vm {
         Ok(vm)
     }
 
+    pub fn set_translations(&mut self, translations: HashMap<String, String>) {
+        self.translations = translations;
+    }
+
     pub fn location(&self) -> String {
         match self.frames.last() {
             Some(f) => format!("{}:{}", f.script.name, f.pc),
             None => "<ended>".into(),
         }
+    }
+
+    pub fn budget_location(&self) -> Option<&str> {
+        self.budget_location.as_deref()
+    }
+
+    fn current_instruction_location(&self) -> Option<String> {
+        let frame = self.frames.last()?;
+        let command = frame.script.commands.get(frame.pc)?;
+        Some(format!(
+            "{} L{} {} (#{})",
+            frame.script.name,
+            command.line_no,
+            command.name(),
+            frame.pc
+        ))
     }
 
     /// Firma de progreso para --trace: pila de scripts y número de comandos "con efecto"
@@ -410,8 +508,9 @@ impl Vm {
             Some(&self.selected_string)
         } else {
             self.frames
-                .last()
-                .and_then(|f| f.locals.get(name))
+                .iter()
+                .rev()
+                .find_map(|frame| frame.locals.get(name))
                 .or_else(|| self.globals.get(name))
         }
     }
@@ -435,8 +534,11 @@ impl Vm {
             }
             return;
         }
-        if let Some(f) = self.frames.last_mut()
-            && let Some(slot) = f.locals.get_mut(name)
+        if let Some(slot) = self
+            .frames
+            .iter_mut()
+            .rev()
+            .find_map(|frame| frame.locals.get_mut(name))
         {
             *slot = v;
             return;
@@ -658,10 +760,13 @@ impl Vm {
 
     /// Elección de menú (índice).
     pub fn choose(&mut self, i: usize) {
-        let State::Menu { name, choices, var } = &self.state else {
+        let State::Menu {
+            name, values, var, ..
+        } = &self.state
+        else {
             return;
         };
-        let (name, var, value) = (name.clone(), var.clone(), choices.get(i).cloned());
+        let (name, var, value) = (name.clone(), var.clone(), values.get(i).cloned());
         let Some(value) = value else { return };
         if self.opts.trace {
             println!(
@@ -708,13 +813,68 @@ impl Vm {
 
     pub fn video_frame(&self, name: &str) -> Option<(u64, u64, &[u8], u32, u32)> {
         let playback = self.videos.get(name)?;
+        let frame = playback.frames.back()?;
         Some((
             playback.generation,
             playback.frame_seq,
-            playback.frame.as_deref()?,
+            frame.pixels.as_ref(),
             playback.width,
             playback.height,
         ))
+    }
+
+    pub fn video_frame_pair(&self, name: &str, now_ms: f64) -> Option<VideoFramePair<'_>> {
+        let playback = self.videos.get(name)?;
+        let first = playback.frames.front()?;
+        let playback_now_ms = playback.paused_at_ms.unwrap_or(now_ms);
+        let playhead = playback
+            .first_pts_seconds
+            .map_or(first.pts_seconds, |first_pts| {
+                first_pts + ((playback_now_ms - playback.started_at_ms).max(0.0) / 1000.0)
+            });
+        let (previous, current) = playback
+            .frames
+            .iter()
+            .zip(playback.frames.iter().skip(1))
+            .find(|(_, next)| playhead < next.pts_seconds)
+            .map_or_else(
+                || {
+                    let current = playback.frames.back().expect("front was present");
+                    let previous = playback.frames.iter().rev().nth(1);
+                    (previous, current)
+                },
+                |(previous, current)| (Some(previous), current),
+            );
+        let previous = previous.map(|frame| {
+            (
+                frame.pixels.as_ref(),
+                frame.pts_seconds,
+                frame.duplicate,
+                frame.sequence,
+            )
+        });
+        let progress = previous.map_or(1.0, |(_, previous_pts, _, _)| {
+            playback.first_pts_seconds.map_or(1.0, |first_pts| {
+                video_pair_progress(
+                    playback_now_ms,
+                    playback.started_at_ms,
+                    first_pts,
+                    previous_pts,
+                    current.pts_seconds,
+                )
+            })
+        });
+        Some(VideoFramePair {
+            generation: playback.generation,
+            sequence: current.sequence,
+            previous,
+            current: current.pixels.as_ref(),
+            current_pts_seconds: current.pts_seconds,
+            current_duplicate: current.duplicate,
+            progress,
+            width: playback.width,
+            height: playback.height,
+        })
     }
 
     fn menu_item_enabled(&self, name: &str, index: usize) -> bool {
@@ -1091,22 +1251,39 @@ impl Vm {
     fn update_videos(&mut self) {
         let names: Vec<String> = self.videos.keys().cloned().collect();
         for name in names {
-            if self
+            let paused = self
                 .scene
                 .get(&name)
-                .is_some_and(|o| o.get(Prop::PAUSED).is_some_and(Value::truthy))
-            {
+                .is_some_and(|o| o.get(Prop::PAUSED).is_some_and(Value::truthy));
+            let Some(playback) = self.videos.get_mut(&name) else {
+                continue;
+            };
+            if paused {
+                playback.paused_at_ms.get_or_insert(self.now);
                 continue;
             }
+            if let Some(paused_at_ms) = playback.paused_at_ms.take() {
+                playback.started_at_ms += (self.now - paused_at_ms).max(0.0);
+            }
+            let started_at_ms = playback.started_at_ms;
             let mut finished = None;
-            if let Some(playback) = self.videos.get_mut(&name)
-                && let Some(decoder) = playback.decoder.as_mut()
-            {
+            if let Some(decoder) = playback.decoder.as_mut() {
                 loop {
+                    if playback.frames.len() >= 4 {
+                        break;
+                    }
                     match decoder.try_recv() {
                         Ok(crate::video::Message::Frame(frame)) => {
+                            if playback.first_pts_seconds.is_none() {
+                                playback.first_pts_seconds = Some(frame.pts_seconds);
+                            }
                             playback.frame_seq = playback.frame_seq.saturating_add(1);
-                            playback.frame = Some(Arc::from(frame));
+                            playback.frames.push_back(VideoFrame {
+                                pixels: frame.pixels,
+                                pts_seconds: frame.pts_seconds,
+                                duplicate: frame.duplicate,
+                                sequence: playback.frame_seq,
+                            });
                         }
                         Ok(crate::video::Message::Finished(result)) => {
                             finished = Some(result);
@@ -1118,6 +1295,19 @@ impl Vm {
                             break;
                         }
                     }
+                }
+            }
+            if let Some(playback) = self.videos.get_mut(&name)
+                && let Some(first_pts) = playback.first_pts_seconds
+            {
+                let playhead = first_pts + ((self.now - started_at_ms).max(0.0) / 1000.0);
+                while playback.frames.len() > 2
+                    && playback
+                        .frames
+                        .get(1)
+                        .is_some_and(|frame| frame.pts_seconds <= playhead)
+                {
+                    playback.frames.pop_front();
                 }
             }
             if let Some(result) = finished {
@@ -1216,7 +1406,7 @@ impl Vm {
 
     /// Avanza un frame: reloj, animaciones, texto, eventos y ejecución
     /// cooperativa (un While/Wait 0 cede el resto del frame).
-    pub fn update(&mut self, now: f64, budget: usize) {
+    pub fn update(&mut self, now: f64, budget: usize) -> usize {
         self.now = now;
         self.scene.update(now);
         self.update_plays();
@@ -1232,17 +1422,50 @@ impl Vm {
         self.dispatch_events();
         self.yielded = false;
         let mut n = 0;
+        let mut budget_location = None;
+        let mut sampled_locations: HashMap<String, u64> = HashMap::new();
         while matches!(self.state, State::Running) && n < budget && !self.yielded {
+            if !self.opts.trace
+                && n % 16 == 0
+                && let Some(location) = self.current_instruction_location()
+            {
+                *sampled_locations.entry(location).or_default() += 1;
+            }
+            if n + 1 == budget {
+                budget_location = self.current_instruction_location();
+            }
             self.step();
             n += 1;
             if !self.queue.is_empty() && self.frames.iter().all(|f| f.saved_state.is_none()) {
                 self.dispatch_events();
             }
         }
+        self.budget_location =
+            if n == budget && matches!(self.state, State::Running) && !self.yielded {
+                budget_location
+            } else {
+                None
+            };
+        if self.budget_location.is_some() && now - self.last_budget_report_ms >= 1000.0 {
+            self.last_budget_report_ms = now;
+            let mut hottest: Vec<_> = sampled_locations.into_iter().collect();
+            hottest.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let summary = hottest
+                .iter()
+                .take(8)
+                .map(|(location, samples)| format!("{location} ~{} steps", samples * 16))
+                .collect::<Vec<_>>()
+                .join("; ");
+            log::warn!(
+                "VM exhausted its {budget}-step frame budget at {}; sampled hotspots: {summary}",
+                self.budget_location.as_deref().unwrap_or("<unknown>")
+            );
+        }
         // el texto puede haber empezado en este frame
         self.update_plays();
         self.wheel_up = false;
         self.wheel_down = false;
+        n
     }
 
     pub fn set_key_push(&mut self, key: usize, pressed: bool) {
@@ -1573,7 +1796,7 @@ impl Vm {
             if push { "call" } else { "jump" }
         );
         let pc = (label as usize).min(script.commands.len());
-        if self.script_log.len() < 1_000_000 {
+        if self.opts.trace && self.script_log.len() < 1_000_000 {
             self.script_log.push(script.name.clone());
         }
         self.prefetch_from(&script, pc);
@@ -1692,11 +1915,15 @@ impl Vm {
         if pc % 32 == 0 {
             self.prefetch_from(&script, pc);
         }
-        self.visited
-            .insert((Arc::as_ptr(&script) as *const u8 as usize, pc));
+        if self.opts.trace {
+            self.visited
+                .insert((Arc::as_ptr(&script) as *const u8 as usize, pc));
+        }
         let c = &script.commands[pc];
         self.steps += 1;
-        *self.stats.entry(c.name()).or_default() += 1;
+        if self.opts.trace {
+            *self.stats.entry(c.name()).or_default() += 1;
+        }
         let mut next = pc + 1;
         let kind = CmdType::from(c.kind);
         let mut detail = String::new();
@@ -1729,17 +1956,25 @@ impl Vm {
                 if self.eval_bool(c.expr("Calc"), true) {
                     let p = c.page().cloned().unwrap_or_default();
                     detail = format!("-> {}:{}", p.page, p.label);
-                    *self
-                        .edges
-                        .entry(format!(
-                            "Jump {}:{} -> {}:{}",
-                            script.name, pc, p.page, p.label
-                        ))
-                        .or_default() += 1;
+                    let same_script = p.page.is_empty()
+                        || crate::game::resolve_lsb(self.assets.data(), &p.page).as_deref()
+                            == Some(script.name.as_str());
+                    let yields_frame = same_script && (p.label as usize) <= pc;
+                    if self.opts.trace {
+                        *self
+                            .edges
+                            .entry(format!(
+                                "Jump {}:{} -> {}:{}",
+                                script.name, pc, p.page, p.label
+                            ))
+                            .or_default() += 1;
+                    }
                     self.trace(c, detail);
-                    if !self.goto_script(&p.page, p.label, false, String::new(), vec![])
-                        && let Some(f) = self.frames.last_mut()
-                    {
+                    if self.goto_script(&p.page, p.label, false, String::new(), vec![]) {
+                        if yields_frame {
+                            self.yielded = true;
+                        }
+                    } else if let Some(f) = self.frames.last_mut() {
                         f.pc = next;
                     }
                     return;
@@ -1755,13 +1990,15 @@ impl Vm {
                         .map(|e| eval(e, self))
                         .collect();
                     detail = format!("-> {}:{} ({} params)", p.page, p.label, params.len());
-                    *self
-                        .edges
-                        .entry(format!(
-                            "Call {}:{} -> {}:{}",
-                            script.name, pc, p.page, p.label
-                        ))
-                        .or_default() += 1;
+                    if self.opts.trace {
+                        *self
+                            .edges
+                            .entry(format!(
+                                "Call {}:{} -> {}:{}",
+                                script.name, pc, p.page, p.label
+                            ))
+                            .or_default() += 1;
+                    }
                     self.trace(c, detail);
                     if let Some(f) = self.frames.last_mut() {
                         f.pc = next;
@@ -1838,7 +2075,7 @@ impl Vm {
                     v = Value::default_for(ty);
                 }
                 detail = format!("{name} scope={scope}");
-                if scope != 0 {
+                if !variable_scope_is_persistent(scope) {
                     if let Some(f) = self.frames.last_mut() {
                         f.locals.insert(name, v);
                     }
@@ -1849,9 +2086,14 @@ impl Vm {
             CmdType::VarDel => {
                 let name = c.str("Name").unwrap_or("");
                 detail = name.to_string();
-                if let Some(f) = self.frames.last_mut()
-                    && f.locals.remove(name).is_none()
+                if let Some(frame) = self
+                    .frames
+                    .iter_mut()
+                    .rev()
+                    .find(|frame| frame.locals.contains_key(name))
                 {
+                    frame.locals.remove(name);
+                } else {
                     self.globals.remove(name);
                 }
             }
@@ -2096,6 +2338,19 @@ impl Vm {
                         .filter(|s| !s.trim().is_empty())
                         .collect();
                 }
+                let values = choices.clone();
+                let translated_count = choices
+                    .iter()
+                    .filter(|choice| {
+                        self.translations
+                            .contains_key(&crate::text_export::menu_item_id(choice))
+                    })
+                    .count();
+                choices = translate_menu_choices(&choices, &self.translations);
+                log::debug!(
+                    "Menu {name:?}: translated {translated_count}/{} visible option labels",
+                    choices.len()
+                );
                 self.warn(
                     "Menu",
                     "Menu: choices taken from PR_TEXT or _tmp; result stored in 選択値 (heuristic)",
@@ -2129,6 +2384,7 @@ impl Vm {
                     self.state = State::Menu {
                         name,
                         choices,
+                        values,
                         var: "選択値".into(),
                     };
                 }
@@ -2146,7 +2402,7 @@ impl Vm {
                 let vol = props
                     .get(&Prop::VOLUME)
                     .map(|v| v.as_f64())
-                    .unwrap_or(100.0);
+                    .unwrap_or(1000.0);
                 let repeat = props
                     .get(&Prop::REPEAT)
                     .map(|v| v.truthy())
@@ -2158,7 +2414,7 @@ impl Vm {
                         self.events.push(Event::PlaySound {
                             channel: ch.clone(),
                             file,
-                            volume: (vol / 100.0).clamp(0.0, 1.0) as f32,
+                            volume: volume_gain(vol),
                             repeat,
                         })
                     }
@@ -2175,7 +2431,7 @@ impl Vm {
                 if let Some(o) = self.scene.get(&t) {
                     let src = o.str(Prop::SOURCE);
                     if let Some(file) = self.assets.data().resolve(&src, SOUND_EXTS) {
-                        let vol = o.int(Prop::VOLUME, 100) as f32 / 100.0;
+                        let vol = volume_gain(o.int(Prop::VOLUME, 1000) as f64);
                         let repeat = o.get(Prop::REPEAT).is_some_and(|v| v.truthy());
                         self.events.push(Event::PlaySound {
                             channel: t.clone(),
@@ -2241,11 +2497,14 @@ impl Vm {
                         props.insert(Prop::PLAYING, Value::Bool(true));
                         Some(VideoPlayback {
                             decoder: Some(decoder),
-                            frame: None,
+                            frames: VecDeque::with_capacity(2),
                             frame_seq: 0,
                             generation,
                             width,
                             height,
+                            started_at_ms: self.now,
+                            first_pts_seconds: None,
+                            paused_at_ms: None,
                         })
                     }
                     Err(e) => {
@@ -2340,6 +2599,11 @@ impl Vm {
                             format!(" cascade via parent {parent:?}")
                         }
                     );
+                    if o.kind == Kind::Other(CmdType::Sound as u8) {
+                        self.events.push(Event::StopSound {
+                            channel: o.name.clone(),
+                        });
+                    }
                     self.plays.remove(&o.name);
                     self.placeholders.remove(&o.name);
                     self.prevmenus.remove(&o.name);
@@ -2379,7 +2643,22 @@ impl Vm {
             }
             CmdType::TextIns => {
                 let target = self.eval(c.expr("Target")).as_str();
-                let tw = c.text().cloned().unwrap_or_default();
+                let mut tw = c.text().cloned().unwrap_or_default();
+                let frame = self
+                    .frames
+                    .last()
+                    .expect("TextIns has an active script frame");
+                let translation_key = format!(
+                    "{}:line={}:command={pc}:field=Text",
+                    frame.script.name, c.line_no
+                );
+                if let Some(translated) = self.translations.get(&translation_key) {
+                    if !tw.replace_translation_text(translated) {
+                        log::debug!(
+                            "skipping translation with missing or invalid runtime placeholders: {translation_key}"
+                        );
+                    }
+                }
                 detail = format!("target={target:?} chars={}", tw.char_count());
                 if show {
                     detail += &format!(" text={}", redact(&tw.plain_text(), true));
@@ -2660,7 +2939,9 @@ impl Vm {
                 if c.indent == ind {
                     match CmdType::from(c.kind) {
                         CmdType::Elseif => {
-                            *self.stats.entry("Elseif").or_default() += 1;
+                            if self.opts.trace {
+                                *self.stats.entry("Elseif").or_default() += 1;
+                            }
                             let ok = self.eval_bool(c.expr("Calc"), false);
                             let c2 = c.clone();
                             self.cond_trace(s, j, &c2, ok);
@@ -2747,7 +3028,12 @@ impl Vm {
                 Glyph::Char { ch, .. } => cur.push(TextItem::Char(ch.clone())),
                 Glyph::Var { name, .. } => {
                     let v = self.lookup(name).cloned().unwrap_or_default().as_str();
-                    cur.extend(v.chars().map(|c| TextItem::Char(c.to_string())));
+                    let displayed = self
+                        .translations
+                        .get(&crate::text_export::menu_item_id(&v))
+                        .map(String::as_str)
+                        .unwrap_or(&v);
+                    cur.extend(displayed.chars().map(|c| TextItem::Char(c.to_string())));
                 }
                 Glyph::Return { kind } => match *kind {
                     brk::LINE => cur.push(TextItem::Newline),
@@ -2993,7 +3279,13 @@ impl Vm {
             .read(&name)
             .map_err(|e| format!("{name}: {e}"))?;
         let mut movie = crate::lcm::parse(&bytes).map_err(|e| format!("{name}: {e}"))?;
-        for clip in &mut movie.clips {
+        for (clip_index, clip) in movie.clips.iter_mut().enumerate() {
+            if let crate::lcm::TrackContent::Text { value, .. } = &mut clip.content
+                && let Some(translated) =
+                    self.translations.get(&format!("{name}:clip={clip_index}"))
+            {
+                *value = translated.clone();
+            }
             if let crate::lcm::TrackContent::Image(media) = &mut clip.content {
                 let resource = self
                     .assets
@@ -3252,7 +3544,72 @@ impl Vm {
                     }
                 }
             }
-            "PLAYSND" | "STOPSND" => log::debug!("{name}: audio from text events not implemented"),
+            "PLAYSND" => {
+                let (Some(src), Some(channel), Some(mode), Some(volume)) =
+                    (args.first(), args.get(1), args.get(2), args.get(3))
+                else {
+                    log::warn!("PLAYSND on {boxname}: missing source, channel, mode, or volume");
+                    return;
+                };
+                let volume = match volume.parse::<f64>() {
+                    Ok(volume) => volume,
+                    Err(error) => {
+                        log::warn!("PLAYSND on {boxname}: invalid volume {volume:?}: {error}");
+                        return;
+                    }
+                };
+                let repeat = if mode.eq_ignore_ascii_case("REPEAT") {
+                    true
+                } else if mode.eq_ignore_ascii_case("NORMAL") {
+                    false
+                } else {
+                    log::warn!("PLAYSND on {boxname}: unsupported mode {mode:?}");
+                    return;
+                };
+                match resolve_system_sound(self.assets.data(), src) {
+                    Some(file) => {
+                        self.assets.request(&file);
+                        self.events.push(Event::PlaySound {
+                            channel: channel.clone(),
+                            file,
+                            volume: volume_gain(volume),
+                            repeat,
+                        });
+                    }
+                    None => self.warn(
+                        &format!("snd:{src}"),
+                        &format!("PLAYSND audio not found: {src}"),
+                    ),
+                }
+            }
+            "STOPSND" => {
+                let Some(channel) = args.first() else {
+                    log::warn!("STOPSND on {boxname}: missing channel");
+                    return;
+                };
+                let duration_ms = match args.get(1) {
+                    Some(duration) => match duration.parse::<u64>() {
+                        Ok(duration_ms) => duration_ms,
+                        Err(error) => {
+                            log::warn!(
+                                "STOPSND on {boxname}: invalid duration {duration:?}: {error}"
+                            );
+                            return;
+                        }
+                    },
+                    None => 0,
+                };
+                if duration_ms == 0 {
+                    self.events.push(Event::StopSound {
+                        channel: channel.clone(),
+                    });
+                } else {
+                    self.events.push(Event::FadeSound {
+                        channel: channel.clone(),
+                        duration_ms,
+                    });
+                }
+            }
             "" => {}
             _ => {
                 if name != "WAITPLAY" {
@@ -3455,6 +3812,7 @@ impl Vm {
                     .unwrap_or(0),
             ),
             "StatusSoundON" => Value::Bool(true),
+            "StatusSEVolume" => self.lookup("SE音量").cloned().unwrap_or(Value::Int(1000)),
             "ステータスフルスクリーン" => Value::Bool(false),
             "ステータスディスプレイモード" | "ステータスMIDIポート" => {
                 Value::Int(0)
@@ -3737,6 +4095,14 @@ impl Env for Vm {
                     .get(&(s(0), a.get(1).map(|v| v.as_int()).unwrap_or(0)))
                     .unwrap_or(&true),
             ),
+            Func::ADDDELIMITER => {
+                let has_content = match a.get(1) {
+                    None | Some(Value::Empty) => false,
+                    Some(Value::Array(values)) => !values.is_empty(),
+                    Some(value) => !value.as_str().is_empty(),
+                };
+                Value::Str(if has_content { s(0) } else { String::new() })
+            }
             Func::GETSELECTED => Value::Bool(
                 *self
                     .selected
@@ -3797,6 +4163,174 @@ impl Env for Vm {
 mod tests {
     use super::*;
     use crate::archive::GameData;
+
+    #[test]
+    fn translates_visible_menu_labels_without_changing_choice_values() {
+        let source = vec!["セーブ".to_string(), "ロード".to_string()];
+        let translations = HashMap::from([(
+            crate::text_export::menu_item_id("セーブ"),
+            "Guardar".to_string(),
+        )]);
+        assert_eq!(
+            translate_menu_choices(&source, &translations),
+            vec!["Guardar", "ロード"]
+        );
+        assert_eq!(source, vec!["セーブ", "ロード"]);
+    }
+
+    #[test]
+    fn game_level_variable_scopes_survive_script_returns() {
+        assert!(variable_scope_is_persistent(0));
+        assert!(variable_scope_is_persistent(3));
+        assert!(!variable_scope_is_persistent(1));
+        assert!(!variable_scope_is_persistent(2));
+    }
+
+    #[test]
+    fn game_audio_volume_uses_thousand_point_scale() {
+        assert_eq!(volume_gain(0.0), 0.0);
+        assert_eq!(volume_gain(500.0), 0.5);
+        assert_eq!(volume_gain(1000.0), 1.0);
+        assert_eq!(volume_gain(1500.0), 1.0);
+    }
+
+    #[test]
+    fn system_se_volume_uses_game_setting_or_default() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(vm.system_var("StatusSEVolume"), Some(Value::Int(1000)));
+        vm.globals.insert("SE音量".into(), Value::Int(425));
+        assert_eq!(vm.system_var("StatusSEVolume"), Some(Value::Int(425)));
+    }
+
+    #[test]
+    fn text_audio_events_start_and_stop_named_channels() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+
+        vm.system_text_event(
+            "msg",
+            "PLAYSND",
+            &[
+                "se.wav".into(),
+                "VOICE".into(),
+                "REPEAT".into(),
+                "500".into(),
+                "0".into(),
+            ],
+        );
+        assert!(matches!(
+            vm.events.last(),
+            Some(Event::PlaySound {
+                channel,
+                file,
+                volume,
+                repeat: true,
+            }) if channel == "VOICE" && file == "se.wav" && *volume == 0.5
+        ));
+
+        vm.system_text_event(
+            "msg",
+            "STOPSND",
+            &["BGM".into(), "100".into(), "PASS".into()],
+        );
+        assert!(matches!(
+            vm.events.last(),
+            Some(Event::FadeSound {
+                channel,
+                duration_ms: 100,
+            }) if channel == "BGM"
+        ));
+    }
+
+    #[test]
+    fn nested_calls_resolve_nearest_caller_local_variable() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.frames[0].locals.insert("SE音量".into(), Value::Int(80));
+        let script = Arc::clone(&vm.frames[0].script);
+        vm.frames.push(Frame {
+            script,
+            pc: 0,
+            locals: HashMap::new(),
+            result_var: String::new(),
+            params: vec![],
+            saved_state: None,
+            sender: None,
+            event_prop: None,
+            auto_scrap_sender: false,
+        });
+
+        assert_eq!(vm.lookup("SE音量"), Some(&Value::Int(80)));
+        vm.assign("SE音量", Value::Int(60));
+        assert_eq!(vm.frames[0].locals.get("SE音量"), Some(&Value::Int(60)));
+
+        vm.frames[1].locals.insert("SE音量".into(), Value::Int(20));
+        assert_eq!(vm.lookup("SE音量"), Some(&Value::Int(20)));
+        vm.assign("SE音量", Value::Int(10));
+        assert_eq!(vm.frames[1].locals.get("SE音量"), Some(&Value::Int(10)));
+    }
+
+    #[test]
+    fn video_frame_pair_progress_tracks_presentation_timestamps() {
+        assert_eq!(video_pair_progress(1_100.0, 1_000.0, 2.0, 2.1, 2.2), 0.0);
+        assert!((video_pair_progress(1_150.0, 1_000.0, 2.0, 2.1, 2.2) - 0.5).abs() < 1e-9);
+        assert_eq!(video_pair_progress(1_300.0, 1_000.0, 2.0, 2.1, 2.2), 1.0);
+        assert_eq!(video_pair_progress(900.0, 1_000.0, 2.0, 2.1, 2.2), 0.0);
+        assert_eq!(video_pair_progress(1_150.0, 1_000.0, 2.0, 2.1, 2.1), 1.0);
+    }
 
     #[test]
     fn animated_gal_blend_tracks_elapsed_time_and_looping() {
@@ -3891,7 +4425,8 @@ mod tests {
         );
         vm.state = State::Menu {
             name: "menu".into(),
-            choices: vec!["first".into(), "second".into()],
+            choices: vec!["Primero".into(), "Segundo".into()],
+            values: vec!["first".into(), "second".into()],
             var: "selection".into(),
         };
 
@@ -3945,6 +4480,7 @@ mod tests {
         vm.state = State::Menu {
             name: "menu".into(),
             choices: vec!["first".into()],
+            values: vec!["first".into()],
             var: String::new(),
         };
         assert!(vm.fire("menu", Prop::ONOPENING, vec![]));
@@ -4041,6 +4577,7 @@ mod tests {
         vm.state = State::Menu {
             name: "menu".into(),
             choices: vec!["choice".into()],
+            values: vec!["choice".into()],
             var: String::new(),
         };
 
@@ -4082,6 +4619,7 @@ mod tests {
         vm.state = State::Menu {
             name: "menu".into(),
             choices: vec!["choice".into()],
+            values: vec!["choice".into()],
             var: String::new(),
         };
 
@@ -4123,6 +4661,7 @@ mod tests {
         vm.state = State::Menu {
             name: "menu".into(),
             choices: vec!["first".into()],
+            values: vec!["first".into()],
             var: String::new(),
         };
 
@@ -4163,6 +4702,7 @@ mod tests {
         vm.state = State::Menu {
             name: "menu".into(),
             choices: vec!["first".into()],
+            values: vec!["first".into()],
             var: String::new(),
         };
 
@@ -4333,6 +4873,30 @@ mod tests {
             ),
             Some(Value::Bool(false))
         );
+        assert_eq!(
+            vm.call_engine(
+                Func::ADDDELIMITER,
+                &[Value::Str("\r\n".into()), Value::Str(String::new())],
+                &[]
+            ),
+            Some(Value::Str(String::new()))
+        );
+        assert_eq!(
+            vm.call_engine(
+                Func::ADDDELIMITER,
+                &[Value::Str("\r\n".into()), Value::Str("0".into())],
+                &[]
+            ),
+            Some(Value::Str("\r\n".into()))
+        );
+        assert_eq!(
+            vm.call_engine(
+                Func::ADDDELIMITER,
+                &[Value::Str(", ".into()), Value::Array(vec![Value::Int(1)])],
+                &[]
+            ),
+            Some(Value::Str(", ".into()))
+        );
         assert!(vm.scene.get("menu").unwrap().visible());
     }
 
@@ -4375,12 +4939,142 @@ mod tests {
         assert_eq!(vm.globals.get("subran"), Some(&Value::Int(1)));
         assert!(vm.scene.get("bg").is_none());
         assert!(vm.scene.get("msg").is_some());
-        assert_eq!(vm.stats.get("Jump"), Some(&2));
+        assert!(vm.stats.is_empty());
         assert!(
             vm.events
                 .iter()
                 .any(|e| matches!(e, Event::PlaySound { file, .. } if file == "se.wav"))
         );
+    }
+
+    #[test]
+    fn applies_catalog_translation_to_static_textins() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.set_translations(HashMap::from([(
+            "00000001.lsb:line=13:command=12:field=Text".to_string(),
+            "Hola\nmundo".to_string(),
+        )]));
+
+        let mut time = 0.0;
+        let mut observed = String::new();
+        for _ in 0..100 {
+            vm.update(time, 1000);
+            if let Some(message) = vm.scene.get("msg")
+                && !message.text.is_empty()
+            {
+                observed = message
+                    .text
+                    .iter()
+                    .map(|item| match item {
+                        TextItem::Char(character) => character.as_str(),
+                        TextItem::Newline => "\n",
+                    })
+                    .collect();
+                break;
+            }
+            time += 50.0;
+        }
+        assert!(observed.starts_with("Hola"), "{observed:?}");
+    }
+
+    #[test]
+    fn translates_selected_menu_values_when_inserted_into_text() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        let source = "●断面を表示する";
+        vm.set_translations(HashMap::from([(
+            crate::text_export::menu_item_id(source),
+            "●Mostrar cortes".to_string(),
+        )]));
+        vm.assign("selected", Value::Str(source.to_string()));
+        vm.scene.create("msg", Kind::Message, HashMap::new());
+        let text = crate::lsb::TpWord {
+            body: vec![Glyph::Var {
+                name: "selected".into(),
+                hist: false,
+            }],
+            ..crate::lsb::TpWord::default()
+        };
+
+        vm.run_text("msg", &text, false);
+        vm.update_plays();
+
+        let observed = vm
+            .scene
+            .get("msg")
+            .unwrap()
+            .text
+            .iter()
+            .map(|item| match item {
+                TextItem::Char(character) => character.as_str(),
+                TextItem::Newline => "\n",
+            })
+            .collect::<String>();
+        assert_eq!(observed, "●Mostrar cortes");
+        assert_eq!(vm.lookup("selected").unwrap().as_str(), source);
+    }
+
+    #[test]
+    fn backward_jump_yields_the_rest_of_the_frame() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "00000001.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+
+        let steps = vm.update(0.0, 1_000);
+
+        assert_eq!(steps, 6);
+        assert_eq!(vm.location(), "00000001.lsb:2");
     }
 
     #[test]

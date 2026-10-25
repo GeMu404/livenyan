@@ -172,6 +172,15 @@ impl Game {
     pub fn save_dir(&self) -> PathBuf {
         crate::util::data_dir().join(&self.slug)
     }
+
+    pub fn translations_dir(&self) -> PathBuf {
+        let root = if self.path.is_dir() {
+            self.path.as_path()
+        } else {
+            self.path.parent().unwrap_or_else(|| Path::new("."))
+        };
+        root.join("translations")
+    }
 }
 
 pub fn resolve_lsb(data: &GameData, name: &str) -> Option<String> {

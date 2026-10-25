@@ -1,10 +1,12 @@
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{
+    self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError,
+};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -12,13 +14,20 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub enum Message {
-    Frame(Vec<u8>),
+    Frame(DecodedFrame),
     Finished(Result<(), String>),
+}
+
+#[derive(Debug)]
+pub struct DecodedFrame {
+    pub pixels: Arc<[u8]>,
+    pub pts_seconds: f64,
+    pub duplicate: bool,
 }
 
 pub struct Decoder {
     frames: Receiver<Message>,
-    first_frame: Option<Vec<u8>>,
+    first_frame: Option<DecodedFrame>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     temp_file: PathBuf,
@@ -50,13 +59,13 @@ impl Decoder {
                     sender,
                     thread_stop,
                 );
-                if let Err(e) = std::fs::remove_file(&thread_file) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        log::warn!(
-                            "cannot remove temporary video {}: {e}",
-                            thread_file.display()
-                        );
-                    }
+                if let Err(e) = std::fs::remove_file(&thread_file)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    log::warn!(
+                        "cannot remove temporary video {}: {e}",
+                        thread_file.display()
+                    );
                 }
             })
             .map_err(|e| {
@@ -102,13 +111,13 @@ impl Drop for Decoder {
         {
             log::warn!("video decoder thread panicked");
         }
-        if let Err(e) = std::fs::remove_file(&self.temp_file) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "cannot remove temporary video {}: {e}",
-                    self.temp_file.display()
-                );
-            }
+        if let Err(e) = std::fs::remove_file(&self.temp_file)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "cannot remove temporary video {}: {e}",
+                self.temp_file.display()
+            );
         }
     }
 }
@@ -150,18 +159,29 @@ fn decode_frames(
     stop: Arc<AtomicBool>,
 ) {
     let mut command = Command::new("ffmpeg");
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-re"]);
+    command.args(["-hide_banner", "-loglevel", "info", "-nostdin"]);
     if repeat {
         command.args(["-stream_loop", "-1"]);
     }
     let filter = format!(
-        "fps=30,scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,showinfo"
     );
     command
         .arg("-i")
         .arg(path)
         .args([
-            "-an", "-sn", "-dn", "-vf", &filter, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            &filter,
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "pipe:1",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -186,15 +206,14 @@ fn decode_frames(
         );
         return;
     };
-    let stderr = child.stderr.take().map(|mut pipe| {
-        thread::spawn(move || {
-            let mut output = String::new();
-            let _ = pipe.read_to_string(&mut output);
-            output
-        })
-    });
+    let (pts_sender, pts_receiver) = mpsc::channel();
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || read_frame_pts(pipe, pts_sender)));
 
     let mut error = None;
+    let mut previous_frame: Option<Arc<[u8]>> = None;
     loop {
         if stop.load(Ordering::Acquire) {
             let _ = child.kill();
@@ -203,7 +222,31 @@ fn decode_frames(
         let mut frame = vec![0; frame_bytes];
         match stdout.read_exact(&mut frame) {
             Ok(()) => {
-                if !send_message(&sender, Message::Frame(frame), &stop) {
+                let pts_seconds = match pts_receiver.recv_timeout(Duration::from_secs(5)) {
+                    Ok(pts) => pts,
+                    Err(RecvTimeoutError::Timeout) => {
+                        error = Some("timed out waiting for decoded video timestamp".into());
+                        let _ = child.kill();
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        error = Some("ffmpeg did not report a timestamp for a video frame".into());
+                        let _ = child.kill();
+                        break;
+                    }
+                };
+                let frame: Arc<[u8]> = Arc::from(frame);
+                let duplicate = previous_frame.as_deref() == Some(frame.as_ref());
+                previous_frame = Some(Arc::clone(&frame));
+                if !send_message(
+                    &sender,
+                    Message::Frame(DecodedFrame {
+                        pixels: frame,
+                        pts_seconds,
+                        duplicate,
+                    }),
+                    &stop,
+                ) {
                     let _ = child.kill();
                     break;
                 }
@@ -218,6 +261,7 @@ fn decode_frames(
     let status = child.wait();
     let stderr = stderr
         .and_then(|reader| reader.join().ok())
+        .and_then(Result::ok)
         .unwrap_or_default();
     if stop.load(Ordering::Acquire) {
         return;
@@ -229,6 +273,40 @@ fn decode_frames(
         (None, Err(e)) => Err(format!("cannot wait for ffmpeg: {e}")),
     };
     let _ = send_message(&sender, Message::Finished(result), &stop);
+}
+
+fn read_frame_pts<R: Read>(pipe: R, sender: Sender<f64>) -> Result<String, String> {
+    const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+    let mut output = String::new();
+    for line in BufReader::new(pipe).lines() {
+        let line = line.map_err(|e| format!("cannot read ffmpeg diagnostics: {e}"))?;
+        if let Some(pts) = parse_showinfo_pts(&line) {
+            sender
+                .send(pts)
+                .map_err(|_| "video decoder stopped while reading timestamps".to_string())?;
+        }
+        if line.contains("Parsed_showinfo") {
+            continue;
+        }
+        output.push_str(&line);
+        output.push('\n');
+        if output.len() > MAX_DIAGNOSTIC_BYTES {
+            let excess = output.len() - MAX_DIAGNOSTIC_BYTES;
+            let truncate_at = output
+                .char_indices()
+                .find_map(|(index, _)| (index >= excess).then_some(index))
+                .unwrap_or(output.len());
+            output.drain(..truncate_at);
+        }
+    }
+    Ok(output)
+}
+
+fn parse_showinfo_pts(line: &str) -> Option<f64> {
+    let (_, value) = line.split_once("pts_time:")?;
+    let value = value.split_whitespace().next()?;
+    let pts = value.parse::<f64>().ok()?;
+    pts.is_finite().then_some(pts)
 }
 
 fn send_message(sender: &SyncSender<Message>, mut message: Message, stop: &AtomicBool) -> bool {
@@ -251,6 +329,7 @@ fn send_message(sender: &SyncSender<Message>, mut message: Message, stop: &Atomi
 mod tests {
     use super::{Decoder, Message};
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn decoder_emits_scaled_rgba_frames() {
@@ -294,6 +373,39 @@ mod tests {
         let Message::Frame(frame) = decoder.try_recv().unwrap() else {
             panic!("decoder did not provide its prefetched first frame");
         };
-        assert_eq!(frame.len(), 8 * 8 * 4);
+        assert_eq!(frame.pixels.len(), 8 * 8 * 4);
+        assert!(frame.pts_seconds.is_finite());
+        assert!(!frame.duplicate);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match decoder.try_recv() {
+                Ok(Message::Frame(next)) => {
+                    assert!(next.pts_seconds > frame.pts_seconds);
+                    assert!((next.pts_seconds - frame.pts_seconds - 0.5).abs() < 0.02);
+                    assert!(next.duplicate);
+                    break;
+                }
+                Ok(Message::Finished(result)) => {
+                    panic!("video ended before the repeated output frame: {result:?}");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("timed out waiting for the next video frame: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_ffmpeg_showinfo_timestamps() {
+        assert_eq!(
+            super::parse_showinfo_pts("[Parsed_showinfo_3] n: 1 pts: 3000 pts_time:0.033333"),
+            Some(0.033333)
+        );
+        assert_eq!(
+            super::parse_showinfo_pts("[Parsed_showinfo_3] config in time_base: 1/30"),
+            None
+        );
     }
 }

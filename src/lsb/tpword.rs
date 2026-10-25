@@ -128,6 +128,142 @@ impl TpWord {
         s
     }
 
+    pub fn translation_template(&self) -> String {
+        let mut text = String::new();
+        let mut token_index = 0;
+        for glyph in &self.body {
+            match glyph {
+                Glyph::Char { ch, .. } => text.push_str(ch),
+                Glyph::Return { .. } => text.push('\n'),
+                glyph => {
+                    text.push_str(&translation_token(glyph, token_index));
+                    token_index += 1;
+                }
+            }
+        }
+        text
+    }
+
+    pub fn replace_translation_text(&mut self, translated: &str) -> bool {
+        let mut tokens = std::collections::HashMap::new();
+        let mut token_index = 0;
+        for glyph in &self.body {
+            if !matches!(glyph, Glyph::Char { .. } | Glyph::Return { .. }) {
+                tokens.insert(translation_token(glyph, token_index), glyph.clone());
+                token_index += 1;
+            }
+        }
+
+        let style = self.body.iter().find_map(|glyph| match glyph {
+            Glyph::Char {
+                decorator,
+                link,
+                speed,
+                condition,
+                ..
+            } => Some((*decorator, *link, *speed, *condition)),
+            _ => None,
+        });
+        let mut seen = std::collections::HashSet::new();
+        let mut breaks = self.body.iter().filter_map(|glyph| match glyph {
+            Glyph::Return { kind } => Some(*kind),
+            _ => None,
+        });
+        let mut body = Vec::new();
+        let mut position = 0;
+        while position < translated.len() {
+            if translated[position..].starts_with("{{LV:") {
+                let Some(end) = translated[position..].find("}}") else {
+                    return false;
+                };
+                let end = position + end + 2;
+                let token = &translated[position..end];
+                let Some(glyph) = tokens.get(token) else {
+                    return false;
+                };
+                if !seen.insert(token) {
+                    return false;
+                }
+                body.push(glyph.clone());
+                position = end;
+                continue;
+            }
+
+            let Some(ch) = translated[position..].chars().next() else {
+                break;
+            };
+            position += ch.len_utf8();
+            if ch == '\n' {
+                body.push(Glyph::Return {
+                    kind: breaks.next().unwrap_or(brk::LINE),
+                });
+            } else {
+                let (decorator, link, speed, condition) = style.unwrap_or((0, -1, 0, -1));
+                body.push(Glyph::Char {
+                    ch: ch.to_string(),
+                    decorator,
+                    link,
+                    speed,
+                    condition,
+                });
+            }
+        }
+
+        if seen.len() != tokens.len() {
+            return false;
+        }
+        self.body = body;
+        true
+    }
+
+    pub fn replace_plain_text(&mut self, translated: &str) -> bool {
+        if self.body.is_empty()
+            || self
+                .body
+                .iter()
+                .any(|glyph| !matches!(glyph, Glyph::Char { .. } | Glyph::Return { .. }))
+        {
+            return false;
+        }
+        let Some((decorator, link, speed, condition)) =
+            self.body.iter().find_map(|glyph| match glyph {
+                Glyph::Char {
+                    decorator,
+                    link,
+                    speed,
+                    condition,
+                    ..
+                } => Some((*decorator, *link, *speed, *condition)),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        let mut breaks = self.body.iter().filter_map(|glyph| match glyph {
+            Glyph::Return { kind } => Some(*kind),
+            _ => None,
+        });
+        let mut body = Vec::new();
+        for ch in translated.chars() {
+            if ch == '\n' {
+                body.push(Glyph::Return {
+                    kind: breaks.next().unwrap_or(brk::LINE),
+                });
+            } else {
+                body.push(Glyph::Char {
+                    ch: ch.to_string(),
+                    decorator,
+                    link,
+                    speed,
+                    condition,
+                });
+            }
+        }
+        body.extend(breaks.map(|kind| Glyph::Return { kind }));
+        self.body = body;
+        true
+    }
+
     pub fn char_count(&self) -> usize {
         self.body
             .iter()
@@ -140,6 +276,133 @@ impl TpWord {
             Glyph::Img { src, .. } => Some(src.as_str()),
             _ => None,
         })
+    }
+}
+
+fn translation_token(glyph: &Glyph, index: usize) -> String {
+    let kind = match glyph {
+        Glyph::Div { .. } => "DIV",
+        Glyph::Indent => "INDENT",
+        Glyph::Undent => "UNDENT",
+        Glyph::Event { .. } => "EVENT",
+        Glyph::Var { .. } => "VAR",
+        Glyph::Img { .. } => "IMG",
+        Glyph::Unknown(_) => "UNKNOWN",
+        Glyph::Char { .. } | Glyph::Return { .. } => unreachable!(),
+    };
+    format!("{{{{LV:{kind}:{index}}}}}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Glyph, TpWord, brk};
+
+    #[test]
+    fn replaces_static_text_and_preserves_non_text_markup() {
+        let mut text = TpWord {
+            body: vec![
+                Glyph::Char {
+                    ch: "A".into(),
+                    decorator: 2,
+                    link: -1,
+                    speed: 30,
+                    condition: -1,
+                },
+                Glyph::Return { kind: brk::LINE },
+                Glyph::Char {
+                    ch: "B".into(),
+                    decorator: 2,
+                    link: -1,
+                    speed: 30,
+                    condition: -1,
+                },
+            ],
+            ..TpWord::default()
+        };
+
+        assert!(text.replace_plain_text("Hola\nmundo"));
+        assert_eq!(text.plain_text(), "Hola\nmundo");
+        assert!(matches!(
+            text.body.first(),
+            Some(Glyph::Char {
+                decorator: 2,
+                speed: 30,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn does_not_replace_text_containing_runtime_variables() {
+        let mut text = TpWord {
+            body: vec![
+                Glyph::Char {
+                    ch: "A".into(),
+                    decorator: 0,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Var {
+                    name: "player".into(),
+                    hist: false,
+                },
+            ],
+            ..TpWord::default()
+        };
+
+        assert!(!text.replace_plain_text("translated"));
+        assert_eq!(text.plain_text(), "A");
+    }
+
+    #[test]
+    fn translation_template_preserves_runtime_variables_and_events() {
+        let mut text = TpWord {
+            body: vec![
+                Glyph::Char {
+                    ch: "A".into(),
+                    decorator: 0,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Var {
+                    name: "player".into(),
+                    hist: false,
+                },
+                Glyph::Char {
+                    ch: "B".into(),
+                    decorator: 0,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Event {
+                    event: "notify".into(),
+                },
+            ],
+            ..TpWord::default()
+        };
+        let template = text.translation_template();
+        assert_eq!(template, "A{{LV:VAR:0}}B{{LV:EVENT:1}}");
+        assert!(text.replace_translation_text("Hola {{LV:VAR:0}}{{LV:EVENT:1}}"));
+        assert_eq!(text.plain_text(), "Hola ");
+        assert!(matches!(text.body[5], Glyph::Var { ref name, .. } if name == "player"));
+        assert!(matches!(text.body[6], Glyph::Event { ref event } if event == "notify"));
+    }
+
+    #[test]
+    fn rejects_translations_with_missing_or_unknown_runtime_tokens() {
+        let mut text = TpWord {
+            body: vec![Glyph::Var {
+                name: "player".into(),
+                hist: false,
+            }],
+            ..TpWord::default()
+        };
+        assert!(!text.replace_translation_text("Hola"));
+        assert!(!text.replace_translation_text("Hola {{LV:VAR:9}}"));
+        assert!(matches!(text.body[0], Glyph::Var { .. }));
     }
 }
 

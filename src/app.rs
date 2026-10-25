@@ -28,14 +28,33 @@ use std::time::Instant;
 struct Gfx {
     images: HashMap<String, (Texture, u32, u32)>,
     video_textures: HashMap<String, (Texture, u64, u64, u32, u32)>,
+    video_previous_textures: HashMap<String, (u64, u64, Texture, u32, u32)>,
     texts: HashMap<String, (u64, usize, Texture)>,
     debug_labels: HashMap<String, (String, Texture, u32, u32)>,
     menu_animation_starts: HashMap<String, f64>,
     menu_fonts: HashMap<String, Option<TextRenderer>>,
     toolbar_texts: HashMap<String, (usize, Texture)>,
     crossfade_safety: HashMap<String, bool>,
+    #[cfg(feature = "nvidia-optical-flow")]
+    optical_flow_textures: HashMap<String, OpticalFlowTexture>,
+    #[cfg(feature = "nvidia-optical-flow")]
+    optical_flow_failures: HashSet<String>,
+    #[cfg(feature = "nvidia-optical-flow")]
+    video_optical_flow_textures: HashMap<String, Texture>,
+    #[cfg(feature = "nvidia-optical-flow")]
+    video_optical_flow_failures: HashSet<String>,
     animation_delays: HashMap<String, Vec<u32>>,
     menu: Option<MenuCache>,
+}
+
+#[cfg(feature = "nvidia-optical-flow")]
+struct OpticalFlowTexture {
+    source: String,
+    from_frame: usize,
+    to_frame: usize,
+    texture: Texture,
+    width: u32,
+    height: u32,
 }
 
 struct MenuCache {
@@ -51,6 +70,8 @@ enum ToolbarAction {
     Fullscreen,
     Options,
     Interpolation(InterpolationMode),
+    ToggleFpsMeter,
+    ExportTexts,
 }
 
 fn toolbar_button_rects(width: u32) -> [(ToolbarAction, FRect); 3] {
@@ -68,6 +89,14 @@ fn toolbar_button_rects(width: u32) -> [(ToolbarAction, FRect); 3] {
     ]
 }
 
+fn fps_meter_option_rect(width: u32) -> FRect {
+    FRect::new(width as f32 - 124.0, 108.0, 112.0, 26.0)
+}
+
+fn export_texts_option_rect(width: u32) -> FRect {
+    FRect::new(width as f32 - 328.0, 164.0, 310.0, 26.0)
+}
+
 fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<ToolbarAction> {
     for (action, rect) in toolbar_button_rects(width) {
         if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
@@ -75,6 +104,22 @@ fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<Toolbar
         }
     }
     if options_open {
+        let fps_rect = fps_meter_option_rect(width);
+        if x >= fps_rect.x
+            && x < fps_rect.x + fps_rect.w
+            && y >= fps_rect.y
+            && y < fps_rect.y + fps_rect.h
+        {
+            return Some(ToolbarAction::ToggleFpsMeter);
+        }
+        let export_rect = export_texts_option_rect(width);
+        if x >= export_rect.x
+            && x < export_rect.x + export_rect.w
+            && y >= export_rect.y
+            && y < export_rect.y + export_rect.h
+        {
+            return Some(ToolbarAction::ExportTexts);
+        }
         for (mode, rect) in interpolation_option_rects(width) {
             if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
                 return Some(ToolbarAction::Interpolation(mode));
@@ -89,7 +134,11 @@ fn toolbar_contains(width: u32, x: f32, y: f32, options_open: bool) -> bool {
         || (options_open
             && x >= width as f32 - 340.0
             && x < width as f32 - 6.0
-            && (32.0..138.0).contains(&y))
+            && (32.0..230.0).contains(&y))
+}
+
+fn is_toolbar_visible(mouse_y: f32, options_open: bool) -> bool {
+    options_open || (0.0..32.0).contains(&mouse_y)
 }
 
 fn point_in_logical_render(point: (f32, f32), logical: (u32, u32)) -> bool {
@@ -101,19 +150,34 @@ fn point_in_logical_render(point: (f32, f32), logical: (u32, u32)) -> bool {
         && point.1 < logical.1 as f32
 }
 
-fn interpolation_option_rects(width: u32) -> [(InterpolationMode, FRect); 2] {
-    let x = width as f32 - 212.0;
+fn interpolation_option_rects(width: u32) -> Vec<(InterpolationMode, FRect)> {
     let y = 77.0;
-    let w = 96.0;
+    #[cfg(feature = "nvidia-optical-flow")]
+    let modes = [
+        InterpolationMode::Off,
+        InterpolationMode::Crossfade,
+        InterpolationMode::OpticalFlow,
+    ];
+    #[cfg(not(feature = "nvidia-optical-flow"))]
+    let modes = [InterpolationMode::Off, InterpolationMode::Crossfade];
+    let w = if cfg!(feature = "nvidia-optical-flow") {
+        84.0
+    } else {
+        96.0
+    };
     let h = 27.0;
-    let gap = 8.0;
-    [
-        (InterpolationMode::Off, FRect::new(x, y, w, h)),
-        (
-            InterpolationMode::Crossfade,
-            FRect::new(x + w + gap, y, w, h),
-        ),
-    ]
+    let gap = if cfg!(feature = "nvidia-optical-flow") {
+        5.0
+    } else {
+        8.0
+    };
+    let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
+    let x = width as f32 - 6.0 - total_width;
+    modes
+        .into_iter()
+        .enumerate()
+        .map(|(index, mode)| (mode, FRect::new(x + index as f32 * (w + gap), y, w, h)))
+        .collect()
 }
 
 fn gal_frame_pixels(image: &crate::gal::Image, frame: usize) -> Option<&[u8]> {
@@ -127,6 +191,11 @@ fn gal_frame_pixels(image: &crate::gal::Image, frame: usize) -> Option<&[u8]> {
 fn frame_is_opaque(image: &crate::gal::Image, frame: usize) -> bool {
     gal_frame_pixels(image, frame)
         .is_some_and(|pixels| pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX))
+}
+
+#[cfg(feature = "nvidia-optical-flow")]
+fn rgba_frame_is_opaque(pixels: &[u8]) -> bool {
+    pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX)
 }
 
 fn can_crossfade_frames(
@@ -418,6 +487,125 @@ fn draw_toolbar_text(
     }
 }
 
+fn language_picker_rects(
+    (width, height): (u32, u32),
+    language_count: usize,
+    selection: usize,
+) -> (FRect, Vec<(usize, FRect)>) {
+    let total_rows = language_count + 1;
+    let row_height = 30.0;
+    let max_rows = ((height.saturating_sub(144)) / row_height as u32)
+        .max(1)
+        .min(total_rows as u32) as usize;
+    let offset = selection
+        .saturating_add(1)
+        .saturating_sub(max_rows)
+        .min(total_rows.saturating_sub(max_rows));
+    let visible_rows = max_rows.min(total_rows);
+    let panel_width = width.saturating_sub(32).min(500) as f32;
+    let panel_height = 112.0 + visible_rows as f32 * row_height;
+    let panel = FRect::new(
+        (width as f32 - panel_width) / 2.0,
+        (height as f32 - panel_height) / 2.0,
+        panel_width,
+        panel_height,
+    );
+    let rows = (offset..offset + visible_rows)
+        .map(|index| {
+            (
+                index,
+                FRect::new(
+                    panel.x + 12.0,
+                    panel.y + 60.0 + (index - offset) as f32 * row_height,
+                    panel.w - 24.0,
+                    row_height - 2.0,
+                ),
+            )
+        })
+        .collect();
+    (panel, rows)
+}
+
+fn draw_language_picker(
+    canvas: &mut Canvas<Window>,
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    font: Option<&mut TextRenderer>,
+    dimensions: (u32, u32),
+    languages: &[crate::text_export::LanguageCatalog],
+    selection: usize,
+    mouse: (f32, f32),
+) {
+    let (panel, rows) = language_picker_rects(dimensions, languages.len(), selection);
+    let mut font = font;
+    canvas.set_blend_mode(BlendMode::Blend);
+    canvas.set_draw_color(Color::RGBA(0, 0, 0, 190));
+    let _ = canvas.fill_rect(FRect::new(
+        0.0,
+        0.0,
+        dimensions.0 as f32,
+        dimensions.1 as f32,
+    ));
+    canvas.set_draw_color(Color::RGBA(16, 18, 26, 250));
+    let _ = canvas.fill_rect(panel);
+    canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+    let _ = canvas.draw_rect(panel);
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        "Selecciona idioma",
+        panel.x + 16.0,
+        panel.y + 12.0,
+        panel.w as u32 - 32,
+        28,
+    );
+    for (index, rect) in rows {
+        let hovered = mouse.0 >= rect.x
+            && mouse.0 < rect.x + rect.w
+            && mouse.1 >= rect.y
+            && mouse.1 < rect.y + rect.h;
+        canvas.set_draw_color(if index == selection {
+            Color::RGBA(55, 112, 84, 255)
+        } else if hovered {
+            Color::RGBA(73, 99, 145, 255)
+        } else {
+            Color::RGBA(43, 47, 61, 255)
+        });
+        let _ = canvas.fill_rect(rect);
+        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+        let _ = canvas.draw_rect(rect);
+        let label = if index == 0 {
+            "Original (sin traducción)"
+        } else {
+            languages[index - 1].name.as_str()
+        };
+        draw_toolbar_text(
+            canvas,
+            tc,
+            gfx,
+            font.as_deref_mut(),
+            label,
+            rect.x + 10.0,
+            rect.y,
+            rect.w as u32 - 20,
+            rect.h as u32,
+        );
+    }
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        "Flechas + Enter · Esc: original",
+        panel.x + 16.0,
+        panel.y + panel.h - 32.0,
+        panel.w as u32 - 32,
+        22,
+    );
+}
+
 fn upload(
     tc: &TextureCreator<WindowContext>,
     w: u32,
@@ -425,11 +613,31 @@ fn upload(
     rgba: &[u8],
     filter: ScaleMode,
 ) -> Option<Texture> {
-    let mut t = tc.create_texture_static(PixelFormat::RGBA32, w, h).ok()?;
-    t.update(None, rgba, (w * 4) as usize).ok()?;
+    upload_with_error(tc, w, h, rgba, filter).ok()
+}
+
+fn upload_with_error(
+    tc: &TextureCreator<WindowContext>,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    filter: ScaleMode,
+) -> Result<Texture, String> {
+    let mut t = tc
+        .create_texture_static(PixelFormat::RGBA32, w, h)
+        .map_err(|error| format!("cannot create {w}x{h} texture: {error}"))?;
+    t.update(None, rgba, (w * 4) as usize)
+        .map_err(|error| format!("cannot upload {w}x{h} RGBA pixels: {error}"))?;
     t.set_blend_mode(BlendMode::Blend);
     t.set_scale_mode(filter);
-    Some(t)
+    Ok(t)
+}
+
+#[cfg(feature = "nvidia-optical-flow")]
+fn update_with_error(texture: &mut Texture, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
+    texture
+        .update(None, rgba, (w * 4) as usize)
+        .map_err(|error| format!("cannot update {w}x{h} RGBA texture: {error}"))
 }
 
 /// Estado de dibujo de un objeto (para el registro de depuración).
@@ -447,16 +655,31 @@ pub fn run(
     cfg: Config,
     assets: Arc<Assets>,
     mut vm: Vm,
+    languages: Vec<crate::text_export::LanguageCatalog>,
     t0: Instant,
     snapshot: Option<(u64, std::path::PathBuf)>,
     debug_layout: bool,
 ) -> Result<(), String> {
-    let mut interpolation_mode =
-        load_interpolation_preference(if cfg.window.interpolate_animations {
-            InterpolationMode::Crossfade
-        } else {
+    let default_interpolation = if cfg.window.optical_flow {
+        #[cfg(feature = "nvidia-optical-flow")]
+        {
+            InterpolationMode::OpticalFlow
+        }
+        #[cfg(not(feature = "nvidia-optical-flow"))]
+        {
+            log::warn!("NVIDIA Optical Flow requested, but this build lacks the feature");
             InterpolationMode::Off
-        });
+        }
+    } else if cfg.window.interpolate_animations {
+        InterpolationMode::Crossfade
+    } else {
+        InterpolationMode::Off
+    };
+    let mut interpolation_mode = if cfg.window.optical_flow {
+        default_interpolation
+    } else {
+        load_interpolation_preference(default_interpolation)
+    };
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     log::info!("video driver: {}", video.current_video_driver());
@@ -478,11 +701,62 @@ pub fn run(
     } else {
         wb.high_pixel_density();
     }
+    let mut use_shared_vulkan =
+        snapshot.is_none() && cfg.window.renderer.eq_ignore_ascii_case("vulkan");
+    if use_shared_vulkan {
+        match video.vulkan_load_library_default() {
+            Ok(()) => {
+                wb.vulkan();
+            }
+            Err(error) => {
+                log::warn!("cannot load Vulkan; falling back to SDL renderer: {error}");
+                use_shared_vulkan = false;
+            }
+        }
+    }
     let mut window = wb.build().map_err(|e| e.to_string())?;
     if cfg.window.fullscreen {
         let _ = window.set_fullscreen(true);
     }
-    if !cfg.window.renderer.is_empty() {
+    let mut _native_vulkan = None;
+    let mut shared_renderer = None;
+    if use_shared_vulkan {
+        match crate::vulkan::SdlVulkanContext::new(&window) {
+            Ok(mut context) => {
+                #[cfg(feature = "nvidia-optical-flow")]
+                if interpolation_mode == InterpolationMode::OpticalFlow {
+                    if let Err(error) = context.ensure_optical_flow_session(lw, lh) {
+                        log::warn!(
+                            "NVIDIA Optical Flow unavailable; using crossfade instead: {error}"
+                        );
+                        interpolation_mode = InterpolationMode::Crossfade;
+                    }
+                }
+                match context.create_sdl_renderer(&window) {
+                    Ok(renderer) => {
+                        log::info!(
+                            "using SDL Vulkan renderer on shared device {:?} (graphics queue {})",
+                            context.name,
+                            context.graphics_queue_family
+                        );
+                        shared_renderer = Some(renderer);
+                        _native_vulkan = Some(context);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "shared Vulkan renderer unavailable; falling back to SDL: {error}"
+                        );
+                        use_shared_vulkan = false;
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("cannot initialize shared Vulkan device; falling back to SDL: {error}");
+                use_shared_vulkan = false;
+            }
+        }
+    }
+    if shared_renderer.is_none() && !cfg.window.renderer.is_empty() && !use_shared_vulkan {
         // probar el driver antes: si no funciona en este sistema, avisar y usar el automático
         let name = std::ffi::CString::new(cfg.window.renderer.as_str()).unwrap_or_default();
         let ok = unsafe {
@@ -504,7 +778,18 @@ pub fn run(
             );
         }
     }
-    let mut canvas: Canvas<Window> = window.into_canvas();
+    #[cfg(feature = "nvidia-optical-flow")]
+    if interpolation_mode == InterpolationMode::OpticalFlow && _native_vulkan.is_none() {
+        log::warn!(
+            "NVIDIA Optical Flow requires the shared Vulkan renderer; using crossfade instead"
+        );
+        interpolation_mode = InterpolationMode::Crossfade;
+    }
+    let mut canvas: Canvas<Window> = if let Some(renderer) = shared_renderer {
+        unsafe { sdl3::render::Canvas::from_window_and_renderer(window, renderer) }
+    } else {
+        window.into_canvas()
+    };
     let rname = unsafe {
         let p = sdl3::sys::render::SDL_GetRendererName(canvas.raw());
         if p.is_null() {
@@ -624,12 +909,21 @@ pub fn run(
     let mut gfx = Gfx {
         images: HashMap::new(),
         video_textures: HashMap::new(),
+        video_previous_textures: HashMap::new(),
         texts: HashMap::new(),
         debug_labels: HashMap::new(),
         menu_animation_starts: HashMap::new(),
         menu_fonts: HashMap::new(),
         toolbar_texts: HashMap::new(),
         crossfade_safety: HashMap::new(),
+        #[cfg(feature = "nvidia-optical-flow")]
+        optical_flow_textures: HashMap::new(),
+        #[cfg(feature = "nvidia-optical-flow")]
+        optical_flow_failures: HashSet::new(),
+        #[cfg(feature = "nvidia-optical-flow")]
+        video_optical_flow_textures: HashMap::new(),
+        #[cfg(feature = "nvidia-optical-flow")]
+        video_optical_flow_failures: HashSet::new(),
         animation_delays: HashMap::new(),
         menu: None,
     };
@@ -640,9 +934,58 @@ pub fn run(
     let mut frame: u64 = 0;
     let mut last_dbg = -1000.0f64;
     let mut options_open = false;
+    let mut language_picker_open = !languages.is_empty() && snapshot.is_none();
+    let mut language_selection = 0usize;
+    let mut export_status: Option<String> = None;
+    let mut fps_meter_enabled = cfg.window.fps_meter;
+    let mut fps_epoch = Instant::now();
+    let mut fps_present_count = 0_u32;
+    let mut fps_value = 0_u32;
+    let mut vm_time_sum_ms = 0.0_f64;
+    let mut scene_time_sum_ms = 0.0_f64;
+    let mut present_time_sum_ms = 0.0_f64;
+    let mut vm_time_ms = 0.0_f64;
+    let mut scene_time_ms = 0.0_f64;
+    let mut present_time_ms = 0.0_f64;
+    let mut vm_steps_sum = 0_u64;
+    let mut vm_steps_per_frame = 0_u64;
     let mut missing_logged: std::collections::HashSet<String> = Default::default();
+    let (export_tx, export_rx) = mpsc::channel::<Result<std::path::PathBuf, String>>();
 
     'main: loop {
+        while let Ok(result) = export_rx.try_recv() {
+            match result {
+                Ok(directory) => match crate::text_export::export(&game.data, &directory) {
+                    Ok(summary) => {
+                        let catalog = directory.join("texts.toml");
+                        log::info!(
+                            "exported {} entries ({} dialogues, {} menu options, {} LCM files) to {}",
+                            summary.entries,
+                            summary.dialogues,
+                            summary.menu_items,
+                            summary.movies,
+                            catalog.display()
+                        );
+                        println!(
+                            "translation catalog: {} entries -> {}",
+                            summary.entries,
+                            catalog.display()
+                        );
+                        export_status = Some("Catálogo exportado (ver consola)".into());
+                    }
+                    Err(error) => {
+                        log::error!("cannot export translation catalog: {error}");
+                        eprintln!("livenyan: cannot export translation catalog: {error}");
+                        export_status = Some("Error al exportar (ver consola)".into());
+                    }
+                },
+                Err(error) => {
+                    log::error!("translation folder dialog failed: {error}");
+                    eprintln!("livenyan: translation folder dialog failed: {error}");
+                    export_status = Some("Error al abrir carpeta (ver consola)".into());
+                }
+            }
+        }
         for ev in pump.poll_iter() {
             let ev = ev.get_converted_coords(&canvas).unwrap_or(ev);
             log::trace!("{ev:?}");
@@ -667,6 +1010,34 @@ pub fn run(
                     repeat,
                     ..
                 } => {
+                    if language_picker_open {
+                        match k {
+                            sdl3::keyboard::Keycode::Up => {
+                                language_selection = language_selection.saturating_sub(1);
+                            }
+                            sdl3::keyboard::Keycode::Down => {
+                                language_selection = (language_selection + 1).min(languages.len());
+                            }
+                            sdl3::keyboard::Keycode::Return | sdl3::keyboard::Keycode::KpEnter => {
+                                if language_selection > 0 {
+                                    vm.set_translations(
+                                        languages[language_selection - 1].translations.clone(),
+                                    );
+                                }
+                                language_picker_open = false;
+                            }
+                            sdl3::keyboard::Keycode::Escape => {
+                                language_selection = 0;
+                                language_picker_open = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if !repeat && k == sdl3::keyboard::Keycode::F3 {
+                        fps_meter_enabled = !fps_meter_enabled;
+                        continue;
+                    }
                     if options_open && k == sdl3::keyboard::Keycode::Escape {
                         options_open = false;
                         continue;
@@ -767,6 +1138,24 @@ pub fn run(
                     }
                     log::debug!("click at logical ({x:.0},{y:.0})");
                     mouse = (x, y);
+                    if language_picker_open {
+                        let (_, rows) =
+                            language_picker_rects((lw, lh), languages.len(), language_selection);
+                        if let Some(index) = rows.iter().find_map(|(index, rect)| {
+                            (x >= rect.x
+                                && x < rect.x + rect.w
+                                && y >= rect.y
+                                && y < rect.y + rect.h)
+                                .then_some(*index)
+                        }) {
+                            if index > 0 {
+                                vm.set_translations(languages[index - 1].translations.clone());
+                            }
+                            language_selection = index;
+                            language_picker_open = false;
+                        }
+                        continue;
+                    }
                     if let Some(action) = toolbar_hit(lw, x, y, options_open) {
                         match action {
                             ToolbarAction::Quit => break 'main,
@@ -781,7 +1170,65 @@ pub fn run(
                                 }
                             }
                             ToolbarAction::Options => options_open = !options_open,
+                            ToolbarAction::ToggleFpsMeter => {
+                                fps_meter_enabled = !fps_meter_enabled;
+                            }
+                            ToolbarAction::ExportTexts => {
+                                let directory = game.translations_dir();
+                                match std::fs::create_dir_all(&directory) {
+                                    Ok(()) => {
+                                        let sender = export_tx.clone();
+                                        sdl3::dialog::show_open_folder_dialog(
+                                            Some(directory),
+                                            false,
+                                            canvas.window(),
+                                            Box::new(move |result, _| match result {
+                                                Ok(mut paths) => {
+                                                    if let Some(path) = paths.pop() {
+                                                        let _ = sender.send(Ok(path));
+                                                    }
+                                                }
+                                                Err(sdl3::dialog::DialogError::Canceled) => {}
+                                                Err(error) => {
+                                                    let _ = sender.send(Err(error.to_string()));
+                                                }
+                                            }),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        let message = format!(
+                                            "cannot create translation directory {}: {error}",
+                                            directory.display()
+                                        );
+                                        log::error!("{message}");
+                                        eprintln!("livenyan: {message}");
+                                        export_status =
+                                            Some("Error al crear carpeta (ver consola)".into());
+                                    }
+                                }
+                            }
                             ToolbarAction::Interpolation(mode) => {
+                                #[cfg(feature = "nvidia-optical-flow")]
+                                let mode = if mode == InterpolationMode::OpticalFlow {
+                                    match _native_vulkan
+                                        .as_mut()
+                                        .ok_or_else(|| {
+                                            "shared Vulkan renderer is unavailable".to_string()
+                                        })
+                                        .and_then(|context| {
+                                            context.ensure_optical_flow_session(lw, lh)
+                                        }) {
+                                        Ok(_) => mode,
+                                        Err(error) => {
+                                            log::warn!(
+                                                "NVIDIA Optical Flow unavailable; using crossfade instead: {error}"
+                                            );
+                                            InterpolationMode::Crossfade
+                                        }
+                                    }
+                                } else {
+                                    mode
+                                };
                                 interpolation_mode = mode;
                                 if let Err(error) =
                                     save_interpolation_preference(interpolation_mode)
@@ -875,7 +1322,13 @@ pub fn run(
         } else {
             start.elapsed().as_secs_f64() * 1000.0
         };
-        vm.update(now, 20_000);
+        let vm_update_started = Instant::now();
+        let vm_steps = if language_picker_open {
+            0
+        } else {
+            vm.update(now, 20_000)
+        };
+        let vm_update_ms = vm_update_started.elapsed().as_secs_f64() * 1000.0;
         let wants_text_input = vm.active_edit_name().is_some();
         if wants_text_input != text_input_active {
             if wants_text_input {
@@ -902,6 +1355,14 @@ pub fn run(
                         a.stop(&channel)
                     }
                 }
+                VmEvent::FadeSound {
+                    channel,
+                    duration_ms,
+                } => {
+                    if let Some(a) = audio.as_mut() {
+                        a.fade_out(&channel, duration_ms)
+                    }
+                }
             }
         }
         if let Some(a) = audio.as_mut() {
@@ -913,8 +1374,10 @@ pub fn run(
         }
 
         // Keep the last complete scene visible while newly referenced images decode.
+        let scene_render_started = Instant::now();
         let mut drawn = Vec::new();
-        if scene_images_ready(&assets, &vm) {
+        let ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
+        if scene_images_ready(&assets, &vm, &ordered_objects) {
             canvas
                 .with_texture_canvas(&mut scene_frame, |scene_canvas| {
                     scene_canvas.set_draw_color(Color::RGB(0, 0, 0));
@@ -924,6 +1387,7 @@ pub fn run(
                         &tc,
                         &assets,
                         &mut vm,
+                        &ordered_objects,
                         &mut gfx,
                         font.as_mut(),
                         &cfg,
@@ -931,6 +1395,8 @@ pub fn run(
                         (lw, lh),
                         debug_layout,
                         interpolation_mode,
+                        #[cfg(feature = "nvidia-optical-flow")]
+                        _native_vulkan.as_mut(),
                     );
                     if let State::Menu { name, choices, .. } = &vm.state {
                         draw_menu(
@@ -965,8 +1431,22 @@ pub fn run(
             canvas.set_draw_color(Color::RGB(0, 0, 0));
             canvas.clear();
         }
-        let toolbar_visible =
-            snapshot.is_none() && (options_open || (mouse.1 >= 0.0 && mouse.1 < 8.0));
+        if language_picker_open && snapshot.is_none() {
+            draw_language_picker(
+                &mut canvas,
+                &tc,
+                &mut gfx,
+                font.as_mut(),
+                (lw, lh),
+                &languages,
+                language_selection,
+                (mouse.0, mouse.1),
+            );
+        }
+        let scene_render_ms = scene_render_started.elapsed().as_secs_f64() * 1000.0;
+        let toolbar_visible = snapshot.is_none()
+            && !language_picker_open
+            && is_toolbar_visible(mouse.1, options_open);
         if toolbar_visible {
             draw_toolbar(
                 &mut canvas,
@@ -978,6 +1458,23 @@ pub fn run(
                 options_open,
                 interpolation_mode,
                 vsync_active,
+                fps_meter_enabled,
+                export_status.as_deref(),
+            );
+        }
+        if fps_meter_enabled && snapshot.is_none() && !language_picker_open {
+            draw_fps_meter(
+                &mut canvas,
+                &tc,
+                &mut gfx,
+                font.as_mut(),
+                fps_value,
+                refresh_rate,
+                vm_time_ms,
+                scene_time_ms,
+                present_time_ms,
+                vm_steps_per_frame,
+                vm.budget_location(),
             );
         }
         frame += 1;
@@ -1058,7 +1555,29 @@ pub fn run(
             );
             break;
         }
+        let present_started = Instant::now();
         canvas.present();
+        let present_ms = present_started.elapsed().as_secs_f64() * 1000.0;
+        fps_present_count = fps_present_count.saturating_add(1);
+        vm_time_sum_ms += vm_update_ms;
+        scene_time_sum_ms += scene_render_ms;
+        present_time_sum_ms += present_ms;
+        vm_steps_sum = vm_steps_sum.saturating_add(vm_steps as u64);
+        let fps_elapsed = fps_epoch.elapsed();
+        if fps_elapsed >= std::time::Duration::from_millis(500) {
+            let samples = f64::from(fps_present_count);
+            fps_value = (samples / fps_elapsed.as_secs_f64()).round() as u32;
+            vm_time_ms = vm_time_sum_ms / samples;
+            scene_time_ms = scene_time_sum_ms / samples;
+            present_time_ms = present_time_sum_ms / samples;
+            vm_steps_per_frame = (vm_steps_sum as f64 / samples).round() as u64;
+            fps_present_count = 0;
+            vm_time_sum_ms = 0.0;
+            scene_time_sum_ms = 0.0;
+            present_time_sum_ms = 0.0;
+            vm_steps_sum = 0;
+            fps_epoch = Instant::now();
+        }
         if !first_scene_logged && !vm.scene.objs.is_empty() {
             first_scene_logged = true;
             log::info!(
@@ -1091,6 +1610,8 @@ fn draw_toolbar(
     options_open: bool,
     interpolation_mode: InterpolationMode,
     vsync_active: bool,
+    fps_meter_enabled: bool,
+    export_status: Option<&str>,
 ) {
     let mut font = font;
     canvas.set_blend_mode(BlendMode::Blend);
@@ -1115,7 +1636,9 @@ fn draw_toolbar(
             ToolbarAction::Quit => "Salir",
             ToolbarAction::Fullscreen => "Pantalla",
             ToolbarAction::Options => "Opciones",
-            ToolbarAction::Interpolation(_) => continue,
+            ToolbarAction::Interpolation(_)
+            | ToolbarAction::ToggleFpsMeter
+            | ToolbarAction::ExportTexts => continue,
         };
         let label_width = rect.w as u32 - 16;
         draw_toolbar_text(
@@ -1131,17 +1654,21 @@ fn draw_toolbar(
         );
     }
     if options_open {
-        let panel = FRect::new(width as f32 - 340.0, 32.0, 334.0, 106.0);
+        let panel = FRect::new(width as f32 - 340.0, 32.0, 334.0, 198.0);
         canvas.set_draw_color(Color::RGBA(16, 18, 26, 248));
         let _ = canvas.fill_rect(panel);
         canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
         let _ = canvas.draw_rect(panel);
+        #[cfg(feature = "nvidia-optical-flow")]
+        let interpolation_label = "Interpolación GAL/vídeo";
+        #[cfg(not(feature = "nvidia-optical-flow"))]
+        let interpolation_label = "Fundido de GAL opacos grandes";
         draw_toolbar_text(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
-            "Fundido de GAL opacos grandes",
+            interpolation_label,
             panel.x + 12.0,
             42.0,
             310,
@@ -1166,6 +1693,8 @@ fn draw_toolbar(
             let label = match mode {
                 InterpolationMode::Off => "Off",
                 InterpolationMode::Crossfade => "Fundido",
+                #[cfg(feature = "nvidia-optical-flow")]
+                InterpolationMode::OpticalFlow => "Optical Flow",
             };
             draw_toolbar_text(
                 canvas,
@@ -1179,6 +1708,37 @@ fn draw_toolbar(
                 rect.h as u32,
             );
         }
+        let fps_rect = fps_meter_option_rect(width);
+        canvas.set_draw_color(if fps_meter_enabled {
+            Color::RGBA(55, 112, 84, 255)
+        } else {
+            Color::RGBA(43, 47, 61, 255)
+        });
+        let _ = canvas.fill_rect(fps_rect);
+        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+        let _ = canvas.draw_rect(fps_rect);
+        draw_toolbar_text(
+            canvas,
+            tc,
+            gfx,
+            font.as_deref_mut(),
+            if fps_meter_enabled {
+                "FPS: On"
+            } else {
+                "FPS: Off"
+            },
+            fps_rect.x + 6.0,
+            fps_rect.y,
+            fps_rect.w as u32 - 12,
+            fps_rect.h as u32,
+        );
+        #[cfg(feature = "nvidia-optical-flow")]
+        let detail = if vsync_active {
+            "GAL/vídeo pantalla completa · refresco"
+        } else {
+            "GAL/vídeo pantalla completa · sin VSync"
+        };
+        #[cfg(not(feature = "nvidia-optical-flow"))]
         let detail = if vsync_active {
             "Solo GAL opacos grandes · refresco del monitor"
         } else {
@@ -1191,11 +1751,114 @@ fn draw_toolbar(
             font.as_deref_mut(),
             detail,
             panel.x + 16.0,
-            108.0,
+            138.0,
             310,
             20,
         );
+        let export_rect = export_texts_option_rect(width);
+        let hovered = mouse.0 >= export_rect.x
+            && mouse.0 < export_rect.x + export_rect.w
+            && mouse.1 >= export_rect.y
+            && mouse.1 < export_rect.y + export_rect.h;
+        canvas.set_draw_color(if hovered {
+            Color::RGBA(73, 99, 145, 255)
+        } else {
+            Color::RGBA(43, 47, 61, 255)
+        });
+        let _ = canvas.fill_rect(export_rect);
+        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+        let _ = canvas.draw_rect(export_rect);
+        draw_toolbar_text(
+            canvas,
+            tc,
+            gfx,
+            font.as_deref_mut(),
+            "Exportar textos…",
+            export_rect.x + 8.0,
+            export_rect.y,
+            export_rect.w as u32 - 16,
+            export_rect.h as u32,
+        );
+        if let Some(status) = export_status {
+            draw_toolbar_text(
+                canvas,
+                tc,
+                gfx,
+                font.as_deref_mut(),
+                status,
+                panel.x + 12.0,
+                196.0,
+                310,
+                20,
+            );
+        }
     }
+}
+
+fn draw_fps_meter(
+    canvas: &mut Canvas<Window>,
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    mut font: Option<&mut TextRenderer>,
+    fps: u32,
+    refresh_rate: f32,
+    vm_time_ms: f64,
+    scene_time_ms: f64,
+    present_time_ms: f64,
+    vm_steps_per_frame: u64,
+    vm_location: Option<&str>,
+) {
+    canvas.set_blend_mode(BlendMode::Blend);
+    canvas.set_draw_color(Color::RGBA(16, 18, 26, 220));
+    let _ = canvas.fill_rect(FRect::new(8.0, 52.0, 382.0, 96.0));
+    canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+    let _ = canvas.draw_rect(FRect::new(8.0, 52.0, 382.0, 96.0));
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        &format!("FPS {fps} / {refresh_rate:.0} Hz"),
+        15.0,
+        52.0,
+        366,
+        30,
+    );
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        &format!("VM {vm_time_ms:.2} ms ({vm_steps_per_frame} steps)"),
+        15.0,
+        78.0,
+        366,
+        24,
+    );
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        &format!("Draw {scene_time_ms:.2} ms | Present {present_time_ms:.2} ms"),
+        15.0,
+        96.0,
+        366,
+        24,
+    );
+    draw_toolbar_text(
+        canvas,
+        tc,
+        gfx,
+        font,
+        &vm_location
+            .map(|location| format!("At {location}"))
+            .unwrap_or_else(|| "VM below step cap".to_string()),
+        15.0,
+        116.0,
+        366,
+        24,
+    );
 }
 
 fn menu_geometry(choices: &[String], menu: Option<&Obj>, lw: u32, lh: u32) -> (FRect, Vec<FRect>) {
@@ -1640,14 +2303,14 @@ fn image_for(
     Some(name)
 }
 
-fn scene_images_ready(assets: &Assets, vm: &Vm) -> bool {
+fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool {
     let image_ready = |name: &str| {
         assets
             .data()
             .resolve(name, IMAGE_EXTS)
             .is_none_or(|resolved| assets.try_get(&resolved).is_some())
     };
-    for object in vm.scene.draw_order() {
+    for object in ordered_objects {
         if !vm.scene.effective_visible(object) {
             continue;
         }
@@ -2046,6 +2709,7 @@ fn draw_scene(
     tc: &TextureCreator<WindowContext>,
     assets: &Assets,
     vm: &mut Vm,
+    ordered_objects: &[Obj],
     gfx: &mut Gfx,
     mut font: Option<&mut TextRenderer>,
     cfg: &Config,
@@ -2053,11 +2717,25 @@ fn draw_scene(
     (lw, lh): (u32, u32),
     debug_layout: bool,
     interpolation_mode: InterpolationMode,
+    #[cfg(feature = "nvidia-optical-flow")] mut optical_flow: Option<
+        &mut crate::vulkan::SdlVulkanContext,
+    >,
 ) -> Vec<Drawn> {
-    let order: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
-    let interpolation_areas = interpolation_group_areas(&vm.scene, &order, gfx, assets);
+    let order = ordered_objects;
+    let interpolation_areas = if interpolation_mode == InterpolationMode::Off {
+        HashMap::new()
+    } else {
+        interpolation_group_areas(&vm.scene, &order, gfx, assets)
+    };
     let mut sizes: Vec<(String, u32, u32)> = vec![];
     let mut active_menu_animations = HashSet::new();
+    #[cfg(feature = "nvidia-optical-flow")]
+    let mut active_optical_flow_pairs = HashSet::new();
+    #[cfg(feature = "nvidia-optical-flow")]
+    let mut active_optical_flow_objects = HashSet::new();
+    #[cfg(feature = "nvidia-optical-flow")]
+    let mut active_video_optical_flow_pairs = HashSet::new();
+    let mut active_videos = HashSet::new();
     let mut drawn: Vec<Drawn> = Vec::with_capacity(order.len());
     for (z, o) in order.iter().enumerate() {
         let (x, y) = vm.scene.abs_pos(o);
@@ -2359,6 +3037,133 @@ fn draw_scene(
                     format!("{key}#{current_frame}")
                 };
                 let crossfade_key = format!("{key}:{current_frame}:{next_frame}");
+                #[cfg(feature = "nvidia-optical-flow")]
+                let mut optical_flow_failed = false;
+                #[cfg(feature = "nvidia-optical-flow")]
+                let mut optical_flow_midpoint = false;
+                #[cfg(feature = "nvidia-optical-flow")]
+                if interpolation_mode == InterpolationMode::OpticalFlow
+                    && o.kind == Kind::Image
+                    && alpha == u8::MAX
+                    && iw == lw
+                    && ih == lh
+                    && x == 0.0
+                    && y == 0.0
+                    && dw == lw as f32
+                    && dh == lh as f32
+                    && next_frame != current_frame
+                {
+                    active_optical_flow_pairs.insert(crossfade_key.clone());
+                    active_optical_flow_objects.insert(o.name.clone());
+                    let cached = gfx.optical_flow_textures.get(&o.name).is_some_and(|entry| {
+                        entry.source == key
+                            && entry.from_frame == current_frame
+                            && entry.to_frame == next_frame
+                    });
+                    let failed = gfx.optical_flow_failures.contains(&crossfade_key);
+                    if !cached && !failed {
+                        let generated = match (assets.try_get(&key), optical_flow.as_deref_mut()) {
+                            (Some(Asset::Image(image)), Some(context)) => {
+                                match (
+                                    gal_frame_pixels(&image, current_frame),
+                                    gal_frame_pixels(&image, next_frame),
+                                ) {
+                                    (Some(previous), Some(next))
+                                        if can_crossfade_frames(
+                                            &image,
+                                            current_frame,
+                                            next_frame,
+                                            alpha,
+                                        ) =>
+                                    {
+                                        context
+                                            .execute_optical_flow_frames(previous, next)
+                                            .map(|(result, motion)| (result, motion))
+                                    }
+                                    _ => Err("Optical Flow requires two opaque decoded GAL frames"
+                                        .into()),
+                                }
+                            }
+                            (_, None) => Err("shared Vulkan renderer is unavailable".into()),
+                            _ => Err("GAL animation frames are not decoded".into()),
+                        };
+                        match generated {
+                            Ok((image, motion)) => {
+                                let texture_result = match gfx
+                                    .optical_flow_textures
+                                    .get_mut(&o.name)
+                                {
+                                    Some(entry)
+                                        if entry.width == image.w && entry.height == image.h =>
+                                    {
+                                        update_with_error(
+                                            &mut entry.texture,
+                                            image.w,
+                                            image.h,
+                                            &image.rgba,
+                                        )
+                                        .map(|()| {
+                                            entry.source = key.clone();
+                                            entry.from_frame = current_frame;
+                                            entry.to_frame = next_frame;
+                                        })
+                                    }
+                                    _ => {
+                                        upload_with_error(tc, image.w, image.h, &image.rgba, filter)
+                                            .map(|texture| {
+                                                gfx.optical_flow_textures.insert(
+                                                    o.name.clone(),
+                                                    OpticalFlowTexture {
+                                                        source: key.clone(),
+                                                        from_frame: current_frame,
+                                                        to_frame: next_frame,
+                                                        texture,
+                                                        width: image.w,
+                                                        height: image.h,
+                                                    },
+                                                );
+                                            })
+                                    }
+                                };
+                                match texture_result {
+                                    Ok(()) => {
+                                        log::debug!(
+                                            "Optical Flow {} frames {current_frame}->{next_frame}: motion ({:.2}, {:.2})",
+                                            key,
+                                            motion.0,
+                                            motion.1
+                                        );
+                                    }
+                                    Err(error) => {
+                                        optical_flow_failed = true;
+                                        gfx.optical_flow_failures.insert(crossfade_key.clone());
+                                        log::warn!(
+                                            "cannot upload interpolated GAL frame {key} {current_frame}->{next_frame}: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                optical_flow_failed = true;
+                                gfx.optical_flow_failures.insert(crossfade_key.clone());
+                                log::warn!("cannot interpolate GAL frames for {key}: {error}");
+                            }
+                        }
+                    }
+                    optical_flow_midpoint = progress >= 0.5
+                        && gfx.optical_flow_textures.get(&o.name).is_some_and(|entry| {
+                            entry.source == key
+                                && entry.from_frame == current_frame
+                                && entry.to_frame == next_frame
+                        });
+                    optical_flow_failed |= failed;
+                }
+                #[cfg(feature = "nvidia-optical-flow")]
+                let crossfade_active = (interpolation_mode == InterpolationMode::Crossfade
+                    || optical_flow_failed)
+                    && progress > 0.0
+                    && next_frame != current_frame;
+                #[cfg(not(feature = "nvidia-optical-flow"))]
                 let crossfade_active = interpolation_mode == InterpolationMode::Crossfade
                     && progress > 0.0
                     && next_frame != current_frame;
@@ -2366,7 +3171,7 @@ fn draw_scene(
                     && alpha == u8::MAX
                     && *gfx
                         .crossfade_safety
-                        .entry(crossfade_key)
+                        .entry(crossfade_key.clone())
                         .or_insert_with(|| {
                             matches!(
                                 assets.try_get(&key),
@@ -2379,7 +3184,19 @@ fn draw_scene(
                                     )
                             )
                         });
-                if let Some((texture, _, _)) = gfx.images.get_mut(&current_key) {
+                #[cfg(feature = "nvidia-optical-flow")]
+                let optical_flow_texture = optical_flow_midpoint
+                    .then(|| {
+                        gfx.optical_flow_textures
+                            .get_mut(&o.name)
+                            .map(|entry| &mut entry.texture)
+                    })
+                    .flatten();
+                #[cfg(not(feature = "nvidia-optical-flow"))]
+                let optical_flow_texture: Option<&mut Texture> = None;
+                if let Some(texture) = optical_flow_texture {
+                    let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                } else if let Some((texture, _, _)) = gfx.images.get_mut(&current_key) {
                     if crossfade_safe {
                         texture.set_blend_mode(BlendMode::None);
                         texture.set_alpha_mod(u8::MAX);
@@ -2756,11 +3573,23 @@ fn draw_scene(
                 );
             }
             Kind::Movie => {
-                let Some((generation, sequence, pixels, video_width, video_height)) =
-                    vm.video_frame(&o.name)
-                else {
+                active_videos.insert(o.name.clone());
+                let Some(video_frame) = vm.video_frame_pair(&o.name, vm.now) else {
                     st!() = "video loading";
                     continue;
+                };
+                let generation = video_frame.generation;
+                let sequence = video_frame.sequence;
+                let pixels = video_frame.current;
+                let video_width = video_frame.width;
+                let video_height = video_frame.height;
+                let (display_pixels, display_sequence) = if video_frame.progress < 1.0 {
+                    video_frame
+                        .previous
+                        .map(|(pixels, _, _, sequence)| (pixels, sequence))
+                        .unwrap_or((pixels, sequence))
+                } else {
+                    (pixels, sequence)
                 };
                 let recreate =
                     gfx.video_textures
@@ -2769,7 +3598,8 @@ fn draw_scene(
                             *old_generation != generation || *w != video_width || *h != video_height
                         });
                 if recreate {
-                    let Some(texture) = upload(tc, video_width, video_height, pixels, filter)
+                    let Some(texture) =
+                        upload(tc, video_width, video_height, display_pixels, filter)
                     else {
                         log::error!("cannot create video texture for {:?}", o.name);
                         st!() = "video texture unavailable";
@@ -2777,7 +3607,13 @@ fn draw_scene(
                     };
                     gfx.video_textures.insert(
                         o.name.clone(),
-                        (texture, generation, sequence, video_width, video_height),
+                        (
+                            texture,
+                            generation,
+                            display_sequence,
+                            video_width,
+                            video_height,
+                        ),
                     );
                 }
                 let Some((texture, _, current_sequence, _, _)) =
@@ -2786,18 +3622,161 @@ fn draw_scene(
                     st!() = "video texture unavailable";
                     continue;
                 };
-                if *current_sequence != sequence {
-                    if let Err(e) = texture.update(None, pixels, (video_width * 4) as usize) {
+                if *current_sequence != display_sequence {
+                    if let Err(e) = texture.update(None, display_pixels, (video_width * 4) as usize)
+                    {
                         log::error!("cannot update video texture for {:?}: {e}", o.name);
                         st!() = "video texture update failed";
                         continue;
                     }
-                    *current_sequence = sequence;
+                    *current_sequence = display_sequence;
                 }
-                texture.set_alpha_mod(alpha);
                 let dw = if ow > 0 { ow as f32 } else { lw as f32 };
                 let dh = if oh > 0 { oh as f32 } else { lh as f32 };
-                let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                #[cfg(feature = "nvidia-optical-flow")]
+                let optical_flow_video = interpolation_mode == InterpolationMode::OpticalFlow
+                    && alpha == u8::MAX
+                    && video_width == lw
+                    && video_height == lh
+                    && x == 0.0
+                    && y == 0.0
+                    && dw == lw as f32
+                    && dh == lh as f32
+                    && !video_frame.current_duplicate
+                    && video_frame.previous.is_some();
+                #[cfg(feature = "nvidia-optical-flow")]
+                let video_flow_key = format!("video:{}:{generation}:{sequence}", o.name);
+                #[cfg(feature = "nvidia-optical-flow")]
+                let mut video_flow_failed = false;
+                #[cfg(feature = "nvidia-optical-flow")]
+                if optical_flow_video {
+                    active_video_optical_flow_pairs.insert(video_flow_key.clone());
+                    let (previous_pixels, _, _, previous_sequence) =
+                        video_frame.previous.expect("checked above");
+                    let previous_texture_stale = gfx
+                        .video_previous_textures
+                        .get(&o.name)
+                        .is_none_or(|(old_generation, old_sequence, _, width, height)| {
+                            *old_generation != generation
+                                || *old_sequence != previous_sequence
+                                || *width != video_width
+                                || *height != video_height
+                        });
+                    if previous_texture_stale {
+                        if let Some(previous_texture) =
+                            upload(tc, video_width, video_height, previous_pixels, filter)
+                        {
+                            gfx.video_previous_textures.insert(
+                                o.name.clone(),
+                                (
+                                    generation,
+                                    previous_sequence,
+                                    previous_texture,
+                                    video_width,
+                                    video_height,
+                                ),
+                            );
+                        } else {
+                            log::warn!("cannot upload previous video frame for {:?}", o.name);
+                        }
+                    }
+                    let cached = gfx
+                        .video_optical_flow_textures
+                        .contains_key(&video_flow_key);
+                    let mut failed = gfx.video_optical_flow_failures.contains(&video_flow_key);
+                    if !cached
+                        && !failed
+                        && (!rgba_frame_is_opaque(previous_pixels) || !rgba_frame_is_opaque(pixels))
+                    {
+                        failed = true;
+                        gfx.video_optical_flow_failures
+                            .insert(video_flow_key.clone());
+                        log::warn!(
+                            "Optical Flow skipped transparent video frames for {:?}",
+                            o.name
+                        );
+                    }
+                    if !cached && !failed {
+                        let generated = optical_flow
+                            .as_deref_mut()
+                            .ok_or_else(|| "shared Vulkan renderer is unavailable".to_string())
+                            .and_then(|context| {
+                                context
+                                    .execute_optical_flow_frames(previous_pixels, pixels)
+                                    .map(|(image, motion)| (image, motion))
+                            });
+                        match generated {
+                            Ok((image, motion)) => {
+                                if let Some(interpolated_texture) =
+                                    upload(tc, image.w, image.h, &image.rgba, filter)
+                                {
+                                    log::debug!(
+                                        "Optical Flow video {:?} frames {}->{}: motion ({:.2}, {:.2})",
+                                        o.name,
+                                        sequence.saturating_sub(1),
+                                        sequence,
+                                        motion.0,
+                                        motion.1
+                                    );
+                                    gfx.video_optical_flow_textures
+                                        .insert(video_flow_key.clone(), interpolated_texture);
+                                } else {
+                                    video_flow_failed = true;
+                                    gfx.video_optical_flow_failures
+                                        .insert(video_flow_key.clone());
+                                    log::warn!(
+                                        "cannot upload interpolated video frame for {:?}",
+                                        o.name
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                video_flow_failed = true;
+                                gfx.video_optical_flow_failures
+                                    .insert(video_flow_key.clone());
+                                log::warn!(
+                                    "cannot interpolate video frames for {:?}: {error}",
+                                    o.name
+                                );
+                            }
+                        }
+                    }
+                    video_flow_failed |= failed;
+                }
+                #[cfg(feature = "nvidia-optical-flow")]
+                let use_video_midpoint = optical_flow_video
+                    && !video_flow_failed
+                    && video_frame.progress >= 0.5
+                    && video_frame.progress < 1.0
+                    && gfx
+                        .video_optical_flow_textures
+                        .contains_key(&video_flow_key);
+                #[cfg(feature = "nvidia-optical-flow")]
+                let use_video_previous = optical_flow_video
+                    && !video_flow_failed
+                    && video_frame.progress < 0.5
+                    && gfx.video_previous_textures.contains_key(&o.name);
+                #[cfg(feature = "nvidia-optical-flow")]
+                if use_video_midpoint {
+                    if let Some(texture) = gfx.video_optical_flow_textures.get_mut(&video_flow_key)
+                    {
+                        let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                    }
+                } else if use_video_previous {
+                    if let Some((_, _, texture, _, _)) =
+                        gfx.video_previous_textures.get_mut(&o.name)
+                    {
+                        let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                    }
+                } else if let Some((texture, _, _, _, _)) = gfx.video_textures.get_mut(&o.name) {
+                    texture.set_alpha_mod(alpha);
+                    let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                }
+                #[cfg(not(feature = "nvidia-optical-flow"))]
+                if let Some((texture, _, _, _, _)) = gfx.video_textures.get_mut(&o.name) {
+                    texture.set_alpha_mod(alpha);
+                    let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                }
                 drawn[di].extra = format!("video frame {sequence}");
             }
             _ => st!() = "not rendered (kind)",
@@ -2821,21 +3800,47 @@ fn draw_scene(
     });
     gfx.video_textures
         .retain(|name, _| vm.scene.get(name).is_some_and(|o| o.kind == Kind::Movie));
+    gfx.video_previous_textures
+        .retain(|name, _| active_videos.contains(name));
+    #[cfg(feature = "nvidia-optical-flow")]
+    {
+        gfx.video_optical_flow_textures
+            .retain(|key, _| active_video_optical_flow_pairs.contains(key));
+        gfx.video_optical_flow_failures
+            .retain(|key| active_video_optical_flow_pairs.contains(key));
+    }
     gfx.menu_animation_starts
         .retain(|key, _| active_menu_animations.contains(key));
+    #[cfg(feature = "nvidia-optical-flow")]
+    {
+        gfx.optical_flow_textures
+            .retain(|name, _| active_optical_flow_objects.contains(name));
+        gfx.optical_flow_failures
+            .retain(|key| active_optical_flow_pairs.contains(key));
+    }
     drawn
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "nvidia-optical-flow")]
+    use super::rgba_frame_is_opaque;
     use super::{
         add_rect_to_bounds, edit_key_code, gal_animation_frame, inferred_mask_group,
-        interpolation_group_key, menu_geometry, menu_hit, should_interpolate_gal, toolbar_hit,
+        interpolation_group_key, is_toolbar_visible, menu_geometry, menu_hit,
+        should_interpolate_gal, toolbar_hit,
     };
     use crate::interpolation::InterpolationMode;
     use crate::lsb::{Prop, expr::Value};
     use crate::scene::{Kind, Scene};
     use std::collections::HashMap;
+
+    #[test]
+    #[cfg(feature = "nvidia-optical-flow")]
+    fn video_optical_flow_requires_opaque_rgba_frames() {
+        assert!(rgba_frame_is_opaque(&[0, 50, 100, 255, 255, 200, 100, 255]));
+        assert!(!rgba_frame_is_opaque(&[0, 50, 100, 255, 255, 200, 100, 0]));
+    }
 
     #[test]
     fn interpolation_is_limited_to_large_image_gals_and_toolbar_hit_targets() {
@@ -2873,6 +3878,18 @@ mod tests {
                 InterpolationMode::Crossfade
             ))
         ));
+        assert!(matches!(
+            toolbar_hit(800, 700.0, 115.0, true),
+            Some(super::ToolbarAction::ToggleFpsMeter)
+        ));
+        assert!(matches!(
+            toolbar_hit(800, 700.0, 170.0, true),
+            Some(super::ToolbarAction::ExportTexts)
+        ));
+        assert!(is_toolbar_visible(12.0, false));
+        assert!(is_toolbar_visible(31.0, false));
+        assert!(!is_toolbar_visible(32.0, false));
+        assert!(is_toolbar_visible(200.0, true));
         assert!(!super::point_in_logical_render((-1.0, 300.0), (800, 600)));
         assert!(!super::point_in_logical_render((400.0, 600.0), (800, 600)));
         assert!(super::point_in_logical_render((799.0, 599.0), (800, 600)));
