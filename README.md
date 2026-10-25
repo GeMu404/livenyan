@@ -56,7 +56,8 @@ un archivo `.toml` dentro de la carpeta `translations` junto al juego (por ejemp
 `translations/es.toml`, `translations/en.toml`). Opcionalmente agrega `name = "Español"` junto a
 `version = 1` para mostrar un nombre legible en el selector. Al iniciar aparecerá un selector con
 esos idiomas y la opción original; si no encuentra catálogos con traducciones, el juego inicia
-normalmente. El cargador ignora IDs que no correspondan a esos tipos de texto.
+normalmente. El primer idioma disponible queda seleccionado inicialmente; usa las flechas para
+elegir otro o la opción original. El cargador ignora IDs que no correspondan a esos tipos de texto.
 `--debug-layout` abre una ventana de diagnóstico con cajas por tipo de objeto y límites individuales
 de botones `.lpm`; oculta las imágenes y animaciones, pero conserva el texto del juego dentro de
 sus cajas con el mismo formato que en el renderizado normal.
@@ -91,7 +92,9 @@ a una mezcla simple para atenuar bloques y desgarros. No elimina los artefactos 
 El mismo modo puede procesar vídeos WMV solo cuando son opacos y ocupan exactamente la pantalla
 lógica; usa sus timestamps para situar el punto medio y omite el Optical Flow en cuadros duplicados.
 Los demás vídeos mantienen su reproducción normal. Esto agrega trabajo síncrono al cambiar de cuadro
-y puede bajar los FPS; si ocurre, desactívalo desde Opciones.
+y puede bajar los FPS; si ocurre, desactívalo desde Opciones. Las texturas SDL de imágenes y todos
+los cuadros GAL comparten una caché GPU LRU de hasta 256 MiB; los recursos recientes se liberan al
+cambiar de escena para limitar el crecimiento de memoria.
 
 La prueba sintética procesa dos cuadros de 800×600 con una máscara de 48×48 desplazada 12 px sobre
 un fondo fijo: en una RTX 4060 el flujo medio local devuelve (12.00, 0.03) px y el shader reconstruye

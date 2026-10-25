@@ -25,8 +25,12 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
 
+const IMAGE_TEXTURE_CACHE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
 struct Gfx {
     images: HashMap<String, (Texture, u32, u32)>,
+    image_texture_cache: HashMap<String, ImageTextureCacheEntry>,
+    image_texture_cache_clock: u64,
     video_textures: HashMap<String, (Texture, u64, u64, u32, u32)>,
     video_previous_textures: HashMap<String, (u64, u64, Texture, u32, u32)>,
     texts: HashMap<String, (u64, usize, Texture)>,
@@ -45,6 +49,11 @@ struct Gfx {
     video_optical_flow_failures: HashSet<String>,
     animation_delays: HashMap<String, Vec<u32>>,
     menu: Option<MenuCache>,
+}
+
+struct ImageTextureCacheEntry {
+    bytes: usize,
+    last_used: u64,
 }
 
 #[cfg(feature = "nvidia-optical-flow")]
@@ -95,6 +104,56 @@ fn fps_meter_option_rect(width: u32) -> FRect {
 
 fn export_texts_option_rect(width: u32) -> FRect {
     FRect::new(width as f32 - 328.0, 164.0, 310.0, 26.0)
+}
+
+fn image_texture_cache_evictions(
+    cache: &HashMap<String, ImageTextureCacheEntry>,
+    required_bytes: usize,
+    protected_source: &str,
+) -> Vec<String> {
+    let mut total_bytes = cache
+        .values()
+        .fold(0usize, |total, entry| total.saturating_add(entry.bytes));
+    let mut candidates = cache
+        .iter()
+        .filter(|(source, _)| source.as_str() != protected_source)
+        .map(|(source, entry)| (source.clone(), entry.last_used, entry.bytes))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, last_used, _)| *last_used);
+
+    let mut evictions = Vec::new();
+    for (source, _, bytes) in candidates {
+        if total_bytes.saturating_add(required_bytes) <= IMAGE_TEXTURE_CACHE_LIMIT_BYTES {
+            break;
+        }
+        total_bytes = total_bytes.saturating_sub(bytes);
+        evictions.push(source);
+    }
+    evictions
+}
+
+fn evict_image_texture_sources(gfx: &mut Gfx, sources: &[String]) {
+    for source in sources {
+        let frame_prefix = format!("{source}#");
+        gfx.images
+            .retain(|key, _| key != source && !key.starts_with(&frame_prefix));
+        gfx.image_texture_cache.remove(source);
+        gfx.animation_delays.remove(source);
+        log::debug!("evicted cached image textures for {source}");
+    }
+}
+
+fn make_image_texture_cache_room(gfx: &mut Gfx, required_bytes: usize, protected_source: &str) {
+    let evictions =
+        image_texture_cache_evictions(&gfx.image_texture_cache, required_bytes, protected_source);
+    evict_image_texture_sources(gfx, &evictions);
+}
+
+fn touch_image_texture_source(gfx: &mut Gfx, source: &str) {
+    gfx.image_texture_cache_clock = gfx.image_texture_cache_clock.saturating_add(1);
+    if let Some(entry) = gfx.image_texture_cache.get_mut(source) {
+        entry.last_used = gfx.image_texture_cache_clock;
+    }
 }
 
 fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<ToolbarAction> {
@@ -526,6 +585,32 @@ fn language_picker_rects(
     (panel, rows)
 }
 
+fn default_language_selection(language_count: usize) -> usize {
+    usize::from(language_count > 0)
+}
+
+fn apply_language_selection(
+    vm: &mut Vm,
+    languages: &[crate::text_export::LanguageCatalog],
+    selection: usize,
+) {
+    if let Some(language) = selection
+        .checked_sub(1)
+        .and_then(|index| languages.get(index))
+    {
+        vm.set_translations(language.translations.clone());
+        log::info!(
+            "selected translation catalog {} ({}) with {} entries",
+            language.name,
+            language.code,
+            language.translations.len()
+        );
+    } else {
+        vm.set_translations(HashMap::new());
+        log::info!("selected original game text");
+    }
+}
+
 fn draw_language_picker(
     canvas: &mut Canvas<Window>,
     tc: &TextureCreator<WindowContext>,
@@ -908,6 +993,8 @@ pub fn run(
     let mut pump = sdl.event_pump().map_err(|e| e.to_string())?;
     let mut gfx = Gfx {
         images: HashMap::new(),
+        image_texture_cache: HashMap::new(),
+        image_texture_cache_clock: 0,
         video_textures: HashMap::new(),
         video_previous_textures: HashMap::new(),
         texts: HashMap::new(),
@@ -935,7 +1022,7 @@ pub fn run(
     let mut last_dbg = -1000.0f64;
     let mut options_open = false;
     let mut language_picker_open = !languages.is_empty() && snapshot.is_none();
-    let mut language_selection = 0usize;
+    let mut language_selection = default_language_selection(languages.len());
     let mut export_status: Option<String> = None;
     let mut fps_meter_enabled = cfg.window.fps_meter;
     let mut fps_epoch = Instant::now();
@@ -1019,11 +1106,7 @@ pub fn run(
                                 language_selection = (language_selection + 1).min(languages.len());
                             }
                             sdl3::keyboard::Keycode::Return | sdl3::keyboard::Keycode::KpEnter => {
-                                if language_selection > 0 {
-                                    vm.set_translations(
-                                        languages[language_selection - 1].translations.clone(),
-                                    );
-                                }
+                                apply_language_selection(&mut vm, &languages, language_selection);
                                 language_picker_open = false;
                             }
                             sdl3::keyboard::Keycode::Escape => {
@@ -1148,9 +1231,7 @@ pub fn run(
                                 && y < rect.y + rect.h)
                                 .then_some(*index)
                         }) {
-                            if index > 0 {
-                                vm.set_translations(languages[index - 1].translations.clone());
-                            }
+                            apply_language_selection(&mut vm, &languages, index);
                             language_selection = index;
                             language_picker_open = false;
                         }
@@ -2259,46 +2340,75 @@ fn image_for(
     filter: ScaleMode,
 ) -> Option<String> {
     let name = assets.data().resolve(src, IMAGE_EXTS)?;
-    if !gfx.images.contains_key(&name) {
-        if let Some(Asset::Image(img)) = assets.try_get(&name) {
-            gfx.animation_delays
-                .insert(name.clone(), img.delays.clone());
-            if log::log_enabled!(log::Level::Debug) {
-                let n = (img.w * img.h).max(1) as u64;
-                let asum: u64 = img.rgba.chunks_exact(4).map(|p| p[3] as u64).sum();
-                let rgbsum: u64 = img
-                    .rgba
-                    .chunks_exact(4)
-                    .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
-                    .sum();
-                log::debug!(
-                    "texture {name}: {}x{} avg alpha {} avg rgb {} first px {:?}",
-                    img.w,
-                    img.h,
-                    asum / n,
-                    rgbsum / (3 * n),
-                    img.rgba.get(0..4)
-                );
+    if gfx.images.contains_key(&name) {
+        touch_image_texture_source(gfx, &name);
+        return Some(name);
+    }
+
+    let Some(Asset::Image(img)) = assets.try_get(&name) else {
+        return None;
+    };
+    let pixels_per_frame = (img.w as usize)
+        .saturating_mul(img.h as usize)
+        .saturating_mul(4);
+    let estimated_bytes = pixels_per_frame.saturating_mul(img.frames.len().saturating_add(1));
+    make_image_texture_cache_room(gfx, estimated_bytes, &name);
+    gfx.animation_delays
+        .insert(name.clone(), img.delays.clone());
+    if log::log_enabled!(log::Level::Debug) {
+        let n = (img.w * img.h).max(1) as u64;
+        let asum: u64 = img.rgba.chunks_exact(4).map(|p| p[3] as u64).sum();
+        let rgbsum: u64 = img
+            .rgba
+            .chunks_exact(4)
+            .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
+            .sum();
+        log::debug!(
+            "texture {name}: {}x{} avg alpha {} avg rgb {} first px {:?}",
+            img.w,
+            img.h,
+            asum / n,
+            rgbsum / (3 * n),
+            img.rgba.get(0..4)
+        );
+    }
+    let t = upload(tc, img.w, img.h, &img.rgba, filter)?;
+    let mut uploaded_bytes = pixels_per_frame;
+    gfx.images.insert(name.clone(), (t, img.w, img.h));
+    for (i, frame) in img.frames.iter().enumerate() {
+        match upload_with_error(tc, img.w, img.h, frame, filter) {
+            Ok(texture) => {
+                gfx.images
+                    .insert(format!("{name}#{}", i + 1), (texture, img.w, img.h));
+                uploaded_bytes = uploaded_bytes.saturating_add(pixels_per_frame);
             }
-            let t = upload(tc, img.w, img.h, &img.rgba, filter)?;
-            gfx.images.insert(name.clone(), (t, img.w, img.h));
-            // frames de animación GAL como texturas "nombre#i"
-            for (i, f) in img.frames.iter().enumerate() {
-                if let Some(t) = upload(tc, img.w, img.h, f, filter) {
-                    gfx.images
-                        .insert(format!("{name}#{}", i + 1), (t, img.w, img.h));
-                }
+            Err(error) => {
+                log::warn!("cannot cache GAL texture {name} frame {}: {error}", i + 1);
             }
-            if !img.frames.is_empty() {
-                log::debug!(
-                    "texture {name}: {} animation frames, delays {:?}",
-                    img.frames.len() + 1,
-                    img.delays
-                );
-            }
-        } else {
-            return None;
         }
+    }
+    gfx.image_texture_cache_clock = gfx.image_texture_cache_clock.saturating_add(1);
+    let last_used = gfx.image_texture_cache_clock;
+    gfx.image_texture_cache.insert(
+        name.clone(),
+        ImageTextureCacheEntry {
+            bytes: uploaded_bytes,
+            last_used,
+        },
+    );
+    if uploaded_bytes > IMAGE_TEXTURE_CACHE_LIMIT_BYTES {
+        log::warn!(
+            "image texture set {name} uses {} MiB, exceeding the {} MiB GPU cache budget",
+            uploaded_bytes / (1024 * 1024),
+            IMAGE_TEXTURE_CACHE_LIMIT_BYTES / (1024 * 1024)
+        );
+    }
+    if !img.frames.is_empty() {
+        log::debug!(
+            "texture {name}: {} animation frames, delays {:?}",
+            img.frames.len() + 1,
+            img.delays
+        );
     }
     Some(name)
 }
@@ -3826,7 +3936,8 @@ mod tests {
     #[cfg(feature = "nvidia-optical-flow")]
     use super::rgba_frame_is_opaque;
     use super::{
-        add_rect_to_bounds, edit_key_code, gal_animation_frame, inferred_mask_group,
+        ImageTextureCacheEntry, add_rect_to_bounds, default_language_selection, edit_key_code,
+        gal_animation_frame, image_texture_cache_evictions, inferred_mask_group,
         interpolation_group_key, is_toolbar_visible, menu_geometry, menu_hit,
         should_interpolate_gal, toolbar_hit,
     };
@@ -3893,6 +4004,45 @@ mod tests {
         assert!(!super::point_in_logical_render((-1.0, 300.0), (800, 600)));
         assert!(!super::point_in_logical_render((400.0, 600.0), (800, 600)));
         assert!(super::point_in_logical_render((799.0, 599.0), (800, 600)));
+    }
+
+    #[test]
+    fn language_picker_defaults_to_first_translation_when_available() {
+        assert_eq!(default_language_selection(0), 0);
+        assert_eq!(default_language_selection(1), 1);
+        assert_eq!(default_language_selection(3), 1);
+    }
+
+    #[test]
+    fn image_texture_cache_evicts_least_recently_used_sources_first() {
+        let cache = HashMap::from([
+            (
+                "old".to_string(),
+                ImageTextureCacheEntry {
+                    bytes: 100 * 1024 * 1024,
+                    last_used: 1,
+                },
+            ),
+            (
+                "recent".to_string(),
+                ImageTextureCacheEntry {
+                    bytes: 100 * 1024 * 1024,
+                    last_used: 2,
+                },
+            ),
+            (
+                "current".to_string(),
+                ImageTextureCacheEntry {
+                    bytes: 100 * 1024 * 1024,
+                    last_used: 3,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            image_texture_cache_evictions(&cache, 100 * 1024 * 1024, "current"),
+            vec!["old", "recent"]
+        );
     }
 
     #[test]
