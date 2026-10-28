@@ -98,13 +98,15 @@ impl Vm {
                         flush(&mut plan, &mut cur);
                         plan.push(Pending::Click);
                     }
-                    // <PG> es cambio de página (docs/livenovel/text.html, 「改ページ」).
-                    // El clic de lectura en test2 es el evento {PAUSE}; después van
-                    // TEXTCLEAR y este PAGE. Otro clic aquí obligaba a pulsar dos veces.
+                    // <PG>: docs/livenovel/script.html — show cursor, wait for click,
+                    // then page break. Distinct from <CLR> (clear only) and from the
+                    // LiveNovel {PAUSE} system event, which is a Notify, not this glyph.
                     brk::PAGE => {
                         flush(&mut plan, &mut cur);
+                        plan.push(Pending::Click);
                         plan.push(Pending::Clear);
                     }
+                    // <CLR> / other breaks: clear without an implied click-wait.
                     _ => {
                         flush(&mut plan, &mut cur);
                         plan.push(Pending::Clear);
@@ -924,8 +926,9 @@ mod tests {
             Kind::Message,
             HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
         );
-        // {PAUSE} espera el clic. <PG> solo limpia; no hay un segundo clic.
-        // WAITPLAY CLICK solo si el objetivo sigue en curso.
+        // {PAUSE} (system Notify) waits for click. This plan then uses Clear (like
+        // <CLR>), not a <PG> glyph — so there is no second click-wait.
+        // WAITPLAY CLICK only waits while the target is still busy.
         let mut plan = VecDeque::new();
         plan.push_back(Pending::Text {
             items: vec![TextItem::Char("あ".into())],
@@ -974,6 +977,77 @@ mod tests {
         assert!(
             !vm.plays.contains_key("msg"),
             "MESEND should finish playback without an extra click"
+        );
+    }
+
+    #[test]
+    fn page_break_glyph_waits_for_click_then_clears() {
+        // docs/livenovel/script.html <PG>: wait for click, then page break.
+        use crate::lsb::tpword::{TpWord, brk};
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
+        );
+        let tw = TpWord {
+            version: 105,
+            body: vec![
+                Glyph::Char {
+                    ch: "a".into(),
+                    decorator: -1,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Return { kind: brk::PAGE },
+            ],
+            ..TpWord::default()
+        };
+        vm.run_text("msg", &tw, true, false, false);
+        vm.update(0.0, 0);
+        assert!(
+            vm.wants_click(),
+            "<PG> must wait for a click after showing text"
+        );
+        assert!(vm.plays.contains_key("msg"));
+        vm.click();
+        vm.update(16.0, 0);
+        assert!(
+            !vm.wants_click(),
+            "click should release the <PG> wait"
+        );
+        assert!(
+            !vm.plays.contains_key("msg"),
+            "page break should finish playback after the click"
+        );
+        let text = vm
+            .scene
+            .get("msg")
+            .map(|obj| obj.str(Prop::TEXT))
+            .unwrap_or_default();
+        assert!(
+            text.is_empty(),
+            "page break clears the message after the click, got {text:?}"
         );
     }
 
