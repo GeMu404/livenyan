@@ -405,7 +405,42 @@ pub struct Vm {
     ended_unnotified: std::collections::HashSet<String>,
     /// Targets de Flip con Delete diferido hasta el fin de WaitUntil.
     flip_pending_delete: Vec<String>,
+    /// `<TEXTSPD>` / `TXSP*`: ms/carácter y si es ABSOLUTE (script.html).
+    /// Clave = caja de mensaje. **inventado:** baseline relativo = 60 cps
+    /// (`TextCfg::speed_cps` por defecto).
+    text_char_ms: HashMap<String, TextSpeedOverride>,
+    /// `<QUAKE>` / `<STOPQUAKE>` (script.html): offset de dibujo por objeto o global.
+    quake: Option<QuakeState>,
 }
+
+/// Override de velocidad de texto desde tags LiveNovel.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextSpeedOverride {
+    /// Ms por carácter; `<= 0` = sin espera.
+    pub ms: f64,
+    /// `true` = ignora la opción de velocidad del jugador (ABSOLUTE ON).
+    pub absolute: bool,
+}
+
+/// Estado de temblor de pantalla/objetos.
+#[derive(Debug, Clone)]
+pub(crate) struct QuakeState {
+    /// Nombres a mover; vacío = offset global de escena.
+    pub names: Vec<String>,
+    /// Q=random, W=wave, B=bounce (script.html).
+    pub kind: char,
+    pub random_phase: bool,
+    pub amp_x: f64,
+    pub amp_y: f64,
+    pub started_at: f64,
+    pub until: f64,
+    pub cycle_ms: f64,
+    /// Si `Some`, amortigua hasta ese instante (STOPQUAKE TIME).
+    pub stop_until: Option<f64>,
+}
+
+/// Baseline cps para TEXTSPD relativo (**inventado en livenyan**, = default config).
+pub(crate) const TEXT_SPEED_BASELINE_CPS: f64 = 60.0;
 
 /// Ranuras de `@KeyPush` / `@KeyClick` / `@KeyRepeat` (códigos de tecla de Windows).
 const KEY_SLOTS: usize = 512;
@@ -527,6 +562,8 @@ impl Vm {
             placeholders: Default::default(),
             ended_unnotified: Default::default(),
             flip_pending_delete: Vec::new(),
+            text_char_ms: HashMap::new(),
+            quake: None,
         };
         vm.prefetch_from(&script, 0);
         vm.frames.push(Frame {
@@ -1114,6 +1151,13 @@ impl Vm {
     pub fn update(&mut self, now: f64, budget: usize) -> usize {
         self.now = now;
         self.scene.update(now);
+        if self
+            .quake
+            .as_ref()
+            .is_some_and(|q| now >= q.until || q.stop_until.is_some_and(|s| now >= s))
+        {
+            self.quake = None;
+        }
         self.update_plays();
         if let State::WaitUntil { until, skippable } = self.state {
             // StopEvent 0: el skip de teclado no corta esta espera (step_wait).
@@ -2535,12 +2579,20 @@ impl Env for Vm {
                 let caption = crate::save::read_save_caption(&self.save_dir, slot);
                 Value::Str(caption)
             }
+            // script.html `<OPENURL>` / calc OPENURL: abrir en el navegador del SO.
+            Func::OPENURL => {
+                let url = a.first().map(Value::as_str).unwrap_or_default();
+                Value::Bool(open_external_url(&url))
+            }
+            // SETWALLPAPER: sin API de escritorio aquí → éxito vacío (**inventado** no-op).
+            Func::SETWALLPAPER => Value::Bool(true),
             // SaveScreen: captura a .gal / mem: / save: (manual). Sin encoder GAL aún:
             // no-op que reporta éxito para no romper ■ロード/セーブ. CopyFile igual.
             Func::SAVESCREEN | Func::COPYFILE => Value::Bool(true),
             _ => return None,
         })
     }
+
     fn random(&mut self) -> f64 {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
@@ -2554,6 +2606,84 @@ impl Env for Vm {
             key.to_string()
         };
         self.warn(&k, msg);
+    }
+}
+
+impl Vm {
+    /// Offset de dibujo por `<QUAKE>` (0,0 si no aplica).
+    pub fn quake_draw_offset(&self, name: &str) -> (f64, f64) {
+        let Some(q) = self.quake.as_ref() else {
+            return (0.0, 0.0);
+        };
+        if self.now >= q.until {
+            return (0.0, 0.0);
+        }
+        if !q.names.is_empty() && !q.names.iter().any(|n| n == name) {
+            return (0.0, 0.0);
+        }
+        let t = (self.now - q.started_at).max(0.0);
+        let amp_scale = if let Some(stop_at) = q.stop_until {
+            if self.now >= stop_at {
+                return (0.0, 0.0);
+            }
+            // STOPQUAKE: amortiguar en TIME ms (**inventado**: escala lineal al deadline).
+            ((stop_at - self.now) / (stop_at - q.started_at).max(1.0)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let cycle = q.cycle_ms.max(1.0);
+        let phase = if q.random_phase {
+            // desfase estable por nombre
+            let h = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            t + f64::from(h % 1000)
+        } else {
+            t
+        };
+        let (ax, ay) = (q.amp_x * amp_scale, q.amp_y * amp_scale);
+        let (dx, dy) = match q.kind {
+            'W' => {
+                let w = std::f64::consts::TAU * (phase / cycle);
+                (ax * w.sin(), ay * w.sin())
+            }
+            'B' => {
+                // rebote: abs(sin)
+                let w = std::f64::consts::TAU * (phase / cycle);
+                (0.0, ay * w.sin().abs())
+            }
+            _ => {
+                // Q: pseudo-aleatorio acotado (**inventado**: hash del tiempo)
+                let n = ((phase * 12.9898).sin() * 43758.5453).fract();
+                let m = ((phase * 78.233).sin() * 43758.5453).fract();
+                (ax * (n * 2.0 - 1.0), ay * (m * 2.0 - 1.0))
+            }
+        };
+        (dx, dy)
+    }
+}
+
+/// Abre una URL con el manejador del sistema. **fuente primaria** script.html OPENURL.
+pub(crate) fn open_external_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().is_ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .is_ok()
     }
 }
 

@@ -285,7 +285,26 @@ impl Vm {
     /// Avanza la reproducción de texto de todos los objetos de mensaje.
     pub(crate) fn update_plays(&mut self) {
         let cps_of = |vm: &Self, name: &str| -> f64 {
-            if vm.opts.text_cps <= 0.0 || vm.skip {
+            if vm.skip {
+                return f64::INFINITY;
+            }
+            // script.html `<TEXTSPD TIME>`: ms/carácter (ABSOLUTE ignora la opción).
+            if let Some(over) = vm.text_char_ms.get(name) {
+                if over.ms <= 0.0 {
+                    return f64::INFINITY;
+                }
+                let base = 1000.0 / over.ms;
+                return if over.absolute {
+                    base
+                } else if vm.opts.text_cps <= 0.0 {
+                    f64::INFINITY
+                } else {
+                    // relativo: TIME a velocidad baseline; la opción escala.
+                    // **inventado:** baseline = TEXT_SPEED_BASELINE_CPS (60).
+                    base * (vm.opts.text_cps as f64 / super::TEXT_SPEED_BASELINE_CPS)
+                };
+            }
+            if vm.opts.text_cps <= 0.0 {
                 return f64::INFINITY;
             }
             // docs/livenovel/text.html PR_TEXTDELAY: 256 equis, 0 y -1 sin espera.

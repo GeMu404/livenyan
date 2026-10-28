@@ -741,6 +741,134 @@ impl Vm {
                     });
                 }
             }
+            // script.html: ms/carácter; ABSOLUTE ON ignora la opción del jugador.
+            // Args observados como otros tags: [TIME, ABSOLUTE?] (**no confirmado** orden).
+            "TEXTSPD" => {
+                let ms = args
+                    .first()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let absolute = args
+                    .get(1)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("ON") || s == "1");
+                self.text_char_ms.insert(
+                    boxname.to_string(),
+                    super::TextSpeedOverride { ms, absolute },
+                );
+            }
+            "TXSPF" => {
+                // ノーウエイト
+                self.text_char_ms.insert(
+                    boxname.to_string(),
+                    super::TextSpeedOverride {
+                        ms: 0.0,
+                        absolute: true,
+                    },
+                );
+            }
+            "TXSPN" => {
+                // 標準値
+                self.text_char_ms.remove(boxname);
+                if let Some(obj) = self.scene.get_mut(boxname) {
+                    obj.props.insert(Prop::TEXTDELAY, Value::Int(256));
+                }
+            }
+            "TXSPS" => {
+                // スロー — ratio no documentado: 3× el periodo baseline (**inventado**).
+                let ms = 1000.0 / super::TEXT_SPEED_BASELINE_CPS * 3.0;
+                self.text_char_ms.insert(
+                    boxname.to_string(),
+                    super::TextSpeedOverride {
+                        ms,
+                        absolute: false,
+                    },
+                );
+            }
+            // Permisos de menú/save: el novel system reacciona vía ONNOTIFY (como MESON).
+            "SYSMENUON" | "SYSMENUOFF" | "SAVELOADON" | "SAVELOADOFF" => {
+                self.fire(boxname, Prop::ONNOTIFY, vec![Value::Str(name.to_string())]);
+            }
+            "OPENURL" => {
+                let url = args.first().map(String::as_str).unwrap_or("");
+                if !super::open_external_url(url) {
+                    self.warn(
+                        "openurl",
+                        &format!("OPENURL failed for {url:?}"),
+                    );
+                }
+            }
+            "WALLPAPER" => {
+                // Escritorio del SO: sin API → ignorar con aviso (script.html).
+                self.warn(
+                    "unimpl:text sysevent WALLPAPER",
+                    "WALLPAPER ignored (no desktop wallpaper API)",
+                );
+            }
+            // script.html WAITFOR: esperar a que termine el componente.
+            "WAITFOR" => {
+                let click_abort = args
+                    .get(1)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("ON") || s == "1");
+                let Some(target) = args.first().filter(|t| !t.is_empty()) else {
+                    return;
+                };
+                if !self.effect_busy(target) {
+                    return;
+                }
+                let deadline = self.now + 3_600_000.0;
+                if let Some(playback) = self.plays.get_mut(boxname) {
+                    playback.wait_for = Some((target.clone(), deadline));
+                    playback.click_skips_wait = click_abort;
+                }
+            }
+            "QUAKE" => {
+                // Args: NAME, TYPE, RANDOM, X, Y, TIME, CYCLE (**no confirmado** orden exacto;
+                // alineado al orden del tag en script.html).
+                let names: Vec<String> = args
+                    .first()
+                    .map(|s| {
+                        s.split(',')
+                            .map(str::trim)
+                            .filter(|n| !n.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let kind = args
+                    .get(1)
+                    .and_then(|s| s.chars().next())
+                    .unwrap_or('Q')
+                    .to_ascii_uppercase();
+                let random_phase = args
+                    .get(2)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("ON") || s == "1");
+                let amp_x: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let amp_y: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let time: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let cycle: f64 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(100.0);
+                self.quake = Some(super::QuakeState {
+                    names,
+                    kind,
+                    random_phase,
+                    amp_x,
+                    amp_y,
+                    started_at: self.now,
+                    until: self.now + time.max(0.0),
+                    cycle_ms: cycle.max(1.0),
+                    stop_until: None,
+                });
+            }
+            "STOPQUAKE" => {
+                let time = args.first().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                if let Some(q) = self.quake.as_mut() {
+                    if time <= 0.0 {
+                        self.quake = None;
+                    } else {
+                        q.stop_until = Some(self.now + time);
+                        q.until = q.until.max(self.now + time);
+                    }
+                }
+            }
             "" => {}
             _ => {
                 self.warn(
@@ -763,6 +891,38 @@ mod tests {
     use crate::scene::{Kind, TextItem};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn textspd_and_txspf_set_speed_override() {
+        // script.html TEXTSPD / TXSPF
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&path).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 60.0,
+                lookahead: 0,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.system_text_event("msg", "TEXTSPD", &["50".into(), "ON".into()]);
+        let over = vm.text_char_ms.get("msg").copied().expect("TEXTSPD");
+        assert!((over.ms - 50.0).abs() < f64::EPSILON);
+        assert!(over.absolute);
+        vm.system_text_event("msg", "TXSPF", &[]);
+        assert_eq!(vm.text_char_ms["msg"].ms, 0.0);
+        vm.system_text_event("msg", "TXSPN", &[]);
+        assert!(!vm.text_char_ms.contains_key("msg"));
+    }
 
     #[test]
     fn history_count_and_group_index_are_available() {

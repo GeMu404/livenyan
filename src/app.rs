@@ -3698,7 +3698,10 @@ fn draw_scene(
     let mut active_videos = HashSet::new();
     let mut drawn: Vec<Drawn> = Vec::with_capacity(order.len());
     for (z, o) in order.iter().enumerate() {
-        let (x, y) = vm.scene.abs_pos(o);
+        let (x0, y0) = vm.scene.abs_pos(o);
+        // NAME vacío en QUAKE = todos los objetos (script.html).
+        let (qx, qy) = vm.quake_draw_offset(&o.name);
+        let (x, y) = (x0 + qx, y0 + qy);
         let alpha = o.int(Prop::ALPHA, 255).clamp(0, 255) as u8;
         let (ow, oh) = (o.int(Prop::WIDTH, 0), o.int(Prop::HEIGHT, 0));
         drawn.push(Drawn {
