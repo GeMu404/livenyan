@@ -101,19 +101,19 @@ impl Vm {
                     .map_err(|e| format!("{file}: {e}"))
             })
             .and_then(|data| {
-                let (native_w, native_h) = crate::video::probe_size(&data)?;
+                let repeat = props.get(&Prop::REPEAT).is_some_and(Value::truthy);
+                // Un solo temp: probe nativo + decode sin scale.
+                let (decoder, native_w, native_h) = crate::video::Decoder::start(
+                    &data,
+                    crate::video::OutputSize::Source,
+                    repeat,
+                )?;
                 // Igual que Image: WIDTH/ORIG = fuente; zoom en `placed_rect`.
                 props.insert(Prop::ORIGWIDTH, Value::Int(native_w as i64));
                 props.insert(Prop::ORIGHEIGHT, Value::Int(native_h as i64));
                 props.insert(Prop::WIDTH, Value::Int(native_w as i64));
                 props.insert(Prop::HEIGHT, Value::Int(native_h as i64));
-                crate::video::Decoder::start(
-                    &data,
-                    native_w,
-                    native_h,
-                    props.get(&Prop::REPEAT).is_some_and(Value::truthy),
-                )
-                .map(|decoder| (decoder, native_w, native_h))
+                Ok((decoder, native_w, native_h))
             });
         let playback = match decoder {
             Ok((decoder, width, height)) => {

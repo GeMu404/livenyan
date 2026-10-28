@@ -266,38 +266,47 @@ impl Vm {
         props.insert(Prop::REPEAT, Value::Bool(repeat));
         props.insert(Prop::VISIBLE, Value::Bool(true));
         props.insert(Prop::PLAYING, Value::Bool(false));
-        if let Some(file) = self.assets.data().resolve(&source, super::VIDEO_EXTS)
-            && let Ok(data) = self.assets.data().read(&file)
-            && let Ok((native_w, native_h)) = crate::video::probe_size(&data)
-        {
-            // Alineación L/C/R T/C/B (`script.html` <MOVIE>): sobre el tamaño ya
-            // zoomeado; WIDTH queda en fuente (como Image) para `placed_rect`.
-            let z = zoom as f64 / 256.0;
-            let dw = ((native_w as f64) * z).round().max(1.0) as i64;
-            let dh = ((native_h as f64) * z).round().max(1.0) as i64;
-            let (sw, sh) = (self.opts.screen.0 as i64, self.opts.screen.1 as i64);
-            let x = match args.get(2).map(String::as_str).unwrap_or("C") {
-                "C" => (sw - dw) / 2,
-                "R" => sw - dw,
-                "L" => 0,
-                other => other.parse().unwrap_or(0),
-            };
-            let y = match args.get(3).map(String::as_str).unwrap_or("C") {
-                "C" => (sh - dh) / 2,
-                "B" => sh - dh,
-                "T" => 0,
-                other => other.parse().unwrap_or(0),
-            };
-            props.insert(Prop::ORIGWIDTH, Value::Int(native_w as i64));
-            props.insert(Prop::ORIGHEIGHT, Value::Int(native_h as i64));
-            props.insert(Prop::WIDTH, Value::Int(native_w as i64));
-            props.insert(Prop::HEIGHT, Value::Int(native_h as i64));
-            props.insert(Prop::LEFT, Value::Int(x));
-            props.insert(Prop::TOP, Value::Int(y));
-        }
+        // Sin probe aquí: `restart_video` hace un solo temp+ffprobe; la
+        // alineación L/C/R·T/C/B se aplica después (`script.html` <MOVIE>).
         self.videos.remove(Self::TEXT_MOVIE);
         self.scene.create(Self::TEXT_MOVIE, Kind::Movie, props);
         Some(Self::TEXT_MOVIE.to_string())
+    }
+
+    /// Coloca el Movie de PLAYMOVIE según args X/Y una vez conocidos ORIG×ZOOM.
+    fn apply_playmovie_placement(&mut self, name: &str, args: &[String]) {
+        let Some(obj) = self.scene.get(name) else {
+            return;
+        };
+        if obj.props.contains_key(&Prop::LEFT) && obj.props.contains_key(&Prop::TOP) {
+            return;
+        }
+        let native_w = obj.int(Prop::ORIGWIDTH, 0);
+        let native_h = obj.int(Prop::ORIGHEIGHT, 0);
+        if native_w <= 0 || native_h <= 0 {
+            return;
+        }
+        let zoom = obj.int(Prop::ZOOMX, 256).max(1);
+        let z = zoom as f64 / 256.0;
+        let dw = ((native_w as f64) * z).round().max(1.0) as i64;
+        let dh = ((native_h as f64) * z).round().max(1.0) as i64;
+        let (sw, sh) = (self.opts.screen.0 as i64, self.opts.screen.1 as i64);
+        let x = match args.get(2).map(String::as_str).unwrap_or("C") {
+            "C" => (sw - dw) / 2,
+            "R" => sw - dw,
+            "L" => 0,
+            other => other.parse().unwrap_or(0),
+        };
+        let y = match args.get(3).map(String::as_str).unwrap_or("C") {
+            "C" => (sh - dh) / 2,
+            "B" => sh - dh,
+            "T" => 0,
+            other => other.parse().unwrap_or(0),
+        };
+        if let Some(obj) = self.scene.get_mut(name) {
+            obj.props.insert(Prop::LEFT, Value::Int(x));
+            obj.props.insert(Prop::TOP, Value::Int(y));
+        }
     }
 
     fn apply_playmovie_repeat(&mut self, name: &str, args: &[String]) {
@@ -381,6 +390,8 @@ impl Vm {
                     );
                     return;
                 }
+                // Solo si el objeto es nuevo (sin LEFT/TOP aún).
+                self.apply_playmovie_placement(&target, args);
                 if args.get(4).is_some_and(|mode| mode == "WAIT") && !self.skip && !self.opts.trace
                 {
                     let deadline = self.now + 3_600_000.0;

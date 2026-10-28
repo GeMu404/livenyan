@@ -24,7 +24,13 @@ impl Vm {
             .unwrap_or_default();
         let movie = if kind == CmdType::Cinema {
             match self.load_lcm_movie(&src) {
-                Ok(movie) => movie,
+                Ok(Some(movie)) => Some(movie),
+                Ok(None) => {
+                    log::warn!(
+                        "Cinema {name:?}: no LiveCinema .lcm for source {src:?} (missing or not .lcm)"
+                    );
+                    None
+                }
                 Err(e) => {
                     log::warn!("Cinema {name:?}: cannot load movie: {e}");
                     None

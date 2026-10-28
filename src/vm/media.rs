@@ -217,13 +217,14 @@ impl Vm {
             .data()
             .read(&file)
             .map_err(|error| format!("{file}: {error}"))?;
-        let (native_w, native_h) = crate::video::probe_size(&data)?;
-        let decoder = crate::video::Decoder::start(
-            &data,
-            native_w,
-            native_h,
-            obj.get(Prop::REPEAT).is_some_and(Value::truthy),
-        )?;
+        let repeat = obj.get(Prop::REPEAT).is_some_and(Value::truthy);
+        // Si prepare/Movie ya dejó ORIG*, no reprobar ni reescalar.
+        let size = match (obj.int(Prop::ORIGWIDTH, 0), obj.int(Prop::ORIGHEIGHT, 0)) {
+            (w, h) if w > 0 && h > 0 => crate::video::OutputSize::KnownNative(w as u32, h as u32),
+            _ => crate::video::OutputSize::Source,
+        };
+        let (decoder, native_w, native_h) =
+            crate::video::Decoder::start(&data, size, repeat)?;
         self.video_generation = self.video_generation.wrapping_add(1);
         self.videos.insert(
             name.to_string(),
@@ -762,13 +763,21 @@ impl Vm {
                 *value = translated.clone();
             }
             if let crate::lcm::TrackContent::Image(media) = &mut clip.content {
-                let resource = self
+                match self
                     .assets
                     .data()
                     .resolve_relative(&name, media, IMAGE_EXTS)
-                    .ok_or_else(|| format!("{name}: LCM image not found: {media:?}"))?;
-                self.assets.request(&resource);
-                *media = resource;
+                {
+                    Some(resource) => {
+                        self.assets.request(&resource);
+                        *media = resource;
+                    }
+                    None => {
+                        // Un clip sin asset no tumba el cinema (logo/menú suelen ser multi-pista).
+                        log::warn!("{name}: LCM image not found for clip {clip_index}: {media:?}");
+                        clip.content = crate::lcm::TrackContent::Opaque;
+                    }
+                }
             }
         }
         Ok(Some(movie))

@@ -25,6 +25,16 @@ pub struct DecodedFrame {
     pub duplicate: bool,
 }
 
+/// Tamaño de salida del decoder.
+pub enum OutputSize {
+    /// Escalar/pad a este tamaño (tests / override explícito).
+    Exact(u32, u32),
+    /// Probe + frames a tamaño nativo (sin scale).
+    Source,
+    /// Tamaño nativo ya conocido (sin probe ni scale).
+    KnownNative(u32, u32),
+}
+
 pub struct Decoder {
     frames: Receiver<Message>,
     first_frame: Option<DecodedFrame>,
@@ -33,16 +43,18 @@ pub struct Decoder {
     temp_file: PathBuf,
 }
 
-/// Ancho×alto nativos del primer stream de vídeo (ffprobe).
-/// **fuente primaria:** Movie no tiene PR_WIDTH/HEIGHT (`docs/livenovel/media.html`);
-/// el tamaño base es el del archivo (`liveVideoGetSourceWidth/Height`).
+/// Ancho×alto nativos (ffprobe ligero). Preferir [`Decoder::start`] con
+/// [`OutputSize::Source`] en el hot path para no escribir el temp dos veces.
 pub fn probe_size(data: &[u8]) -> Result<(u32, u32), String> {
     let temp_file = create_temp_video(data)?;
     let result = probe_file(&temp_file);
     if let Err(e) = std::fs::remove_file(&temp_file)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        log::warn!("cannot remove temporary video {}: {e}", temp_file.display());
+        log::warn!(
+            "cannot remove temporary video {}: {e}",
+            temp_file.display()
+        );
     }
     result
 }
@@ -52,6 +64,10 @@ fn probe_file(path: &PathBuf) -> Result<(u32, u32), String> {
         .args([
             "-v",
             "error",
+            "-probesize",
+            "32768",
+            "-analyzeduration",
+            "0",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -90,15 +106,44 @@ fn probe_file(path: &PathBuf) -> Result<(u32, u32), String> {
 }
 
 impl Decoder {
-    pub fn start(data: &[u8], width: u32, height: u32, repeat: bool) -> Result<Self, String> {
-        if width == 0 || height == 0 {
-            return Err("video output size must be nonzero".into());
-        }
+    /// Escribe el asset una sola vez, resuelve tamaño, arranca ffmpeg y espera el 1.er frame.
+    /// Devuelve `(decoder, width, height)` de los frames RGBA.
+    pub fn start(
+        data: &[u8],
+        size: OutputSize,
+        repeat: bool,
+    ) -> Result<(Self, u32, u32), String> {
+        let temp_file = create_temp_video(data)?;
+        let (width, height, do_scale) = match size {
+            OutputSize::Exact(width, height) => {
+                if width == 0 || height == 0 {
+                    let _ = std::fs::remove_file(&temp_file);
+                    return Err("video output size must be nonzero".into());
+                }
+                (width, height, true)
+            }
+            OutputSize::KnownNative(width, height) => {
+                if width == 0 || height == 0 {
+                    let _ = std::fs::remove_file(&temp_file);
+                    return Err("video output size must be nonzero".into());
+                }
+                (width, height, false)
+            }
+            OutputSize::Source => match probe_file(&temp_file) {
+                Ok((w, h)) => (w, h, false),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp_file);
+                    return Err(e);
+                }
+            },
+        };
         let frame_bytes = (width as usize)
             .checked_mul(height as usize)
             .and_then(|size| size.checked_mul(4))
-            .ok_or_else(|| "video output size is too large".to_string())?;
-        let temp_file = create_temp_video(data)?;
+            .ok_or_else(|| {
+                let _ = std::fs::remove_file(&temp_file);
+                "video output size is too large".to_string()
+            })?;
         let (sender, frames) = mpsc::sync_channel(2);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -112,6 +157,7 @@ impl Decoder {
                     height,
                     frame_bytes,
                     repeat,
+                    do_scale,
                     sender,
                     thread_stop,
                 );
@@ -148,7 +194,7 @@ impl Decoder {
                 return Err("video decoder stopped before producing its first frame".into());
             }
         }
-        Ok(decoder)
+        Ok((decoder, width, height))
     }
 
     pub fn try_recv(&mut self) -> Result<Message, TryRecvError> {
@@ -211,17 +257,32 @@ fn decode_frames(
     height: u32,
     frame_bytes: usize,
     repeat: bool,
+    scale: bool,
     sender: SyncSender<Message>,
     stop: Arc<AtomicBool>,
 ) {
     let mut command = Command::new("ffmpeg");
-    command.args(["-hide_banner", "-loglevel", "info", "-nostdin"]);
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-nostdin",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
+    ]);
     if repeat {
         command.args(["-stream_loop", "-1"]);
     }
-    let filter = format!(
-        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,showinfo"
-    );
+    // Nativo: solo conversión de pixel format (más barato que scale+pad).
+    let filter = if scale {
+        format!(
+            "scale={width}:{height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=rgba,showinfo"
+        )
+    } else {
+        "format=rgba,showinfo".into()
+    };
     command
         .arg("-i")
         .arg(path)
@@ -383,7 +444,7 @@ fn send_message(sender: &SyncSender<Message>, mut message: Message, stop: &Atomi
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoder, Message};
+    use super::{Decoder, Message, OutputSize};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -425,7 +486,8 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
 
-        let mut decoder = Decoder::start(&data, 8, 8, false).unwrap();
+        let (mut decoder, w, h) = Decoder::start(&data, OutputSize::Exact(8, 8), false).unwrap();
+        assert_eq!((w, h), (8, 8));
         let Message::Frame(frame) = decoder.try_recv().unwrap() else {
             panic!("decoder did not provide its prefetched first frame");
         };
@@ -451,6 +513,53 @@ mod tests {
                 Err(error) => panic!("timed out waiting for the next video frame: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn decoder_source_size_skips_rescale() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+            || Command::new("ffprobe")
+                .arg("-version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_err()
+        {
+            eprintln!("ffmpeg/ffprobe unavailable; skipping source-size test");
+            return;
+        }
+        let path =
+            std::env::temp_dir().join(format!("livenyan-video-src-{}.mkv", std::process::id()));
+        let result = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=green:s=12x10:r=1:d=0.5",
+                "-c:v",
+                "ffv1",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("generate source-size test video");
+        assert!(result.status.success());
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let (mut decoder, w, h) = Decoder::start(&data, OutputSize::Source, false).unwrap();
+        assert_eq!((w, h), (12, 10));
+        let Message::Frame(frame) = decoder.try_recv().unwrap() else {
+            panic!("expected first frame");
+        };
+        assert_eq!(frame.pixels.len(), 12 * 10 * 4);
     }
 
     #[test]

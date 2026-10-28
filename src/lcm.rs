@@ -255,10 +255,9 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
     for index in 0..count as usize {
         let kind = r.take(1)?[0];
         let is_text = kind == 1;
-        let is_opaque_legacy = version < 112 && kind == 2;
-        if kind != 0 && !is_text && !is_opaque_legacy {
-            return Err(format!("unsupported LCM clip type {kind} at index {index}"));
-        }
+        // kind 0 = image, 1 = text; el resto (p. ej. 2 legacy / pistas no soportadas)
+        // se salta como opaco para no tumbar el cinema entero.
+        let skip_opaque = kind != 0 && !is_text;
         let previous_raw = r.int()?;
         if previous_raw < -1 || previous_raw >= index as i32 {
             return Err("invalid LCM predecessor reference".into());
@@ -293,19 +292,22 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
             return Err("LCM timeline exceeds frame limit".into());
         }
 
-        if previous.is_some_and(|prev| {
+        let previous = if previous.is_some_and(|prev| {
             !matches!(
                 (&clips[prev].content, if is_text { 1 } else { 0 }),
                 (TrackContent::Image(_), 0) | (TrackContent::Text { .. }, 1)
             )
         }) {
-            return Err("invalid LCM predecessor clip type".into());
-        }
+            // Predecesor opaco / tipo cruzado: clip suelto, no tumbar el archivo.
+            None
+        } else {
+            previous
+        };
 
-        if is_opaque_legacy {
+        if skip_opaque {
             duration_frames = duration_frames.max(end);
             clips.push(Track {
-                previous,
+                previous: None,
                 start,
                 duration: duration as u32,
                 order,
@@ -324,7 +326,7 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
                 let next = (r.offset..bytes.len())
                     .find(|at| common_header(bytes, *at, index + 1, version, &clips))
                     .ok_or_else(|| {
-                        format!("could not locate next LCM clip after opaque legacy clip {index}")
+                        format!("could not locate next LCM clip after opaque clip {index} (kind {kind})")
                     })?;
                 r.offset = next;
             } else {
