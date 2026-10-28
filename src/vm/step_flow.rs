@@ -349,6 +349,7 @@ impl Vm {
                 f.locals.insert(name, v);
             }
         } else {
+            self.global_scopes.insert(name.clone(), scope);
             self.globals.insert(name, v);
         }
     }
@@ -365,7 +366,62 @@ impl Vm {
             frame.locals.remove(name);
         } else {
             self.globals.remove(name);
+            self.global_scopes.remove(name);
         }
+    }
+
+    /// PCReset: mueve el PC a `Page`; `AllClear` limpia el stack de llamadas.
+    ///
+    /// **fuente primaria:** `docs/livenovel/sequence.html`「PCリセット」.
+    /// Auto-destroy (scopes no persistentes) viven en `Frame::locals`.
+    pub(crate) fn step_pc_reset(&mut self, c: &Command, detail: &mut String) -> bool {
+        let p = c.page().cloned().unwrap_or_default();
+        let all_clear = c.u32("AllClear").unwrap_or(0) != 0;
+        *detail = format!("-> {}:{} all_clear={all_clear}", p.page, p.label);
+        self.trace(c, detail.clone());
+        if all_clear {
+            // Stack clear ON: borra todo el stack y todas las auto-destroy.
+            self.frames.clear();
+            if !self.goto_script(&p.page, p.label, true, String::new(), vec![]) {
+                self.state = State::Ended;
+            }
+        } else {
+            // OFF: solo auto-destroy de la página en curso; el stack se conserva.
+            if let Some(f) = self.frames.last_mut() {
+                f.locals.clear();
+            }
+            if !self.goto_script(&p.page, p.label, false, String::new(), vec![]) {
+                return true;
+            }
+        }
+        self.yielded = true;
+        true
+    }
+
+    /// Reset: borra componentes, variables (salvo status/scope 3) y stack; salta a `Page`.
+    ///
+    /// **fuente primaria:** `docs/livenovel/sequence.html`「リセット」.
+    pub(crate) fn step_reset(&mut self, c: &Command, detail: &mut String) -> bool {
+        let p = c.page().cloned().unwrap_or_default();
+        *detail = format!("-> {}:{}", p.page, p.label);
+        self.trace(c, detail.clone());
+        let names: Vec<String> = self.scene.names();
+        for name in names {
+            self.scrap_component(&name);
+        }
+        self.globals.retain(|name, _| {
+            self.global_scopes
+                .get(name)
+                .copied()
+                .is_some_and(|scope| scope == 3)
+        });
+        self.global_scopes.retain(|_, scope| *scope == 3);
+        self.frames.clear();
+        if !self.goto_script(&p.page, p.label, true, String::new(), vec![]) {
+            self.state = State::Ended;
+        }
+        self.yielded = true;
+        true
     }
 
     pub(crate) fn step_while(

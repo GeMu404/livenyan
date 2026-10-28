@@ -316,6 +316,10 @@ pub struct Vm {
     pixel_fonts: Arc<PixelFontCatalog>,
     frames: Vec<Frame>,
     globals: HashMap<String, Value>,
+    /// Ámbito de cada global (`VarNew` Scope). Hace falta para `Reset`
+    /// (conservar solo ステータス = scope 3). **fuente primaria** scopes 0|3
+    /// persistentes en livenyan; 3 = status en `sequence.html`「リセット」.
+    global_scopes: HashMap<String, u32>,
     pub scene: Scene,
     pub state: State,
     pub now: f64,
@@ -457,6 +461,7 @@ impl Vm {
             pixel_fonts,
             frames: vec![],
             globals: HashMap::new(),
+            global_scopes: HashMap::new(),
             scene: Scene::default(),
             state: State::Running,
             now: 0.0,
@@ -1484,6 +1489,21 @@ impl Vm {
                 if self.step_call(&script, pc, c, next, &mut detail) {
                     return;
                 }
+            }
+            CmdType::PCReset => {
+                if self.step_pc_reset(c, &mut detail) {
+                    return;
+                }
+            }
+            CmdType::Reset => {
+                if self.step_reset(c, &mut detail) {
+                    return;
+                }
+            }
+            CmdType::IFDEF | CmdType::IFNDEF | CmdType::ENDIF => {
+                // Directivas de compilación del chart; en LSB suelen no aparecer.
+                // Si llegan, no-op (**no confirmado** runtime LiveMaker).
+                detail = c.name().into();
             }
             CmdType::Exit => {
                 if self.step_exit(c, &mut detail) {
@@ -2763,6 +2783,119 @@ mod tests {
         assert!(variable_scope_is_persistent(3));
         assert!(!variable_scope_is_persistent(1));
         assert!(!variable_scope_is_persistent(2));
+    }
+
+    #[test]
+    fn reset_keeps_status_globals_and_clears_components() {
+        // sequence.html「リセット」: componentes + vars (salvo status) + stack → Page.
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&path).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 0,
+                trace: false,
+                trace_conds: false,
+                pick: None,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene
+            .create("tmp", crate::scene::Kind::Box, HashMap::new());
+        vm.globals.insert("game_flag".into(), Value::Int(1));
+        vm.global_scopes.insert("game_flag".into(), 0);
+        vm.globals.insert("status_flag".into(), Value::Int(9));
+        vm.global_scopes.insert("status_flag".into(), 3);
+        let entry = vm.frames[0].script.name.clone();
+        let mut detail = String::new();
+        let cmd = Command {
+            kind: CmdType::Reset as u8,
+            indent: 0,
+            mute: false,
+            not_update: false,
+            line_no: 0,
+            fields: vec![
+                (
+                    "Page",
+                    crate::lsb::Field::Page(crate::lsb::LabelRef {
+                        page: entry,
+                        label: 0,
+                    }),
+                ),
+                ("AllClear", crate::lsb::Field::Byte(1)),
+            ],
+        };
+        assert!(vm.step_reset(&cmd, &mut detail));
+        assert!(vm.scene.get("tmp").is_none());
+        assert!(vm.globals.get("game_flag").is_none());
+        assert_eq!(vm.globals.get("status_flag"), Some(&Value::Int(9)));
+        assert_eq!(vm.frames.len(), 1);
+    }
+
+    #[test]
+    fn pc_reset_all_clear_drops_call_stack() {
+        // sequence.html「PCリセット」AllClear ON: stack vacío tras el salto.
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&path).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 0,
+                trace: false,
+                trace_conds: false,
+                pick: None,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        let script = vm.frames[0].script.clone();
+        let entry = script.name.clone();
+        vm.frames.push(Frame {
+            script,
+            pc: 3,
+            locals: HashMap::from([("temp".into(), Value::Int(1))]),
+            result_var: String::new(),
+            params: vec![],
+            saved_state: None,
+            sender: None,
+            event_prop: None,
+            auto_scrap_sender: false,
+        });
+        assert_eq!(vm.frames.len(), 2);
+        let mut detail = String::new();
+        let cmd = Command {
+            kind: CmdType::PCReset as u8,
+            indent: 0,
+            mute: false,
+            not_update: false,
+            line_no: 0,
+            fields: vec![
+                (
+                    "Page",
+                    crate::lsb::Field::Page(crate::lsb::LabelRef {
+                        page: entry,
+                        label: 0,
+                    }),
+                ),
+                ("AllClear", crate::lsb::Field::Byte(1)),
+            ],
+        };
+        assert!(vm.step_pc_reset(&cmd, &mut detail));
+        assert_eq!(vm.frames.len(), 1);
+        assert!(vm.frames[0].locals.is_empty());
     }
 
     #[test]
