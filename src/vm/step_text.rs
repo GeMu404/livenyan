@@ -63,16 +63,11 @@ impl Vm {
 
     /// Flip: transición sobre Targets durante Time (espera saltable).
     ///
-    /// Wipe (`WP_*`, ids enteros): **fuente primaria** `graphic.html`.
-    /// `0` NONE = corte; `1` FADE = fundido de `ALPHA` sobre Targets.
-    /// Resto: warn `unimpl:cmd Flip wipe=N` (con nombre si está en la tabla) y
-    /// el mismo fundido como aproximación (**inventado en livenyan**).
+    /// Wipe (`WP_*`): **fuente primaria** `graphic.html`.
+    /// - `0` NONE, `1` FADE; `12`–`14` WHITE/BLACK/FLASH → overlay (I7).
+    /// - Resto → fundido ALPHA (**interpretación I6**, sin `unimpl`).
     ///
-    /// Act: `0` FL_OUT / `1` FL_STAY — en livenyan se usan hoy como dirección
-    /// del fundido (salida vs entrada); el manual habla de qué capas quedan
-    /// delante/detrás (**no confirmado** que Act=fade). Reverse invierte Act.
-    /// Delete aplica al terminar la espera (o ya si Time=0).
-    /// Param / Source / DifferenceOnly / StopEvent se leen; sin efecto extra en MVP.
+    /// Act: dirección de fundido hoy; manual = capas (**no confirmado**).
     pub(crate) fn step_flip(&mut self, c: &Command) -> String {
         let wipe = self.eval(c.expr("Wipe")).as_int();
         let t = self.eval(c.expr("Time")).as_f64().max(0.0);
@@ -97,19 +92,26 @@ impl Vm {
             })
             .collect();
         // FL_OUT=0 → fundido de salida; FL_STAY=1 → entrada; Reverse invierte.
-        // (Act como dirección de alpha: ver comentario de step_flip.)
         let fade_out = (act == 0) != reverse;
         let label = super::wipe::wipe_label(wipe);
         match wipe {
             0 => {}
             1 => self.apply_flip_fade(&targets, fade_out, t),
-            w => {
-                self.warn(
-                    &format!("unimpl:cmd Flip wipe={w}"),
-                    &format!(
-                        "Flip: wipe {label} not implemented (fade approx)"
-                    ),
-                );
+            super::wipe::WP_WHITE => {
+                self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, true));
+                self.apply_flip_fade(&targets, fade_out, t);
+            }
+            super::wipe::WP_BLACK => {
+                self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, false));
+                self.apply_flip_fade(&targets, fade_out, t);
+            }
+            super::wipe::WP_FLASH => {
+                self.wipe_flash = Some(super::wipe::WipeFlash::flash(self.now, t));
+                self.apply_flip_fade(&targets, fade_out, t);
+            }
+            _ => {
+                // I6: wipe geométrico → fade (sin spam unimpl).
+                log::debug!("Flip wipe {label}: using fade interpretation (I6)");
                 self.apply_flip_fade(&targets, fade_out, t);
             }
         }

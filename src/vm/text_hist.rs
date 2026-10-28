@@ -774,8 +774,8 @@ impl Vm {
                 }
             }
             "TXSPS" => {
-                // スロー — ratio no documentado: 3× el periodo baseline (**inventado**).
-                let ms = 1000.0 / super::TEXT_SPEED_BASELINE_CPS * 3.0;
+                // スロー — **interpretación:** periodo baseline × TEXT_SPEED_SLOW_FACTOR.
+                let ms = 1000.0 / super::TEXT_SPEED_BASELINE_CPS * super::TEXT_SPEED_SLOW_FACTOR;
                 self.text_char_ms.insert(
                     boxname.to_string(),
                     super::TextSpeedOverride {
@@ -798,10 +798,10 @@ impl Vm {
                 }
             }
             "WALLPAPER" => {
-                // Escritorio del SO: sin API → ignorar con aviso (script.html).
+                // script.html / calc SetWallPaper: sin API host → no-op (como Func false).
                 self.warn(
-                    "unimpl:text sysevent WALLPAPER",
-                    "WALLPAPER ignored (no desktop wallpaper API)",
+                    "wallpaper:unsupported",
+                    "WALLPAPER: desktop wallpaper not supported (ignored)",
                 );
             }
             // script.html WAITFOR: esperar a que termine el componente.

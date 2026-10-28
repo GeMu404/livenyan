@@ -4565,6 +4565,14 @@ fn draw_scene(
         .retain(|key, _| active_crossfade_pairs.contains(key));
     gfx.menu_animation_starts
         .retain(|key, _| active_menu_animations.contains(key));
+    // Flip WP_WHITE / WP_BLACK / WP_FLASH (**interpretación** I7).
+    if let Some((r, g, b, a)) = vm.wipe_flash_rgba()
+        && a > 0
+    {
+        let _ = canvas.set_blend_mode(BlendMode::Blend);
+        canvas.set_draw_color(Color::RGBA(r, g, b, a));
+        let _ = canvas.fill_rect(FRect::new(0.0, 0.0, lw as f32, lh as f32));
+    }
     drawn
 }
 

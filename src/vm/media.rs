@@ -300,7 +300,7 @@ impl Vm {
                     f64::INFINITY
                 } else {
                     // relativo: TIME a velocidad baseline; la opción escala.
-                    // **inventado:** baseline = TEXT_SPEED_BASELINE_CPS (60).
+                    // **interpretación:** baseline = TEXT_SPEED_BASELINE_CPS (60).
                     base * (vm.opts.text_cps as f64 / super::TEXT_SPEED_BASELINE_CPS)
                 };
             }

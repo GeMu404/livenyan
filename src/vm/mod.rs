@@ -406,11 +406,12 @@ pub struct Vm {
     /// Targets de Flip con Delete diferido hasta el fin de WaitUntil.
     flip_pending_delete: Vec<String>,
     /// `<TEXTSPD>` / `TXSP*`: ms/carácter y si es ABSOLUTE (script.html).
-    /// Clave = caja de mensaje. **inventado:** baseline relativo = 60 cps
-    /// (`TextCfg::speed_cps` por defecto).
+    /// Relativo: **interpretación** baseline [`TEXT_SPEED_BASELINE_CPS`].
     text_char_ms: HashMap<String, TextSpeedOverride>,
     /// `<QUAKE>` / `<STOPQUAKE>` (script.html): offset de dibujo por objeto o global.
     quake: Option<QuakeState>,
+    /// Overlay Flip WHITE/BLACK/FLASH (**interpretación** I7).
+    wipe_flash: Option<wipe::WipeFlash>,
 }
 
 /// Override de velocidad de texto desde tags LiveNovel.
@@ -439,8 +440,10 @@ pub(crate) struct QuakeState {
     pub stop_until: Option<f64>,
 }
 
-/// Baseline cps para TEXTSPD relativo (**inventado en livenyan**, = default config).
+/// Baseline cps para TEXTSPD relativo (**interpretación livenyan** = `TextCfg::speed_cps` default).
 pub(crate) const TEXT_SPEED_BASELINE_CPS: f64 = 60.0;
+/// Factor TXSPS (スロー): periodo × N (**interpretación**; manual sin ratio).
+pub(crate) const TEXT_SPEED_SLOW_FACTOR: f64 = 3.0;
 
 /// Ranuras de `@KeyPush` / `@KeyClick` / `@KeyRepeat` (códigos de tecla de Windows).
 const KEY_SLOTS: usize = 512;
@@ -564,6 +567,7 @@ impl Vm {
             flip_pending_delete: Vec::new(),
             text_char_ms: HashMap::new(),
             quake: None,
+            wipe_flash: None,
         };
         vm.prefetch_from(&script, 0);
         vm.frames.push(Frame {
@@ -1157,6 +1161,13 @@ impl Vm {
             .is_some_and(|q| now >= q.until || q.stop_until.is_some_and(|s| now >= s))
         {
             self.quake = None;
+        }
+        if self
+            .wipe_flash
+            .as_ref()
+            .is_some_and(|f| f.rgba(now).is_none())
+        {
+            self.wipe_flash = None;
         }
         self.update_plays();
         if let State::WaitUntil { until, skippable } = self.state {
@@ -2573,6 +2584,7 @@ impl Env for Vm {
                 };
                 return self.db.call(f, a, &load);
             }
+            // **interpretación:** siempre modo ventana lógica (0); no hay exclusive fullscreen LM.
             Func::GETDISPLAYMODE => Value::Int(0),
             Func::GETSAVECAPTION => {
                 let slot = a.first().map(|v| v.as_int()).unwrap_or(-1);
@@ -2584,11 +2596,29 @@ impl Env for Vm {
                 let url = a.first().map(Value::as_str).unwrap_or_default();
                 Value::Bool(open_external_url(&url))
             }
-            // SETWALLPAPER: sin API de escritorio aquí → éxito vacío (**inventado** no-op).
-            Func::SETWALLPAPER => Value::Bool(true),
-            // SaveScreen: captura a .gal / mem: / save: (manual). Sin encoder GAL aún:
-            // no-op que reporta éxito para no romper ■ロード/セーブ. CopyFile igual.
-            Func::SAVESCREEN | Func::COPYFILE => Value::Bool(true),
+            // calc.html SetWallPaper: wallpaper del SO. Sin API host → FALSE honesto.
+            Func::SETWALLPAPER => {
+                self.warn_once(
+                    "wallpaper:unsupported",
+                    "SetWallPaper: desktop wallpaper not supported (returns false)",
+                );
+                Value::Bool(false)
+            }
+            // calc.html SaveScreen: .GAL / Mem: / Save:. Sin encoder GAL → FALSE.
+            Func::SAVESCREEN => {
+                self.warn_once(
+                    "savescreen:unsupported",
+                    "SaveScreen: GAL capture not implemented (returns false)",
+                );
+                Value::Bool(false)
+            }
+            // calc.html CopyFile: copia mem/save/archivos. Rutas host reales sí;
+            // prefijos Mem:/Save: aún no (**temporal** hasta VFS).
+            Func::COPYFILE => {
+                let src = a.first().map(Value::as_str).unwrap_or_default();
+                let dst = a.get(1).map(Value::as_str).unwrap_or_default();
+                Value::Bool(copy_host_file(self, &src, &dst))
+            }
             _ => return None,
         })
     }
@@ -2610,6 +2640,11 @@ impl Env for Vm {
 }
 
 impl Vm {
+    /// RGBA del overlay Flip WHITE/BLACK/FLASH, si activo.
+    pub fn wipe_flash_rgba(&self) -> Option<(u8, u8, u8, u8)> {
+        self.wipe_flash.as_ref().and_then(|f| f.rgba(self.now))
+    }
+
     /// Offset de dibujo por `<QUAKE>` (0,0 si no aplica).
     pub fn quake_draw_offset(&self, name: &str) -> (f64, f64) {
         let Some(q) = self.quake.as_ref() else {
@@ -2658,6 +2693,41 @@ impl Vm {
             }
         };
         (dx, dy)
+    }
+}
+
+/// CopyFile para rutas de host (sin `mem:` / `save:`). calc.html.
+fn copy_host_file(vm: &mut Vm, src: &str, dst: &str) -> bool {
+    let special = |p: &str| {
+        let l = p.to_ascii_lowercase();
+        l.starts_with("mem:") || l.starts_with("save:")
+    };
+    if src.is_empty() || dst.is_empty() || special(src) || special(dst) {
+        vm.warn(
+            "copyfile:vfs",
+            "CopyFile: Mem:/Save: virtual files not implemented (returns false)",
+        );
+        return false;
+    }
+    let src_path = if PathBuf::from(src).is_absolute() {
+        PathBuf::from(src)
+    } else {
+        vm.save_dir.join(src.replace('\\', "/"))
+    };
+    let dst_path = if PathBuf::from(dst).is_absolute() {
+        PathBuf::from(dst)
+    } else {
+        vm.save_dir.join(dst.replace('\\', "/"))
+    };
+    if let Some(parent) = dst_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::copy(&src_path, &dst_path) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("CopyFile {src_path:?} -> {dst_path:?}: {e}");
+            false
+        }
     }
 }
 
@@ -2791,15 +2861,31 @@ mod tests {
                 &[Value::Str("mem:__workscr.gal".into())],
                 &[]
             ),
-            Some(Value::Bool(true))
+            Some(Value::Bool(false)),
+            "SaveScreen without GAL encoder returns false (honest)"
+        );
+        assert_eq!(
+            vm.call_engine(Func::SETWALLPAPER, &[Value::Str("x.gal".into())], &[]),
+            Some(Value::Bool(false))
         );
         assert!(
             !vm.warned
                 .iter()
-                .any(|w| w.contains("SaveScreen") || w.contains("SetCheck")),
-            "documented stubs must not emit unimpl warnings: {:?}",
+                .any(|w| w.contains("unimpl:func") || w.contains("SetCheck")),
+            "must not emit unimpl:func for documented unsupported APIs: {:?}",
             vm.warned
         );
+    }
+
+    #[test]
+    fn wipe_flash_peaks_mid_for_white_black() {
+        let f = wipe::WipeFlash::white_black(0.0, 1000.0, true);
+        assert_eq!(f.rgba(0.0).map(|c| c.3), Some(0));
+        assert_eq!(f.rgba(500.0).map(|c| c.3), Some(255));
+        assert_eq!(f.rgba(1000.0), None);
+        let flash = wipe::WipeFlash::flash(0.0, 1000.0);
+        assert_eq!(flash.rgba(0.0).map(|c| c.3), Some(255));
+        assert!(flash.rgba(500.0).map(|c| c.3).unwrap() < 255);
     }
 
     #[test]

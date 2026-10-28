@@ -81,7 +81,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 8–10 | BoxNew / ImgNew / MesNew | `ok` | Crear componentes | `step_obj_new` | |
 | 11 | Timer | `ok` | Temporizador | Timers + eventos | |
 | 12 | Movie | `ok` / `partial` | Vídeo | ffmpeg; decode **nativo** (I1) | Manual size; **interpretación** latencia |
-| 13 | Flip | `partial` | Wipe `WP_*` + Act FL_* | `NONE`/`FADE` OK; resto **fade approx**; Act como fade in/out | `graphic.html` / `wipe.rs`; Act capas **no confirmado** |
+| 13 | Flip | `partial` | Wipe `WP_*` + Act FL_* | NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6); Act=fade dir | `graphic.html`; Act capas **no confirmado** |
 | 14 | Calc | `ok` | Evaluar expresión | | |
 | 15–16 | VarNew / VarDel | `ok` | Vars + Scope | Scope 0\|3 → globals; 1\|2 locals | Reset conserva scope 3 |
 | 17–18 | GetProp / SetProp | `ok` | Props objeto | Missing SetProp = no-op LM | |
@@ -132,13 +132,13 @@ Dispatch: `system_text_event` en `src/vm/text_hist.rs`. Manual: `docs/livenovel/
 | PLAYMOVIE / STOPMOVIE | `ok` / `partial` | Vídeo inline | Objeto `ムービー` + ffmpeg | |
 | CREATECG / CHANGECG / DELETECG | `partial` | CG / color / alín | Subset de args | Resto **sin verificar** |
 | PLAYSND / STOPSND | `ok` | SE/BGM canales | | |
-| TEXTSPD | `partial` | TIME ms/char; ABSOLUTE | Override `text_char_ms` | Orden args **no confirmado**; relativo baseline 60 **inventado** |
-| TXSPF / TXSPN / TXSPS | `partial` | Fast / normal / slow | 0 ms / clear+256 / ×3 baseline | TXSPS ratio **inventado** |
+| TEXTSPD | `ok` / `partial` | TIME ms/char; ABSOLUTE | Override `text_char_ms` | Orden args **no confirmado**; relativo = **I8** |
+| TXSPF / TXSPN / TXSPS | `ok` | Fast / normal / slow | 0 ms / clear+256 / ×3 baseline | **I8** |
 | SYSMENUON/OFF SAVELOADON/OFF | `partial` | Permisos menú/save | ONNOTIFY only | Puede no bastar |
 | OPENURL | `ok` | Abrir URL | `xdg-open` / `open` / `cmd start` | `script.html` + Func OPENURL |
-| WALLPAPER | `unimpl` | Wallpaper SO | Aviso | Sin API |
+| WALLPAPER | `noop` | Wallpaper SO | Ignore + warn | Como SETWALLPAPER false |
 | WAITFOR | `ok` | Esperar componente | Como WAITPLAY + CLICKABORT | `script.html` |
-| QUAKE / STOPQUAKE | `partial` | Temblor Q/W/B | Offset dibujo | Orden args **no confirmado**; Q hash **inventado** |
+| QUAKE / STOPQUAKE | `ok` / `partial` | Temblor Q/W/B | Offset dibujo | Orden args **no confirmado**; Q = **I9** |
 | *(otros)* | `unimpl` | — | `unimpl:text sysevent` | Inventariar con `--trace` |
 
 `<PG>` / `<PS>`: glifos Return, no sysevent. Coalesce clic: **fuente primaria** `script.html` + fusión **inventada** para no doble-clic en el mismo TextIns.
@@ -156,26 +156,30 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | I3 | Tipografía host | ＭＳ ゴシック | Noto CJK u otra si falta | Linux/Windows sin fuentes JP |
 | I4 | `TOSCREEN*` / coords | Espacio ventana Windows | Identidad en espacio lógico | El letterbox lo resuelve el present |
 | I5 | Renderer | DirectDraw/GDI/etc. | SDL auto (sin Vulkan/OF propio) | Mantenibilidad; OF archivado |
+| I6 | Flip wipe ≠ NONE/FADE/WHITE/BLACK/FLASH | Wipe geométrico LM | Fundido `ALPHA` (sin `unimpl`) | Predecible; wipes clip=más adelante |
+| I7 | WP_WHITE/BLACK/FLASH | 表→色→裏 / 白→裏 | Overlay RGBA + fade targets | `graphic.html` + present SDL |
+| I8 | TEXTSPD relativo / TXSPS | ? | Baseline 60 cps; slow ×3 | Números estables livenyan |
+| I9 | QUAKE tipo Q | ? | Hash ruido acotado | Suficiente para “temblor” |
+| I10 | GETDISPLAYMODE | Modos Win32 | Siempre `0` (ventana lógica) | Sin exclusive FS LM |
 
 ## Huecos / temporales (ejecución posible, deuda o duda)
 
 | ID | Área | Qué hace | Clase | Cómo seguir |
 |----|------|----------|-------|-------------|
-| W1 | Flip wipes ≠ 0/1 | Fade `ALPHA` | inventado | Wipe real o aceptar fade como interpretación |
+| W1 | *(cerrado → I6/I7)* | — | — | — |
 | W2 | Flip Act | Fade in/out | no confirmado | Experimento vs capas FL_* |
 | W3 | Cinema sin LCM | Placeholder ms | **temporal** | LCM + duración real |
-| W4 | Particle/Fire/Wave/Memo | Empty obj | inventado / temporal | FX o interpretación “no-op documentado” |
-| W5 | SAVESCREEN / COPYFILE | `true` | inventado | Encoder / copy, o unimpl |
-| W6 | SETWALLPAPER | `true` | inventado | API host o unimpl |
+| W4 | Particle/Fire/Wave/Memo | Empty obj | **interpretación** no-op FX | Opcional: FX real |
+| W5 | SAVESCREEN | `false` + warn | **temporal** | Encoder GAL / mem: |
+| W5b | COPYFILE | Host `fs::copy`; Mem:/Save: `false` | **partial** / temporal VFS | VFS mem/save |
+| W6 | SETWALLPAPER / tag | `false` / ignore + warn | interpretación “no wallpaper host” | Opcional API DE |
 | W7 | IFDEF* | no-op | no confirmado | ¿Aparecen en LSB? |
 | W8 | TextIns caja ausente | Stand-in | inventado | OK si novel system lo asume |
 | W9 | Call Params | `Param1..N` | no confirmado | Experimento |
-| W10 | Props WIDTH/HEIGHT en Movie LSB | Ignorados en decode | **interpretación** (ver I1) + manual: Movie no documenta esas props | Mantener |
-| W11 | LCM angle/clip | Omitir | inventado | Parse completo o documentar como interpretación |
+| W10 | Props WIDTH/HEIGHT Movie | Ignorados | **I1** | Mantener |
+| W11 | LCM angle/clip | Omitir | inventado | Parse o → interpretación |
 | W12 | LFT U+0020 / TTF | Síntesis / Noto | inventado + I3 | |
-| W13 | TEXTSPD relativo | baseline 60 | inventado | Medir LM u fijar como interpretación |
-| W14 | TXSPS | ×3 | inventado | Idem |
-| W15 | QUAKE Q | Hash | inventado | Idem |
+| W13–W15 | *(cerrado → I8/I9)* | — | — | — |
 | W16 | SYSMENU* | Solo ONNOTIFY | inventado | Trace novel system |
 | W17 | WP_* ids | Orden graphic.html | no confirmado | Dump ids |
 
@@ -186,9 +190,10 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | Func | Estado | Notas |
 |------|--------|-------|
 | OPENURL | `ok` | Abre URL del SO |
-| SETWALLPAPER | `inventado` | Siempre true |
-| SAVESCREEN / COPYFILE | `inventado` | Siempre true |
-| GETDISPLAYMODE | `partial` | Siempre 0 |
+| SETWALLPAPER | `noop` | `false` + warn (sin API escritorio) |
+| SAVESCREEN | `temporal` | `false` + warn hasta encoder GAL |
+| COPYFILE | `partial` | `fs::copy` host; Mem:/Save: `false` |
+| GETDISPLAYMODE | `ok` | Siempre 0 (**I10**) |
 | DB* | `ok` / `partial` | Subset en `src/db.rs` |
 | Resto unimpl | `unimpl` | `unimpl:func …` en `--trace` |
 
@@ -198,9 +203,9 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 
 ### Se puede avanzar con manual + fixtures
 
-- Documentar/ajustar edge cases Wait / Prop faltantes con cita.
-- Fixtures LSB sintéticos para PCReset/Reset/TEXTSPD (orden args cuando se confirme).
-- Ampliar esta tabla cuando aparezca un `unimpl:` nuevo en logs de fixture.
+- Wipes geométricos reales (blinds/scroll) o dejar I6.
+- VFS `mem:` / `save:` + encoder GAL (SaveScreen).
+- Fixtures sintéticos extra; ampliar tabla con nuevos `unimpl:`.
 
 ### Necesita juego buildado o original (`--trace` / ojos)
 
@@ -220,4 +225,4 @@ Al tocar compatibilidad:
 3. Marcar workarounds nuevos en la tabla W*.
 4. Tests: preferir fixture/`--lib` sin assets gráficos reales.
 
-Última pasada de inventario comandos/tags: 2026-10-28 (post `PCReset`/`Reset` + tags TEXTSPD/QUAKE/OPENURL).
+Última pasada: 2026-10-28 — I6–I10, SAVESCREEN/WALLPAPER honestos, COPYFILE host, overlays WHITE/BLACK/FLASH.

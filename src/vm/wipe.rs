@@ -5,9 +5,11 @@
 //! coinciden con el uso actual en livenyan (`NONE` / `FADE`). Otros valores
 //! numéricos: **no confirmado** frente a un dump de constantes del runtime.
 //!
-//! Los wipes geométricos (blinds, scroll, …) no están implementados; el Flip
-//! aplica fundido de `ALPHA` como aproximación (**inventado en livenyan**) y
-//! deja `unimpl:cmd Flip wipe=N` con el nombre documentado.
+//! Política livenyan (`COMPATIBILITY.md` I6/I7):
+//! - `WP_NONE` / `WP_FADE`: comportamiento dedicado.
+//! - `WP_WHITE` / `WP_BLACK` / `WP_FLASH`: overlay de color + fundido de targets
+//!   (**interpretación**: manual describe 表→色→裏 / 白→裏).
+//! - Resto: fundido `ALPHA` sin `unimpl` (**interpretación I6**: wipe→fade).
 
 /// Nombres `WP_*` en el orden de `graphic.html` (Flip / 画面効果).
 pub const WP_NAMES: &[&str] = &[
@@ -63,6 +65,64 @@ pub fn wipe_label(wipe: i64) -> String {
     match wipe_name(wipe) {
         Some(n) => format!("{wipe} {n}"),
         None => wipe.to_string(),
+    }
+}
+
+/// Ids con overlay de color dedicado (graphic.html).
+pub const WP_WHITE: i64 = 12;
+pub const WP_BLACK: i64 = 13;
+pub const WP_FLASH: i64 = 14;
+
+/// Overlay de wipe WHITE/BLACK/FLASH.
+#[derive(Debug, Clone)]
+pub struct WipeFlash {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub started_at: f64,
+    pub dur_ms: f64,
+    /// `true` = pico a mitad (表→色→裏); `false` = decae desde opaco (白→裏).
+    pub peak_mid: bool,
+}
+
+impl WipeFlash {
+    pub fn white_black(now: f64, dur_ms: f64, white: bool) -> Self {
+        let (r, g, b) = if white { (255, 255, 255) } else { (0, 0, 0) };
+        Self {
+            r,
+            g,
+            b,
+            started_at: now,
+            dur_ms: dur_ms.max(1.0),
+            peak_mid: true,
+        }
+    }
+
+    pub fn flash(now: f64, dur_ms: f64) -> Self {
+        Self {
+            r: 255,
+            g: 255,
+            b: 255,
+            started_at: now,
+            dur_ms: dur_ms.max(1.0),
+            peak_mid: false,
+        }
+    }
+
+    /// RGBA del overlay en `now`, o `None` si ya terminó.
+    pub fn rgba(&self, now: f64) -> Option<(u8, u8, u8, u8)> {
+        let p = ((now - self.started_at) / self.dur_ms).clamp(0.0, 1.0);
+        if p >= 1.0 {
+            return None;
+        }
+        let a = if self.peak_mid {
+            // triángulo 0→1→0
+            let t = if p < 0.5 { p * 2.0 } else { (1.0 - p) * 2.0 };
+            (t * 255.0).round() as u8
+        } else {
+            ((1.0 - p) * 255.0).round() as u8
+        };
+        Some((self.r, self.g, self.b, a))
     }
 }
 
