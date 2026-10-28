@@ -1,0 +1,38 @@
+---
+description: Contexto, límites de contenido y uso de tokens en livenyan
+alwaysApply: true
+---
+
+# livenyan
+
+Reproductor nativo (Rust + SDL3) de juegos LiveMaker. Interpreta LSB/VF, escena, texto, menús, audio/vídeo y UI. No es un juego: es el motor. Compatibilidad por comandos/formatos implementados.
+
+## Contenido del juego (estricto)
+
+Los juegos de prueba suelen tener contenido explícito. **Nunca** inspeccionar ni generar:
+
+- Vídeo / clips WMV / frames de película
+- Imágenes GAL u otros gráficos del juego
+- Capturas del render normal
+
+**Permitido:** textos, scripts LSB, logs, dumps, fixtures sintéticos, y capturas/visualización solo con `--debug-layout` (wireframe).
+
+Si hace falta verificar layout visual: wireframe. Si hace falta ver un asset gráfico real: **preguntar al usuario** (él lo mira).
+
+## Semántica LiveMaker (no inventar)
+
+- Fuente primaria local: `docs/livenovel/` (manual LiveNovel). Notas tipadas: `LIVEMAKER-INTERFACE-REFERENCE.md` (`fuente primaria` / `no confirmado` / `inventado en livenyan`).
+- Strings/exports de `live.dll`: `docs/live-dll-strings.txt` (API media; **no** es tabla Prop/Cmd LSB).
+- **Fix ambiguo** (comportamiento de motor, props, layout, comandos no documentados con certeza): requiere **cita** a al menos uno de:
+  1. **manual** — página bajo `docs/livenovel/` (o ancla concreta), o
+  2. **strings** — símbolo/línea en `docs/live-dll-strings.txt` u otro extracto explícito, o
+  3. **experimento** — comparación controlada vs motor original (describir qué se observó).
+- Sin cita: marcar `no confirmado` o `inventado en livenyan`; no presentar como semántica LiveMaker.
+- No desensamblar ni publicar binarios del juego; no copiar código de DLLs.
+
+## Tokens y herramientas
+
+- Respuestas cortas; no rellenar con contexto obvio.
+- Antes de comandos o escaneos costosos en tokens (diffs grandes, `rg`/`find` amplios, leer archivos enormes, logs largos, dumps): **preguntar**.
+- Preferir búsquedas acotadas y lecturas parciales.
+- Si algo no está claro: **parar y preguntar**; no asumir.

@@ -1,0 +1,536 @@
+# live.dll string/export extract for livenyan
+# Purpose: candidate names only. NOT a LiveMaker script semantic dump.
+# Method: PE export table + printable ASCII/UTF-16LE strings. No disassembly.
+# Binary NOT included in the repo.
+#
+# Source A: /home/gemu/Desktop/testgame/live.dll
+# Source B: /home/gemu/Desktop/test2/live.dll
+# cmp: identical byte-for-byte
+# size: 364544 bytes
+# sha256: 19167dc6cef4f5175eea41bf28bcd7b9d91541dcba3eb4032dd82234baf443d8
+# PE: i386 (0x14c), PE32, export TimeDateStamp 0x4f4b8f51 (~2012-02-27)
+#
+# Finding: this DLL is a LiveMaker media helper (Ogg/WMP/Video/Screen).
+# It does NOT contain LSB GetProp/SetProp/CallFunc names, nor interface
+# property tokens such as ROWCOUNT/TOPINDEX/SCROLLSOURCE (searched; absent).
+# Treat exports below as native media API candidates, not script Prop/Cmd enums.
+
+## PE exports (96) — primary candidates from this binary
+# format: ordinal	name
+1	liveFinal
+2	liveGetErrorID
+3	liveInit
+4	liveOggGetAutoRepeat
+5	liveOggGetBuffPos
+6	liveOggGetBuffSize
+7	liveOggGetLen
+8	liveOggGetPan
+9	liveOggGetPosition
+10	liveOggGetRepeatPos
+11	liveOggGetVol
+12	liveOggGetWritePos
+13	liveOggIsEnd
+14	liveOggIsPaused
+15	liveOggIsPlaying
+16	liveOggPause
+17	liveOggPlay
+18	liveOggSetAutoRepeat
+19	liveOggSetPan
+20	liveOggSetPosition
+21	liveOggSetRepeatPos
+22	liveOggSetVol
+23	liveOggStrGetFormat
+24	liveOggStrGetLen
+25	liveOggStrGetPos
+26	liveOggStrGetSize
+27	liveOggStrRead
+28	liveOggStrSetPos
+29	liveOggStrmanAdd
+30	liveOggStrmanDel
+31	liveOggmanAdd
+32	liveOggmanDel
+33	liveOggmanGetCount
+34	liveOggmanProcessEvent
+35	liveOggmanRestore
+36	liveOggmanSetUseThread
+37	liveOggmanUpdate
+38	liveScreenGetVideoMode
+39	liveScreenGetVideoModeCount
+40	liveScreenSetVideoMode
+41	liveVersion
+42	liveVideoGetAutoRepeat
+43	liveVideoGetDC
+44	liveVideoGetDIBInfo
+45	liveVideoGetLen
+46	liveVideoGetPan
+47	liveVideoGetPosition
+48	liveVideoGetSourceHeight
+49	liveVideoGetSourceWidth
+50	liveVideoGetVisible
+51	liveVideoGetVol
+52	liveVideoIsEnd
+53	liveVideoIsPaused
+54	liveVideoIsPlaying
+55	liveVideoNeedPaint
+56	liveVideoPause
+57	liveVideoPlay
+58	liveVideoReleaseDC
+59	liveVideoResume
+60	liveVideoSetAutoRepeat
+61	liveVideoSetPan
+62	liveVideoSetPosition
+63	liveVideoSetRect
+64	liveVideoSetVisible
+65	liveVideoSetVol
+66	liveVideoSuspend
+67	liveVidmanAdd
+68	liveVidmanDel
+69	liveVidmanFreeDIB
+70	liveVidmanGetDIB
+71	liveVidmanPause
+72	liveVidmanProcessEvent
+73	liveVidmanRestart
+74	liveVidmanResume
+75	liveVidmanSuspend
+76	liveWmpGetAutoRepeat
+77	liveWmpGetBuffPos
+78	liveWmpGetBuffSize
+79	liveWmpGetLen
+80	liveWmpGetPan
+81	liveWmpGetPosition
+82	liveWmpGetVol
+83	liveWmpGetWritePos
+84	liveWmpIsEnd
+85	liveWmpIsPaused
+86	liveWmpIsPlaying
+87	liveWmpPause
+88	liveWmpPlay
+89	liveWmpSetAutoRepeat
+90	liveWmpSetPan
+91	liveWmpSetPosition
+92	liveWmpSetVol
+93	liveWmpmanAdd
+94	liveWmpmanDel
+95	liveWmpmanProcessEvent
+96	liveWmpmanRestore
+
+## Export name groups (convenience)
+# [core]
+liveInit
+liveFinal
+liveGetErrorID
+liveVersion
+
+# [ogg]
+liveOggGetAutoRepeat
+liveOggGetBuffPos
+liveOggGetBuffSize
+liveOggGetLen
+liveOggGetPan
+liveOggGetPosition
+liveOggGetRepeatPos
+liveOggGetVol
+liveOggGetWritePos
+liveOggIsEnd
+liveOggIsPaused
+liveOggIsPlaying
+liveOggPause
+liveOggPlay
+liveOggSetAutoRepeat
+liveOggSetPan
+liveOggSetPosition
+liveOggSetRepeatPos
+liveOggSetVol
+liveOggStrGetFormat
+liveOggStrGetLen
+liveOggStrGetPos
+liveOggStrGetSize
+liveOggStrRead
+liveOggStrSetPos
+liveOggStrmanAdd
+liveOggStrmanDel
+liveOggmanAdd
+liveOggmanDel
+liveOggmanGetCount
+liveOggmanProcessEvent
+liveOggmanRestore
+liveOggmanSetUseThread
+liveOggmanUpdate
+
+# [screen]
+liveScreenGetVideoMode
+liveScreenGetVideoModeCount
+liveScreenSetVideoMode
+
+# [video]
+liveVideoGetAutoRepeat
+liveVideoGetDC
+liveVideoGetDIBInfo
+liveVideoGetLen
+liveVideoGetPan
+liveVideoGetPosition
+liveVideoGetSourceHeight
+liveVideoGetSourceWidth
+liveVideoGetVisible
+liveVideoGetVol
+liveVideoIsEnd
+liveVideoIsPaused
+liveVideoIsPlaying
+liveVideoNeedPaint
+liveVideoPause
+liveVideoPlay
+liveVideoReleaseDC
+liveVideoResume
+liveVideoSetAutoRepeat
+liveVideoSetPan
+liveVideoSetPosition
+liveVideoSetRect
+liveVideoSetVisible
+liveVideoSetVol
+liveVideoSuspend
+liveVidmanAdd
+liveVidmanDel
+liveVidmanFreeDIB
+liveVidmanGetDIB
+liveVidmanPause
+liveVidmanProcessEvent
+liveVidmanRestart
+liveVidmanResume
+liveVidmanSuspend
+
+# [wmp]
+liveWmpGetAutoRepeat
+liveWmpGetBuffPos
+liveWmpGetBuffSize
+liveWmpGetLen
+liveWmpGetPan
+liveWmpGetPosition
+liveWmpGetVol
+liveWmpGetWritePos
+liveWmpIsEnd
+liveWmpIsPaused
+liveWmpIsPlaying
+liveWmpPause
+liveWmpPlay
+liveWmpSetAutoRepeat
+liveWmpSetPan
+liveWmpSetPosition
+liveWmpSetVol
+liveWmpmanAdd
+liveWmpmanDel
+liveWmpmanProcessEvent
+liveWmpmanRestore
+
+## Other identifier-like strings (ASCII/UTF-16LE), excluding PE imports/exports
+# High false-positive rate (CRT/COM/WMP metadata). Manual review required.
+# count: 287
+AMUnblock
+BannerImageData
+BannerImageType
+BannerImageURL
+Bitrate
+Broadcast
+C0i0
+CGrabRenderer
+CopyrightURL
+CurrentBitrate
+CUWVP
+CWQPV
+Dc9h
+DeinterlaceMode
+DEST
+Duration
+EarlyDataDelivery
+F4PW
+FDPh
+FGQPS
+FHQRPV
+FLPQ
+Friday
+FxWP
+GAIsProcessorFeaturePresent
+GetActiveWindow
+GetCursorPos
+GetLastActivePopup
+GetMessageTime
+GlSP
+HasAudio
+HasImage
+HasScript
+HasVideo
+HHtpHHtl
+HMXB
+HSVHWtgHHtF
+HSVWh
+Hunj
+Input
+JanFebMarAprMayJunJulAugSepOctNovDec
+JPRQ
+JustInTimeDecode
+KERNEL32
+KPWQj
+LoadRegTypeLib
+LoadTypeLib
+LSUU
+LSVW
+MessageBoxA
+Monday
+NHQW
+NKeb
+NpSA
+NtOpenFile
+NtQuerySystemInformation
+NTuI
+NWVS
+OggS
+OlSQ
+OptimalBitrate
+Output
+PDJQR
+Phpd
+PhYY
+PPPP
+PPPPPPPP
+PQPRP
+PQRS
+PQRU
+PQRV
+PQVR
+PQWR
+PQWRV
+PRWSj
+PSQRV
+PSSW
+PSVQWV
+PSVRWV
+PSVVV
+PUWW
+PVSj
+PVSSW
+PVWSQ
+PVWU
+PVWV
+PWQR
+PWSR
+Qj0Sj
+QPSj
+QPWW
+QQS3
+QQSV
+QQSVW
+QQSVWd
+QQVW
+QRPW
+QRQPV
+QRSP
+QRUP
+QRVj
+QRVSP
+QRWPV
+QSRU
+QSURW
+QSUV
+QSUVWh
+QSVW
+QSVW3
+QUPS
+QUSSR
+QVWR
+QWPV
+QWRP
+QWRV
+QWVWR
+R6002
+R6008
+R6009
+R6016
+R6017
+R6018
+R6019
+R6024
+R6025
+R6026
+R6027
+R6028
+Rating
+Renderer
+Rich
+RIFF
+RPQV
+RPUQ
+RPWQ
+RPWV
+RPWWW
+RQWQ
+RSPS
+RSPSN
+RSPV
+RtlInitUnicodeString
+RUP3
+RUVP
+RUVVP
+RVQWS
+RVSPQ
+RVSV
+RVUP
+RWPQS
+RWPV
+RWQPQP
+S0o0
+Saturday
+Seed
+Seekable
+SingleOutputBuffer
+SjPP
+SoftwareScaling
+SPQR
+SQPWR
+SSSP
+Stridable
+Sunday
+SunMonTueWedThuFriSat
+SUUQ
+SUV3
+SUVW
+SUVW3
+SUVWPQ
+SUVWu
+SUWV
+SVPU
+SVW3
+SVWf
+SVWj
+SVWU
+SVWu
+SVWU3
+SVWUj
+SWPQ
+SWPU
+SWQW
+SWRW
+SWWU
+Thursday
+Title
+Tuesday
+UPWQV
+UQPP
+UQWS
+URQP
+USWS
+UUUP
+UUWWWQVRP
+UVPP
+UVSV
+UVW3
+UVWV
+UWVP
+V8RW
+VC20XC00U
+VDQR
+VhPy
+VPPS
+VPQR
+VPQV
+VPSW
+VPUU
+VPUUU
+VPWPW
+VPWQ
+VPWQR
+VPWS
+VQRP
+VQRS
+VQSU
+VQUU
+VQWW
+VRWU
+VSPP
+VSPQ
+VSQS
+VSRS
+VSSS
+VSUS
+VSUW
+VSWSQ
+VSWU
+VSWW
+VUPP
+VUSU
+VUSW
+VUUR
+VWPP
+VWPW
+VWQR
+VWQW
+VWRP
+VWsr
+VWSU
+VWSW
+VWt3j
+VWUW
+VWWQ
+VWWR
+VxPR
+VxQR
+WAVE
+Wednesday
+WMCreateReader
+WPPS
+WPQj
+WPQPQ
+WPQW
+WPSQV
+WPSS
+WPVQ
+WQPQP
+WQRP
+WQRV
+WQSV
+WRPW
+WRVP
+WSPQ
+WSPV
+WSSS
+WSUS
+WSVU
+WufS3
+WURU
+WUUP
+WUVP
+WUVU
+WVPP
+WVPSQ
+WVPV
+WVQV
+WVRPQ
+WVS3
+WVVV
+WWUUUQVRP
+WWWP
+WWWW
+YHYt
+YunQQ
+YYPW
+
+## Negative search (not found as ASCII or UTF-16LE substrings)
+ABSENT	GetProp
+ABSENT	SetProp
+ABSENT	CallFunc
+ABSENT	GetFunc
+ABSENT	ROWCOUNT
+ABSENT	TOPINDEX
+ABSENT	SCROLLSOURCE
+ABSENT	ONOPENING
+ABSENT	HA_CENTER
+ABSENT	OT_VERTICAL
+ABSENT	LiveMaker
+ABSENT	LiveNovel
+ABSENT	PR_NAME
+ABSENT	CommandType
+
+## Notes
+# - testgame and test2 share the same live.dll; no second extract needed.
+# - Script-level Func/Prop/Cmd names belong in the LiveNovel manual
+#   (docs/livenovel/, esp. calc.html / script.html / interface.html / prop.html)
+#   and in pylivemaker PropertyType/CommandType enums — not in this DLL.
+# - Do not invent LSB semantics from export names like liveVideoSetRect.
