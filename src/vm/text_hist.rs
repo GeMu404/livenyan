@@ -6,6 +6,37 @@ use crate::lsb::tpword::{Glyph, brk};
 use crate::scene::{Kind, Motion, TextItem};
 use std::collections::HashMap;
 
+/// Nombre del evento de sistema LiveNovel en un `Notify` (`\x01NAME\r\n...`).
+fn system_text_event_name(event: &str) -> Option<&str> {
+    let body = event.strip_prefix('\x01').unwrap_or(event);
+    let name = body.split("\r\n").next().unwrap_or("").trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// El plan ya exige un clic de lectura justo antes de este punto (p. ej. `<PS>` o
+/// `{PAUSE}`), ignorando limpiezas intermedias (`Clear` / `{TEXTCLEAR}`). Así un
+/// `<PG>` posterior no pide un segundo clic. **fuente primaria:** `script.html`
+/// (`<PS>` clic; `<PG>` clic+改ページ); la fusión evita duplicar esperas en el
+/// mismo `TextIns` sin anular un `<PG>` solo.
+fn plan_has_trailing_click_wait(plan: &[Pending]) -> bool {
+    for pending in plan.iter().rev() {
+        match pending {
+            Pending::Clear => continue,
+            Pending::Notify(event)
+                if system_text_event_name(event) == Some("TEXTCLEAR") =>
+            {
+                continue;
+            }
+            Pending::Click => return true,
+            Pending::Notify(event) if system_text_event_name(event) == Some("PAUSE") => {
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 impl Vm {
     pub(crate) fn append_history(&mut self, page: String, text: Vec<TextItem>) {
         if text.is_empty() {
@@ -99,11 +130,13 @@ impl Vm {
                         plan.push(Pending::Click);
                     }
                     // <PG>: docs/livenovel/script.html — show cursor, wait for click,
-                    // then page break. Distinct from <CLR> (clear only) and from the
-                    // LiveNovel {PAUSE} system event, which is a Notify, not this glyph.
+                    // then page break. If this TextIns already queued a click-wait
+                    // (`<PS>` / `{PAUSE}`), only clear — do not demand a second click.
                     brk::PAGE => {
                         flush(&mut plan, &mut cur);
-                        plan.push(Pending::Click);
+                        if !plan_has_trailing_click_wait(&plan) {
+                            plan.push(Pending::Click);
+                        }
                         plan.push(Pending::Clear);
                     }
                     // <CLR> / other breaks: clear without an implied click-wait.
@@ -1049,6 +1082,123 @@ mod tests {
             text.is_empty(),
             "page break clears the message after the click, got {text:?}"
         );
+    }
+
+    #[test]
+    fn page_break_after_pause_glyph_does_not_demand_a_second_click() {
+        // `<PS>` then `<PG>` in one TextIns: one click-wait, then clear.
+        use crate::lsb::tpword::{TpWord, brk};
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
+        );
+        let tw = TpWord {
+            version: 105,
+            body: vec![
+                Glyph::Char {
+                    ch: "a".into(),
+                    decorator: -1,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Return { kind: brk::PAUSE },
+                Glyph::Return { kind: brk::PAGE },
+            ],
+            ..TpWord::default()
+        };
+        vm.run_text("msg", &tw, true, false, false);
+        vm.update(0.0, 0);
+        assert!(vm.wants_click(), "first click-wait from <PS>/<PG> coalesce");
+        vm.click();
+        vm.update(16.0, 0);
+        assert!(
+            !vm.wants_click(),
+            "coalesced <PG> must not require a second click"
+        );
+        assert!(!vm.plays.contains_key("msg"));
+    }
+
+    #[test]
+    fn page_break_after_pause_system_event_does_not_demand_a_second_click() {
+        // LiveNovel pattern: {PAUSE}, optional {TEXTCLEAR}, then <PG>.
+        use crate::lsb::tpword::{TpWord, brk};
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
+        );
+        let tw = TpWord {
+            version: 105,
+            body: vec![
+                Glyph::Char {
+                    ch: "a".into(),
+                    decorator: -1,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Event {
+                    event: "\x01PAUSE\r\n".into(),
+                },
+                Glyph::Event {
+                    event: "\x01TEXTCLEAR".into(),
+                },
+                Glyph::Return { kind: brk::PAGE },
+            ],
+            ..TpWord::default()
+        };
+        vm.run_text("msg", &tw, true, false, false);
+        vm.update(0.0, 0);
+        assert!(vm.wants_click(), "{{PAUSE}} must wait");
+        vm.click();
+        vm.update(16.0, 0);
+        assert!(
+            !vm.wants_click(),
+            "<PG> after {{PAUSE}}/{{TEXTCLEAR}} must not wait again"
+        );
+        assert!(!vm.plays.contains_key("msg"));
     }
 
     #[test]
