@@ -79,8 +79,9 @@ impl Vm {
             .map(|v| v.as_str())
             .unwrap_or_default();
         let detail = format!("name={name:?} src={src:?}");
-        // WIDTH/HEIGHT en el comando Movie no existen en el manual; si vinieran del
-        // LSB se ignoran para el decode (inventado previo: pantalla lógica).
+        // Manual: Movie no documenta WIDTH/HEIGHT. Decode a tamaño nativo
+        // (**interpretación livenyan** I1: menos latencia que scale en ffmpeg;
+        // el present/SDL escala). Ver COMPATIBILITY.md.
         props.remove(&Prop::WIDTH);
         props.remove(&Prop::HEIGHT);
         props.insert(Prop::PLAYING, Value::Bool(false));

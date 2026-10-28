@@ -12,9 +12,11 @@ For the full command/tag/workaround inventory (what is implemented, how, expecte
 |---|---|---|
 | **fuente primaria** | Documented in the LiveNovel manual (local mirror) and/or named in pylivemaker enums that match the manual. | May drive behavior and tests. |
 | **no confirmado** | Reasonable inference, single-game observation, or manual silence. | Must not become “how LiveMaker works” without a citation upgrade. |
-| **inventado en livenyan** | Engine choice for gaps (fallback, clamp, Linux font substitute, etc.). | Keep labeled; cover with tests; do not back-port into the manual. |
+| **interpretación livenyan** | Deliberate modern/optimal divergence (latency, host fonts, SDL present, …). | Document *why*; not a fidelity bug. See `COMPATIBILITY.md`. |
+| **inventado en livenyan** | Gap-fill so scripts keep running (fade fallback, stub `true`, …). | Labeled debt or interim; do not back-port into the manual as LM semantics. |
+| **temporal** | Explicit stopgap with a replacement path. | Replace when the real path exists. |
 
-Ambiguous fixes require an explicit citation: **manual** (`docs/livenovel/…`), **strings** (`docs/live-dll-strings.txt` or equivalent extract), or a **controlled experiment** vs the original engine. See `.cursor/rules/livenyan.mdc`.
+livenyan is **not** a 1:1 Windows LiveMaker clone; it aims at content compatibility with a modern runtime. Ambiguous *script* semantics still need **manual** / **strings** / **experiment**. Pipeline/UX choices use **interpretación livenyan**. See `.cursor/rules/livenyan.mdc` and `COMPATIBILITY.md`.
 
 ## Primary sources (paths)
 

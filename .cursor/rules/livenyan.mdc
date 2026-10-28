@@ -21,16 +21,13 @@ Si hace falta verificar layout visual: wireframe. Si hace falta ver un asset gr�
 
 ## Semántica LiveMaker (no inventar)
 
-- **Índice de compatibilidad (leer primero):** [`COMPATIBILITY.md`](COMPATIBILITY.md) — comandos, tags, workarounds, pendiente, anclas de código. No reconstruir el mapa desde el repo si ya está ahí.
-- Detalle menú/LFT/media tipado: [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERFACE-REFERENCE.md) (`fuente primaria` / `no confirmado` / `inventado en livenyan`).
-- Fuente primaria local: `docs/livenovel/` (manual LiveNovel).
-- Strings/exports de `live.dll`: `docs/live-dll-strings.txt` (API media; **no** es tabla Prop/Cmd LSB).
-- **Fix ambiguo** (comportamiento de motor, props, layout, comandos no documentados con certeza): requiere **cita** a al menos uno de:
-  1. **manual** — página bajo `docs/livenovel/` (o ancla concreta), o
-  2. **strings** — símbolo/línea en `docs/live-dll-strings.txt` u otro extracto explícito, o
-  3. **experimento** — comparación controlada vs motor original (describir qué se observó).
-- Sin cita: marcar `no confirmado` o `inventado en livenyan`; no presentar como semántica LiveMaker.
-- Tras cambiar compatibilidad: **actualizar `COMPATIBILITY.md`** (y la interface reference si aplica).
+- **Índice (leer primero):** [`COMPATIBILITY.md`](COMPATIBILITY.md) — postura (no 1:1), comandos, tags, **interpretaciones** vs huecos, pendiente.
+- livenyan = interpretación **moderna/óptima** del repertorio LiveMaker (contenido/scripts), no clon bit-a-bit del runtime Win32. Divergencias de pipeline/UX a propósito → etiqueta **`interpretación livenyan`** (motivo en COMPATIBILITY), no “parche” ni “fix temporal”.
+- Detalle menú/LFT: [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERFACE-REFERENCE.md).
+- Manual: `docs/livenovel/`. Strings media: `docs/live-dll-strings.txt` (**no** tabla Prop/Cmd LSB).
+- **Semántica de script ambigua:** cita **manual** / **strings** / **experimento**. Sin cita: `no confirmado` o `inventado (hueco)` — no venderlo como LiveMaker.
+- **Mejora deliberada** (latencia vídeo, letterbox SDL, fuentes host…): documentar como interpretación; no exigir paridad con el original.
+- Tras cambiar compatibilidad: actualizar `COMPATIBILITY.md`.
 - No desensamblar ni publicar binarios del juego; no copiar código de DLLs.
 
 ## Tokens y herramientas
