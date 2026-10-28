@@ -25,6 +25,7 @@ mod step_prop;
 mod step_save;
 mod step_text;
 mod text_hist;
+mod wipe;
 
 use menu::{MenuItemKey, menu_item_key};
 

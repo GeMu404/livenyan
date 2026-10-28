@@ -63,12 +63,15 @@ impl Vm {
 
     /// Flip: transición sobre Targets durante Time (espera saltable).
     ///
-    /// Wipe soportados (ids LiveMaker `WP_*`): `0` NONE = corte sin aviso;
-    /// `1` FADE = fundido de opacidad (`ALPHA`) sobre Targets. Resto → warn
-    /// `unimpl:cmd Flip wipe=N` con el id.
+    /// Wipe (`WP_*`, ids enteros): **fuente primaria** `graphic.html`.
+    /// `0` NONE = corte; `1` FADE = fundido de `ALPHA` sobre Targets.
+    /// Resto: warn `unimpl:cmd Flip wipe=N` (con nombre si está en la tabla) y
+    /// el mismo fundido como aproximación (**inventado en livenyan**).
     ///
-    /// Act: `0` FL_OUT (sale / alpha→0), `1` FL_STAY (entra / alpha 0→actual|255).
-    /// Reverse invierte Act. Delete aplica al terminar la espera (o ya si Time=0).
+    /// Act: `0` FL_OUT / `1` FL_STAY — en livenyan se usan hoy como dirección
+    /// del fundido (salida vs entrada); el manual habla de qué capas quedan
+    /// delante/detrás (**no confirmado** que Act=fade). Reverse invierte Act.
+    /// Delete aplica al terminar la espera (o ya si Time=0).
     /// Param / Source / DifferenceOnly / StopEvent se leen; sin efecto extra en MVP.
     pub(crate) fn step_flip(&mut self, c: &Command) -> String {
         let wipe = self.eval(c.expr("Wipe")).as_int();
@@ -94,56 +97,20 @@ impl Vm {
             })
             .collect();
         // FL_OUT=0 → fundido de salida; FL_STAY=1 → entrada; Reverse invierte.
+        // (Act como dirección de alpha: ver comentario de step_flip.)
         let fade_out = (act == 0) != reverse;
+        let label = super::wipe::wipe_label(wipe);
         match wipe {
             0 => {}
-            1 => {
-                let animate = t > 0.0 && !self.skip;
-                for name in &targets {
-                    let Some(cur) = self
-                        .scene
-                        .get(name)
-                        .map(|obj| obj.int(Prop::ALPHA, 255) as f64)
-                    else {
-                        continue;
-                    };
-                    if fade_out {
-                        if animate {
-                            self.scene.add_motion(Motion {
-                                obj: name.clone(),
-                                prop: Prop::ALPHA,
-                                from: cur,
-                                to: 0.0,
-                                start: self.now,
-                                dur: t,
-                            });
-                        } else {
-                            self.scene.set(name, Prop::ALPHA, Value::Int(0));
-                        }
-                    } else {
-                        let to = if cur > 0.0 { cur } else { 255.0 };
-                        if animate {
-                            self.scene.set(name, Prop::ALPHA, Value::Int(0));
-                            self.scene.add_motion(Motion {
-                                obj: name.clone(),
-                                prop: Prop::ALPHA,
-                                from: 0.0,
-                                to,
-                                start: self.now,
-                                dur: t,
-                            });
-                        } else {
-                            self.scene
-                                .set(name, Prop::ALPHA, Value::Int(to.round() as i64));
-                        }
-                    }
-                }
-            }
+            1 => self.apply_flip_fade(&targets, fade_out, t),
             w => {
                 self.warn(
                     &format!("unimpl:cmd Flip wipe={w}"),
-                    &format!("Flip: wipe {w} not implemented"),
+                    &format!(
+                        "Flip: wipe {label} not implemented (fade approx)"
+                    ),
                 );
+                self.apply_flip_fade(&targets, fade_out, t);
             }
         }
         let defer_delete = del && t > 0.0 && !self.skip;
@@ -156,7 +123,7 @@ impl Vm {
             self.flip_pending_delete = targets.clone();
         }
         let detail = format!(
-            "wipe={wipe} {t}ms act={act} reverse={reverse} targets={} delete={del}",
+            "wipe={label} {t}ms act={act} reverse={reverse} targets={} delete={del}",
             targets.len()
         );
         if t > 0.0 && !self.skip {
@@ -166,6 +133,50 @@ impl Vm {
             };
         }
         detail
+    }
+
+    /// Fundido de `ALPHA` sobre Targets (WP_FADE y aproximación de otros wipes).
+    fn apply_flip_fade(&mut self, targets: &[String], fade_out: bool, t: f64) {
+        let animate = t > 0.0 && !self.skip;
+        for name in targets {
+            let Some(cur) = self
+                .scene
+                .get(name)
+                .map(|obj| obj.int(Prop::ALPHA, 255) as f64)
+            else {
+                continue;
+            };
+            if fade_out {
+                if animate {
+                    self.scene.add_motion(Motion {
+                        obj: name.clone(),
+                        prop: Prop::ALPHA,
+                        from: cur,
+                        to: 0.0,
+                        start: self.now,
+                        dur: t,
+                    });
+                } else {
+                    self.scene.set(name, Prop::ALPHA, Value::Int(0));
+                }
+            } else {
+                let to = if cur > 0.0 { cur } else { 255.0 };
+                if animate {
+                    self.scene.set(name, Prop::ALPHA, Value::Int(0));
+                    self.scene.add_motion(Motion {
+                        obj: name.clone(),
+                        prop: Prop::ALPHA,
+                        from: 0.0,
+                        to,
+                        start: self.now,
+                        dur: t,
+                    });
+                } else {
+                    self.scene
+                        .set(name, Prop::ALPHA, Value::Int(to.round() as i64));
+                }
+            }
+        }
     }
 
     /// Tras WaitUntil de un Flip: borra Targets pendientes (Delete diferido).
