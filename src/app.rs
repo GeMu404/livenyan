@@ -45,14 +45,6 @@ struct Gfx {
     pixel_fonts: Arc<PixelFontCatalog>,
     toolbar_texts: HashMap<String, (usize, Texture)>,
     crossfade_safety: HashMap<String, bool>,
-    #[cfg(feature = "nvidia-optical-flow")]
-    optical_flow_textures: HashMap<String, OpticalFlowTexture>,
-    #[cfg(feature = "nvidia-optical-flow")]
-    optical_flow_failures: HashSet<String>,
-    #[cfg(feature = "nvidia-optical-flow")]
-    video_optical_flow_textures: HashMap<String, Texture>,
-    #[cfg(feature = "nvidia-optical-flow")]
-    video_optical_flow_failures: HashSet<String>,
     animation_delays: HashMap<String, Vec<u32>>,
     menu: Option<MenuCache>,
 }
@@ -66,24 +58,13 @@ struct ImageTextureCacheEntry {
 struct TextureMemoryStats {
     image_bytes: usize,
     video_bytes: usize,
-    optical_flow_bytes: usize,
     ui_bytes: usize,
     render_target_bytes: usize,
     image_count: usize,
     video_count: usize,
-    optical_flow_count: usize,
     ui_count: usize,
 }
 
-#[cfg(feature = "nvidia-optical-flow")]
-struct OpticalFlowTexture {
-    source: String,
-    from_frame: usize,
-    to_frame: usize,
-    texture: Texture,
-    width: u32,
-    height: u32,
-}
 
 struct MenuCache {
     name: String,
@@ -259,24 +240,6 @@ fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> TextureMemorySta
             bytes.saturating_add(estimated_texture_bytes(query.width, query.height))
         });
 
-    #[cfg(feature = "nvidia-optical-flow")]
-    {
-        stats.optical_flow_count =
-            gfx.optical_flow_textures.len() + gfx.video_optical_flow_textures.len();
-        stats.optical_flow_bytes = gfx
-            .optical_flow_textures
-            .values()
-            .fold(0usize, |bytes, entry| {
-                bytes.saturating_add(estimated_texture_bytes(entry.width, entry.height))
-            })
-            .saturating_add(gfx.video_optical_flow_textures.values().fold(
-                0usize,
-                |bytes, texture| {
-                    let query = texture.query();
-                    bytes.saturating_add(estimated_texture_bytes(query.width, query.height))
-                },
-            ));
-    }
 
     stats
 }
@@ -372,25 +335,10 @@ fn point_in_logical_render(point: (f32, f32), logical: (u32, u32)) -> bool {
 
 fn interpolation_option_rects(width: u32) -> Vec<(InterpolationMode, FRect)> {
     let y = 77.0;
-    #[cfg(feature = "nvidia-optical-flow")]
-    let modes = [
-        InterpolationMode::Off,
-        InterpolationMode::Crossfade,
-        InterpolationMode::OpticalFlow,
-    ];
-    #[cfg(not(feature = "nvidia-optical-flow"))]
     let modes = [InterpolationMode::Off, InterpolationMode::Crossfade];
-    let w = if cfg!(feature = "nvidia-optical-flow") {
-        84.0
-    } else {
-        96.0
-    };
+    let w = 96.0;
     let h = 27.0;
-    let gap = if cfg!(feature = "nvidia-optical-flow") {
-        5.0
-    } else {
-        8.0
-    };
+    let gap = 8.0;
     let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
     let x = width as f32 - 6.0 - total_width;
     modes
@@ -413,10 +361,6 @@ fn frame_is_opaque(image: &crate::gal::Image, frame: usize) -> bool {
         .is_some_and(|pixels| pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX))
 }
 
-#[cfg(feature = "nvidia-optical-flow")]
-fn rgba_frame_is_opaque(pixels: &[u8]) -> bool {
-    pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX)
-}
 
 fn can_crossfade_frames(
     image: &crate::gal::Image,
@@ -884,14 +828,6 @@ fn apply_cached_texture_scale_modes(gfx: &mut Gfx, mode: ScaleMode) {
             texture.set_scale_mode(mode);
         }
     }
-    #[cfg(feature = "nvidia-optical-flow")]
-    for entry in gfx.optical_flow_textures.values_mut() {
-        entry.texture.set_scale_mode(mode);
-    }
-    #[cfg(feature = "nvidia-optical-flow")]
-    for texture in gfx.video_optical_flow_textures.values_mut() {
-        texture.set_scale_mode(mode);
-    }
 }
 
 /// Letterbox del framebuffer lógico con nearest (líneas nítidas, sin IA).
@@ -954,12 +890,6 @@ fn upload_with_error(
     Ok(t)
 }
 
-#[cfg(feature = "nvidia-optical-flow")]
-fn update_with_error(texture: &mut Texture, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
-    texture
-        .update(None, rgba, (w * 4) as usize)
-        .map_err(|error| format!("cannot update {w}x{h} RGBA texture: {error}"))
-}
 
 /// Estado de dibujo de un objeto (para el registro de depuración).
 struct Drawn {
@@ -981,26 +911,12 @@ pub fn run(
     snapshot: Option<(u64, std::path::PathBuf)>,
     debug_layout: bool,
 ) -> Result<(), String> {
-    let default_interpolation = if cfg.window.optical_flow {
-        #[cfg(feature = "nvidia-optical-flow")]
-        {
-            InterpolationMode::OpticalFlow
-        }
-        #[cfg(not(feature = "nvidia-optical-flow"))]
-        {
-            log::warn!("NVIDIA Optical Flow requested, but this build lacks the feature");
-            InterpolationMode::Off
-        }
-    } else if cfg.window.interpolate_animations {
+    let default_interpolation = if cfg.window.interpolate_animations {
         InterpolationMode::Crossfade
     } else {
         InterpolationMode::Off
     };
-    let mut interpolation_mode = if cfg.window.optical_flow {
-        default_interpolation
-    } else {
-        load_interpolation_preference(default_interpolation)
-    };
+    let mut interpolation_mode = load_interpolation_preference(default_interpolation);
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     log::info!("video driver: {}", video.current_video_driver());
@@ -1022,62 +938,11 @@ pub fn run(
     } else {
         wb.high_pixel_density();
     }
-    let mut use_shared_vulkan =
-        snapshot.is_none() && cfg.window.renderer.eq_ignore_ascii_case("vulkan");
-    if use_shared_vulkan {
-        match video.vulkan_load_library_default() {
-            Ok(()) => {
-                wb.vulkan();
-            }
-            Err(error) => {
-                log::warn!("cannot load Vulkan; falling back to SDL renderer: {error}");
-                use_shared_vulkan = false;
-            }
-        }
-    }
     let mut window = wb.build().map_err(|e| e.to_string())?;
     if cfg.window.fullscreen {
         let _ = window.set_fullscreen(true);
     }
-    let mut _native_vulkan = None;
-    let mut shared_renderer = None;
-    if use_shared_vulkan {
-        match crate::vulkan::SdlVulkanContext::new(&window) {
-            Ok(mut context) => {
-                #[cfg(feature = "nvidia-optical-flow")]
-                if interpolation_mode == InterpolationMode::OpticalFlow {
-                    if let Err(error) = context.ensure_optical_flow_session(lw, lh) {
-                        log::warn!(
-                            "NVIDIA Optical Flow unavailable; using crossfade instead: {error}"
-                        );
-                        interpolation_mode = InterpolationMode::Crossfade;
-                    }
-                }
-                match context.create_sdl_renderer(&window) {
-                    Ok(renderer) => {
-                        log::info!(
-                            "using SDL Vulkan renderer on shared device {:?} (graphics queue {})",
-                            context.name,
-                            context.graphics_queue_family
-                        );
-                        shared_renderer = Some(renderer);
-                        _native_vulkan = Some(context);
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "shared Vulkan renderer unavailable; falling back to SDL: {error}"
-                        );
-                        use_shared_vulkan = false;
-                    }
-                }
-            }
-            Err(error) => {
-                log::warn!("cannot initialize shared Vulkan device; falling back to SDL: {error}");
-                use_shared_vulkan = false;
-            }
-        }
-    }
-    if shared_renderer.is_none() && !cfg.window.renderer.is_empty() && !use_shared_vulkan {
+    if !cfg.window.renderer.is_empty() {
         // probar el driver antes: si no funciona en este sistema, avisar y usar el automático
         let name = std::ffi::CString::new(cfg.window.renderer.as_str()).unwrap_or_default();
         let ok = unsafe {
@@ -1099,18 +964,7 @@ pub fn run(
             );
         }
     }
-    #[cfg(feature = "nvidia-optical-flow")]
-    if interpolation_mode == InterpolationMode::OpticalFlow && _native_vulkan.is_none() {
-        log::warn!(
-            "NVIDIA Optical Flow requires the shared Vulkan renderer; using crossfade instead"
-        );
-        interpolation_mode = InterpolationMode::Crossfade;
-    }
-    let mut canvas: Canvas<Window> = if let Some(renderer) = shared_renderer {
-        unsafe { sdl3::render::Canvas::from_window_and_renderer(window, renderer) }
-    } else {
-        window.into_canvas()
-    };
+    let mut canvas: Canvas<Window> = window.into_canvas();
     let rname = unsafe {
         let p = sdl3::sys::render::SDL_GetRendererName(canvas.raw());
         if p.is_null() {
@@ -1171,11 +1025,6 @@ pub fn run(
     let mut scene_frame_ready = false;
     let mut present_scale = ScaleFilter::from_config(&cfg.window.scale_filter);
     apply_present_scale_hint(&canvas, present_scale);
-    if let Some(context) = _native_vulkan.as_mut() {
-        if let Err(error) = context.set_present_scale_filter(present_scale) {
-            log::warn!("{error}");
-        }
-    }
     let mut filter = if present_scale.asset_nearest() {
         ScaleMode::Nearest
     } else {
@@ -1254,14 +1103,6 @@ pub fn run(
         pixel_fonts: vm.pixel_fonts(),
         toolbar_texts: HashMap::new(),
         crossfade_safety: HashMap::new(),
-        #[cfg(feature = "nvidia-optical-flow")]
-        optical_flow_textures: HashMap::new(),
-        #[cfg(feature = "nvidia-optical-flow")]
-        optical_flow_failures: HashSet::new(),
-        #[cfg(feature = "nvidia-optical-flow")]
-        video_optical_flow_textures: HashMap::new(),
-        #[cfg(feature = "nvidia-optical-flow")]
-        video_optical_flow_failures: HashSet::new(),
         animation_delays: HashMap::new(),
         menu: None,
     };
@@ -1573,13 +1414,6 @@ pub fn run(
                                 });
                                 apply_cached_texture_scale_modes(&mut gfx, filter);
                                 apply_present_scale_hint(&canvas, present_scale);
-                                if let Some(context) = _native_vulkan.as_mut() {
-                                    if let Err(error) =
-                                        context.set_present_scale_filter(present_scale)
-                                    {
-                                        log::warn!("{error}");
-                                    }
-                                }
                                 log::info!(
                                     "scale_filter → {} (asset={:?}, present_nearest={})",
                                     present_scale.as_str(),
@@ -1588,27 +1422,6 @@ pub fn run(
                                 );
                             }
                             ToolbarAction::Interpolation(mode) => {
-                                #[cfg(feature = "nvidia-optical-flow")]
-                                let mode = if mode == InterpolationMode::OpticalFlow {
-                                    match _native_vulkan
-                                        .as_mut()
-                                        .ok_or_else(|| {
-                                            "shared Vulkan renderer is unavailable".to_string()
-                                        })
-                                        .and_then(|context| {
-                                            context.ensure_optical_flow_session(lw, lh)
-                                        }) {
-                                        Ok(_) => mode,
-                                        Err(error) => {
-                                            log::warn!(
-                                                "NVIDIA Optical Flow unavailable; using crossfade instead: {error}"
-                                            );
-                                            InterpolationMode::Crossfade
-                                        }
-                                    }
-                                } else {
-                                    mode
-                                };
                                 interpolation_mode = mode;
                                 if let Err(error) =
                                     save_interpolation_preference(interpolation_mode)
@@ -1881,8 +1694,6 @@ pub fn run(
                         (lw, lh),
                         debug_layout,
                         interpolation_mode,
-                        #[cfg(feature = "nvidia-optical-flow")]
-                        _native_vulkan.as_mut(),
                     );
                     if let State::Menu { name, choices, .. } = &vm.state {
                         draw_menu(
@@ -2045,19 +1856,16 @@ pub fn run(
             let total_bytes = stats
                 .image_bytes
                 .saturating_add(stats.video_bytes)
-                .saturating_add(stats.optical_flow_bytes)
                 .saturating_add(stats.ui_bytes)
                 .saturating_add(stats.render_target_bytes);
             let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
             log::info!(
-                "estimated GPU textures: total {:.1} MiB | GAL/images {:.1} MiB ({} textures) | video {:.1} MiB ({} textures) | Optical Flow {:.1} MiB ({} textures) | UI/text {:.1} MiB ({} textures) | scene target {:.1} MiB",
+                "estimated GPU textures: total {:.1} MiB | GAL/images {:.1} MiB ({} textures) | video {:.1} MiB ({} textures) | UI/text {:.1} MiB ({} textures) | scene target {:.1} MiB",
                 mib(total_bytes),
                 mib(stats.image_bytes),
                 stats.image_count,
                 mib(stats.video_bytes),
                 stats.video_count,
-                mib(stats.optical_flow_bytes),
-                stats.optical_flow_count,
                 mib(stats.ui_bytes),
                 stats.ui_count,
                 mib(stats.render_target_bytes)
@@ -2267,9 +2075,6 @@ fn draw_toolbar(
         let _ = canvas.fill_rect(panel);
         canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
         let _ = canvas.draw_rect(panel);
-        #[cfg(feature = "nvidia-optical-flow")]
-        let interpolation_label = "Interpolación GAL/vídeo";
-        #[cfg(not(feature = "nvidia-optical-flow"))]
         let interpolation_label = "Fundido de GAL opacos grandes";
         draw_toolbar_text(
             canvas,
@@ -2301,8 +2106,6 @@ fn draw_toolbar(
             let label = match mode {
                 InterpolationMode::Off => "Off",
                 InterpolationMode::Crossfade => "Fundido",
-                #[cfg(feature = "nvidia-optical-flow")]
-                InterpolationMode::OpticalFlow => "Optical Flow",
             };
             draw_toolbar_text(
                 canvas,
@@ -2384,13 +2187,6 @@ fn draw_toolbar(
             fps_rect.w as u32 - 12,
             fps_rect.h as u32,
         );
-        #[cfg(feature = "nvidia-optical-flow")]
-        let detail = if vsync_active {
-            "GAL/vídeo pantalla completa · refresco"
-        } else {
-            "GAL/vídeo pantalla completa · sin VSync"
-        };
-        #[cfg(not(feature = "nvidia-optical-flow"))]
         let detail = if vsync_active {
             "Solo GAL opacos grandes · refresco del monitor"
         } else {
@@ -3888,9 +3684,6 @@ fn draw_scene(
     (lw, lh): (u32, u32),
     debug_layout: bool,
     interpolation_mode: InterpolationMode,
-    #[cfg(feature = "nvidia-optical-flow")] mut optical_flow: Option<
-        &mut crate::vulkan::SdlVulkanContext,
-    >,
 ) -> Vec<Drawn> {
     let order = ordered_objects;
     gfx.image_texture_used_this_frame.clear();
@@ -3902,12 +3695,6 @@ fn draw_scene(
     let mut sizes: Vec<(String, u32, u32)> = vec![];
     let mut active_menu_animations = HashSet::new();
     let mut active_crossfade_pairs = HashSet::new();
-    #[cfg(feature = "nvidia-optical-flow")]
-    let mut active_optical_flow_pairs = HashSet::new();
-    #[cfg(feature = "nvidia-optical-flow")]
-    let mut active_optical_flow_objects = HashSet::new();
-    #[cfg(feature = "nvidia-optical-flow")]
-    let mut active_video_optical_flow_pairs = HashSet::new();
     let mut active_videos = HashSet::new();
     let mut drawn: Vec<Drawn> = Vec::with_capacity(order.len());
     for (z, o) in order.iter().enumerate() {
@@ -4224,133 +4011,6 @@ fn draw_scene(
                     format!("{key}#{current_frame}")
                 };
                 let crossfade_key = format!("{key}:{current_frame}:{next_frame}");
-                #[cfg(feature = "nvidia-optical-flow")]
-                let mut optical_flow_failed = false;
-                #[cfg(feature = "nvidia-optical-flow")]
-                let mut optical_flow_midpoint = false;
-                #[cfg(feature = "nvidia-optical-flow")]
-                if interpolation_mode == InterpolationMode::OpticalFlow
-                    && o.kind == Kind::Image
-                    && alpha == u8::MAX
-                    && iw == lw
-                    && ih == lh
-                    && x == 0.0
-                    && y == 0.0
-                    && dw == lw as f32
-                    && dh == lh as f32
-                    && next_frame != current_frame
-                {
-                    active_optical_flow_pairs.insert(crossfade_key.clone());
-                    active_optical_flow_objects.insert(o.name.clone());
-                    let cached = gfx.optical_flow_textures.get(&o.name).is_some_and(|entry| {
-                        entry.source == key
-                            && entry.from_frame == current_frame
-                            && entry.to_frame == next_frame
-                    });
-                    let failed = gfx.optical_flow_failures.contains(&crossfade_key);
-                    if !cached && !failed {
-                        let generated = match (assets.try_get(&key), optical_flow.as_deref_mut()) {
-                            (Some(Asset::Image(image)), Some(context)) => {
-                                match (
-                                    gal_frame_pixels(&image, current_frame),
-                                    gal_frame_pixels(&image, next_frame),
-                                ) {
-                                    (Some(previous), Some(next))
-                                        if can_crossfade_frames(
-                                            &image,
-                                            current_frame,
-                                            next_frame,
-                                            alpha,
-                                        ) =>
-                                    {
-                                        context
-                                            .execute_optical_flow_frames(previous, next)
-                                            .map(|(result, motion)| (result, motion))
-                                    }
-                                    _ => Err("Optical Flow requires two opaque decoded GAL frames"
-                                        .into()),
-                                }
-                            }
-                            (_, None) => Err("shared Vulkan renderer is unavailable".into()),
-                            _ => Err("GAL animation frames are not decoded".into()),
-                        };
-                        match generated {
-                            Ok((image, motion)) => {
-                                let texture_result = match gfx
-                                    .optical_flow_textures
-                                    .get_mut(&o.name)
-                                {
-                                    Some(entry)
-                                        if entry.width == image.w && entry.height == image.h =>
-                                    {
-                                        update_with_error(
-                                            &mut entry.texture,
-                                            image.w,
-                                            image.h,
-                                            &image.rgba,
-                                        )
-                                        .map(|()| {
-                                            entry.source = key.clone();
-                                            entry.from_frame = current_frame;
-                                            entry.to_frame = next_frame;
-                                        })
-                                    }
-                                    _ => {
-                                        upload_with_error(tc, image.w, image.h, &image.rgba, filter)
-                                            .map(|texture| {
-                                                gfx.optical_flow_textures.insert(
-                                                    o.name.clone(),
-                                                    OpticalFlowTexture {
-                                                        source: key.clone(),
-                                                        from_frame: current_frame,
-                                                        to_frame: next_frame,
-                                                        texture,
-                                                        width: image.w,
-                                                        height: image.h,
-                                                    },
-                                                );
-                                            })
-                                    }
-                                };
-                                match texture_result {
-                                    Ok(()) => {
-                                        log::debug!(
-                                            "Optical Flow {} frames {current_frame}->{next_frame}: motion ({:.2}, {:.2})",
-                                            key,
-                                            motion.0,
-                                            motion.1
-                                        );
-                                    }
-                                    Err(error) => {
-                                        optical_flow_failed = true;
-                                        gfx.optical_flow_failures.insert(crossfade_key.clone());
-                                        log::warn!(
-                                            "cannot upload interpolated GAL frame {key} {current_frame}->{next_frame}: {error}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                optical_flow_failed = true;
-                                gfx.optical_flow_failures.insert(crossfade_key.clone());
-                                log::warn!("cannot interpolate GAL frames for {key}: {error}");
-                            }
-                        }
-                    }
-                    optical_flow_midpoint = progress >= 0.5
-                        && gfx.optical_flow_textures.get(&o.name).is_some_and(|entry| {
-                            entry.source == key
-                                && entry.from_frame == current_frame
-                                && entry.to_frame == next_frame
-                        });
-                    optical_flow_failed |= failed;
-                }
-                #[cfg(feature = "nvidia-optical-flow")]
-                let crossfade_active = (interpolation_mode == InterpolationMode::Crossfade
-                    || optical_flow_failed)
-                    && progress > 0.0
-                    && next_frame != current_frame;
-                #[cfg(not(feature = "nvidia-optical-flow"))]
                 let crossfade_active = interpolation_mode == InterpolationMode::Crossfade
                     && progress > 0.0
                     && next_frame != current_frame;
@@ -4374,19 +4034,7 @@ fn draw_scene(
                 if crossfade_active {
                     active_crossfade_pairs.insert(crossfade_key.clone());
                 }
-                #[cfg(feature = "nvidia-optical-flow")]
-                let optical_flow_texture = optical_flow_midpoint
-                    .then(|| {
-                        gfx.optical_flow_textures
-                            .get_mut(&o.name)
-                            .map(|entry| &mut entry.texture)
-                    })
-                    .flatten();
-                #[cfg(not(feature = "nvidia-optical-flow"))]
-                let optical_flow_texture: Option<&mut Texture> = None;
-                if let Some(texture) = optical_flow_texture {
-                    let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
-                } else if let Some((texture, _, _)) = gfx.images.get_mut(&current_key) {
+                if let Some((texture, _, _)) = gfx.images.get_mut(&current_key) {
                     if crossfade_safe {
                         texture.set_blend_mode(BlendMode::None);
                         texture.set_alpha_mod(u8::MAX);
@@ -4881,146 +4529,6 @@ fn draw_scene(
                     (vx, vy, vw as f32, vh as f32)
                 };
                 drawn[di].rect = (x as f32, y as f32, dw, dh);
-                #[cfg(feature = "nvidia-optical-flow")]
-                let optical_flow_video = interpolation_mode == InterpolationMode::OpticalFlow
-                    && alpha == u8::MAX
-                    && video_width == lw
-                    && video_height == lh
-                    && x == 0.0
-                    && y == 0.0
-                    && dw == lw as f32
-                    && dh == lh as f32
-                    && !video_frame.current_duplicate
-                    && video_frame.previous.is_some();
-                #[cfg(feature = "nvidia-optical-flow")]
-                let video_flow_key = format!("video:{}:{generation}:{sequence}", o.name);
-                #[cfg(feature = "nvidia-optical-flow")]
-                let mut video_flow_failed = false;
-                #[cfg(feature = "nvidia-optical-flow")]
-                if optical_flow_video {
-                    active_video_optical_flow_pairs.insert(video_flow_key.clone());
-                    let (previous_pixels, _, _, previous_sequence) =
-                        video_frame.previous.expect("checked above");
-                    let previous_texture_stale = gfx
-                        .video_previous_textures
-                        .get(&o.name)
-                        .is_none_or(|(old_generation, old_sequence, _, width, height)| {
-                            *old_generation != generation
-                                || *old_sequence != previous_sequence
-                                || *width != video_width
-                                || *height != video_height
-                        });
-                    if previous_texture_stale {
-                        if let Some(previous_texture) =
-                            upload(tc, video_width, video_height, previous_pixels, filter)
-                        {
-                            gfx.video_previous_textures.insert(
-                                o.name.clone(),
-                                (
-                                    generation,
-                                    previous_sequence,
-                                    previous_texture,
-                                    video_width,
-                                    video_height,
-                                ),
-                            );
-                        } else {
-                            log::warn!("cannot upload previous video frame for {:?}", o.name);
-                        }
-                    }
-                    let cached = gfx
-                        .video_optical_flow_textures
-                        .contains_key(&video_flow_key);
-                    let mut failed = gfx.video_optical_flow_failures.contains(&video_flow_key);
-                    if !cached
-                        && !failed
-                        && (!rgba_frame_is_opaque(previous_pixels) || !rgba_frame_is_opaque(pixels))
-                    {
-                        failed = true;
-                        gfx.video_optical_flow_failures
-                            .insert(video_flow_key.clone());
-                        log::warn!(
-                            "Optical Flow skipped transparent video frames for {:?}",
-                            o.name
-                        );
-                    }
-                    if !cached && !failed {
-                        let generated = optical_flow
-                            .as_deref_mut()
-                            .ok_or_else(|| "shared Vulkan renderer is unavailable".to_string())
-                            .and_then(|context| {
-                                context
-                                    .execute_optical_flow_frames(previous_pixels, pixels)
-                                    .map(|(image, motion)| (image, motion))
-                            });
-                        match generated {
-                            Ok((image, motion)) => {
-                                if let Some(interpolated_texture) =
-                                    upload(tc, image.w, image.h, &image.rgba, filter)
-                                {
-                                    log::debug!(
-                                        "Optical Flow video {:?} frames {}->{}: motion ({:.2}, {:.2})",
-                                        o.name,
-                                        sequence.saturating_sub(1),
-                                        sequence,
-                                        motion.0,
-                                        motion.1
-                                    );
-                                    gfx.video_optical_flow_textures
-                                        .insert(video_flow_key.clone(), interpolated_texture);
-                                } else {
-                                    video_flow_failed = true;
-                                    gfx.video_optical_flow_failures
-                                        .insert(video_flow_key.clone());
-                                    log::warn!(
-                                        "cannot upload interpolated video frame for {:?}",
-                                        o.name
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                video_flow_failed = true;
-                                gfx.video_optical_flow_failures
-                                    .insert(video_flow_key.clone());
-                                log::warn!(
-                                    "cannot interpolate video frames for {:?}: {error}",
-                                    o.name
-                                );
-                            }
-                        }
-                    }
-                    video_flow_failed |= failed;
-                }
-                #[cfg(feature = "nvidia-optical-flow")]
-                let use_video_midpoint = optical_flow_video
-                    && !video_flow_failed
-                    && video_frame.progress >= 0.5
-                    && video_frame.progress < 1.0
-                    && gfx
-                        .video_optical_flow_textures
-                        .contains_key(&video_flow_key);
-                #[cfg(feature = "nvidia-optical-flow")]
-                let use_video_previous = optical_flow_video
-                    && !video_flow_failed
-                    && video_frame.progress < 0.5
-                    && gfx.video_previous_textures.contains_key(&o.name);
-                #[cfg(feature = "nvidia-optical-flow")]
-                if use_video_midpoint {
-                    if let Some(texture) = gfx.video_optical_flow_textures.get_mut(&video_flow_key)
-                    {
-                        let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
-                    }
-                } else if use_video_previous {
-                    if let Some((_, _, texture, _, _)) =
-                        gfx.video_previous_textures.get_mut(&o.name)
-                    {
-                        let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
-                    }
-                } else if let Some((texture, _, _, _, _)) = gfx.video_textures.get_mut(&o.name) {
-                    texture.set_alpha_mod(alpha);
-                    let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
-                }
-                #[cfg(not(feature = "nvidia-optical-flow"))]
                 if let Some((texture, _, _, _, _)) = gfx.video_textures.get_mut(&o.name) {
                     texture.set_alpha_mod(alpha);
                     let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
@@ -5052,29 +4560,13 @@ fn draw_scene(
         .retain(|name, _| active_videos.contains(name));
     gfx.crossfade_safety
         .retain(|key, _| active_crossfade_pairs.contains(key));
-    #[cfg(feature = "nvidia-optical-flow")]
-    {
-        gfx.video_optical_flow_textures
-            .retain(|key, _| active_video_optical_flow_pairs.contains(key));
-        gfx.video_optical_flow_failures
-            .retain(|key| active_video_optical_flow_pairs.contains(key));
-    }
     gfx.menu_animation_starts
         .retain(|key, _| active_menu_animations.contains(key));
-    #[cfg(feature = "nvidia-optical-flow")]
-    {
-        gfx.optical_flow_textures
-            .retain(|name, _| active_optical_flow_objects.contains(name));
-        gfx.optical_flow_failures
-            .retain(|key| active_optical_flow_pairs.contains(key));
-    }
     drawn
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "nvidia-optical-flow")]
-    use super::rgba_frame_is_opaque;
     use super::{
         FRect, ImageTextureCacheEntry, add_rect_to_bounds, default_language_selection,
         edit_key_code, estimated_texture_bytes, gal_animation_frame, image_texture_cache_evictions,
@@ -5087,13 +4579,6 @@ mod tests {
     use crate::lsb::{Prop, expr::Value};
     use crate::scene::{Kind, Scene};
     use std::collections::{HashMap, HashSet};
-
-    #[test]
-    #[cfg(feature = "nvidia-optical-flow")]
-    fn video_optical_flow_requires_opaque_rgba_frames() {
-        assert!(rgba_frame_is_opaque(&[0, 50, 100, 255, 255, 200, 100, 255]));
-        assert!(!rgba_frame_is_opaque(&[0, 50, 100, 255, 255, 200, 100, 0]));
-    }
 
     #[test]
     fn interpolation_is_limited_to_large_image_gals_and_toolbar_hit_targets() {

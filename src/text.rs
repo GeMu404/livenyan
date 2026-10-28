@@ -148,7 +148,7 @@ struct Glyph {
     cov: Vec<u8>,
 }
 
-pub type Rendered = crate::renderer::RgbaImage;
+pub type Rendered = crate::rgba::RgbaImage;
 
 impl TextRenderer {
     /// Carga perezosa (ab_glyph/ttf-parser): casi instantánea incluso con TTC CJK grandes.

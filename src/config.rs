@@ -26,10 +26,8 @@ pub struct WindowCfg {
     pub interpolate_animations: bool,
     /// Escalado del present (letterbox): "linear", "nearest", "sharp" o "off" (=linear).
     pub scale_filter: String,
-    /// Driver de SDL; por defecto usa Vulkan y cae al renderer automático si no está disponible.
+    /// Driver de SDL; vacío = automático.
     pub renderer: String,
-    /// Activa NVIDIA Optical Flow al compilar con la feature correspondiente.
-    pub optical_flow: bool,
     /// Muestra el medidor de cuadros presentados.
     pub fps_meter: bool,
 }
@@ -109,8 +107,7 @@ impl Default for WindowCfg {
             vsync: true,
             interpolate_animations: false,
             scale_filter: "sharp".into(),
-            renderer: "vulkan".into(),
-            optical_flow: false,
+            renderer: String::new(),
             fps_meter: false,
         }
     }
@@ -193,7 +190,7 @@ mod tests {
     use super::WindowCfg;
 
     #[test]
-    fn window_defaults_to_vulkan_renderer() {
-        assert_eq!(WindowCfg::default().renderer, "vulkan");
+    fn window_defaults_to_automatic_renderer() {
+        assert_eq!(WindowCfg::default().renderer, "");
     }
 }

@@ -22,14 +22,14 @@ cargo build --release
 Sin SDL3 del sistema (o en Windows): `cargo build --release --features static-sdl`
 (necesita `cmake` y un compilador de C).
 
-La interpolación experimental con NVIDIA Optical Flow se excluye del build por defecto.
-Para habilitar el modo de prueba, compila con `--features nvidia-optical-flow` y ejecuta
-con `--optical-flow` (también se puede seleccionar desde Opciones). Requiere una GPU/driver
-que exponga `VK_NV_optical_flow`; el renderer Vulkan normal no activa ni requiere esa extensión.
+El renderer SDL es automático por defecto (`window.renderer` / `--renderer` vacío).
+Puedes forzar un driver (`opengl`, `vulkan`, `software`, `gpu`, …); si no está
+disponible, cae al automático. El backend Vulkan/ash experimental y NVIDIA Optical
+Flow quedaron archivados en el tag `archive/vulkan-optical-flow`.
 
 Escalado del present (letterbox lógico→ventana): `scale_filter` / `--scale-filter` /
 Opciones → **Linear** (suave), **Nearest** (píxel duro en assets y present) o
-**Sharp** (assets linear + present nearest, líneas nítidas baratas). Sin upscale IA.
+**Sharp** (assets nearest + present nearest). Sin upscale IA.
 
 Binario: `target/release/livenyan`
 
@@ -71,54 +71,19 @@ sus cajas con el mismo formato que en el renderizado normal.
 Los componentes `Movie` WMV se decodifican con `ffmpeg` (debe estar en `PATH`) y se muestran como
 animaciones; la repetición, pausa y detención siguen las propiedades y comandos del script.
 Se conservan los timestamps originales y los cuadros repetidos consecutivos se identifican sin
-forzar la salida a 30 FPS; el VM conserva un búfer acotado alrededor del playhead para sincronizar
-la presentación y permitir la interpolación GPU opcional.
-El renderer predeterminado es `vulkan`: reutiliza el renderer 2D Vulkan de SDL3 para dibujar la escena
-existente, manteniendo su comportamiento para sprites, texto, controles y vídeo sin volver a
-implementar cada operación. No requiere hardware NVIDIA. Si el renderer Vulkan compartido no está
-disponible, se intenta el renderer Vulkan normal de SDL y finalmente el fallback automático; se puede
-elegir otro driver con `--renderer` o `window.renderer` en la configuración. SDL conserva la ventana,
-entrada, audio y la API 2D de alto nivel, mientras la presentación usa Vulkan cuando el driver está
-disponible.
+forzar la salida a 30 FPS; el VM conserva un búfer acotado alrededor del playhead.
+Las texturas SDL de imágenes y todos los cuadros GAL comparten una caché GPU LRU de hasta 256 MiB;
+los recursos recientes se liberan al cambiar de escena para limitar el crecimiento de memoria.
+Las texturas ya usadas en el frame actual no se expulsan mientras se dibuja ese frame; si la escena
+activa supera el presupuesto, la caché puede excederlo temporalmente para no hacer desaparecer
+recursos visibles. Cada cinco segundos, el log `info` informa una estimación del uso de texturas por
+categoría (GAL/imágenes, vídeo, UI y destino de escena). Se basa en dimensiones y formato RGBA
+estimado; no es una lectura del driver. Para verlo: `LIVENYAN_LOG=info`.
 
-Además, existe un backend Vulkan directo experimental con un contrato de comandos independiente de
-SDL. Sus pruebas sintéticas cubren la subida, actualización y liberación diferida de texturas RGBA,
-composición offscreen con copia, recorte, relleno y alpha, reutilización de recursos y presentación
-directa a swapchain. Esa ruta aún no sustituye el renderer SDL en la aplicación. El pipeline conserva
-recursos entre frames y las subidas son asíncronas; las actualizaciones de igual tamaño reutilizan la
-misma imagen Vulkan (útil para cuadros de vídeo). No se inspeccionan ni procesan imágenes del juego en
-estas pruebas.
-Con `nvidia-optical-flow`, el primer prototipo para el juego procesa únicamente pares de cuadros GAL
-opacos de imagen que ocupan exactamente la resolución lógica completa. Inserta el cuadro medio
-compensado durante la segunda mitad del intervalo; el resto de objetos y los cuadros con alfa siguen
-la reproducción normal. Si la inicialización o síntesis falla, avisa en el log y vuelve al fundido
-convencional. El trabajo ocurre al cambiar de par y puede causar tirones; no está activado por defecto
-y aún no es una interpolación global de la escena. El campo de movimiento se interpola entre celdas
-de 4×4; cuando detecta desacuerdo fuerte entre vectores vecinos, reduce la compensación y se acerca
-a una mezcla simple para atenuar bloques y desgarros. No elimina los artefactos propios del algoritmo.
-El mismo modo puede procesar vídeos WMV solo cuando son opacos y ocupan exactamente la pantalla
-lógica; usa sus timestamps para situar el punto medio y omite el Optical Flow en cuadros duplicados.
-Los demás vídeos mantienen su reproducción normal. Esto agrega trabajo síncrono al cambiar de cuadro
-y puede bajar los FPS; si ocurre, desactívalo desde Opciones. Las texturas SDL de imágenes y todos
-los cuadros GAL comparten una caché GPU LRU de hasta 256 MiB; los recursos recientes se liberan al
-cambiar de escena para limitar el crecimiento de memoria. Las texturas ya usadas en el frame actual
-no se expulsan mientras se dibuja ese frame; si la escena activa supera el presupuesto, la caché
-puede excederlo temporalmente para no hacer desaparecer recursos visibles.
-Cada cinco segundos, el log `info` informa una estimación del uso de texturas por categoría
-(GAL/imágenes, vídeo, Optical Flow, UI y destino de escena). Se basa en dimensiones y formato RGBA
-estimado; no es una lectura del driver y no incluye buffers internos de Vulkan. Para verlo con la
-configuración predeterminada de logs, inicia livenyan con `LIVENYAN_LOG=info`.
-
-La prueba sintética procesa dos cuadros de 800×600 con una máscara de 48×48 desplazada 12 px sobre
-un fondo fijo: en una RTX 4060 el flujo medio local devuelve (12.00, 0.03) px y el shader reconstruye
-el píxel del punto medio con luminancia 240 (referencia 240; la mezcla directa sin compensación da
-156). Mide por separado la primera ejecución y la repetición con recursos reutilizados; incluye lectura
-de vuelta y no representa necesariamente el coste estable de la integración en pantalla.
-Otras opciones: `--res 1024x768`, `--font RUTA`, `--entry NOMBRE`, `--threads N`, `--fullscreen`, `--mute`, `--config RUTA`.
+Otras opciones: `--res 1024x768`, `--font RUTA`, `--entry NOMBRE`, `--threads N`, `--fullscreen`, `--mute`, `--config RUTA`, `--renderer DRIVER`.
 Al acercar el ratón al borde superior aparece una barra con Salir, Pantalla completa y Opciones.
-Opciones permite apagar, activar el fundido de GAL animados o, en builds con Optical Flow,
-activar el modo experimental. El fundido cubre objetos o grupos visuales de imagen que ocupen al
-menos un tercio de la resolución lógica; Optical Flow se limita a GAL opacos a pantalla completa.
+Opciones permite apagar o activar el fundido de GAL animados. El fundido cubre objetos o grupos
+visuales de imagen que ocupen al menos un tercio de la resolución lógica.
 Los grupos se deducen de un `TAG` explícito (incluido cero), imágenes
 hermanas bajo el mismo `PARENT`, o de imágenes animadas superpuestas con la misma secuencia de
 duraciones de cuadros. En todos los casos se mide el rectángulo unido sin codificar nombres del juego.

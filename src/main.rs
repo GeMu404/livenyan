@@ -35,14 +35,9 @@ struct Cli {
     /// Decodifica una imagen GAL del archivo y muestra solo estadísticas (sin imagen).
     #[arg(long, value_name = "ARCHIVE_PATH")]
     gal_stats: Option<String>,
-    /// Driver de render de SDL (opengl, vulkan, software, gpu...; predeterminado: vulkan).
+    /// Driver de render de SDL (opengl, vulkan, software, gpu...; vacío = automático).
     #[arg(long)]
     renderer: Option<String>,
-    /// Interpola cuadros de animaciones GAL de pantalla completa con NVIDIA Optical Flow
-    /// (requiere compilar con --features nvidia-optical-flow).
-    #[arg(long)]
-    #[cfg(feature = "nvidia-optical-flow")]
-    optical_flow: bool,
     /// Filtro de escalado del present: linear | nearest | sharp | off (=linear).
     #[arg(long, value_name = "FILTER")]
     scale_filter: Option<String>,
@@ -111,10 +106,6 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     let mut cfg = Config::load(cli.config.as_deref())?;
     if let Some(r) = &cli.renderer {
         cfg.window.renderer = r.clone();
-    }
-    #[cfg(feature = "nvidia-optical-flow")]
-    if cli.optical_flow {
-        cfg.window.optical_flow = true;
     }
     if let Some(filter) = &cli.scale_filter {
         cfg.window.scale_filter = filter.clone();

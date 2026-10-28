@@ -7,7 +7,6 @@ edition = "2024"
 
 [dependencies]
 ab_glyph = "0.2.32"
-ash = "0.38.0"
 clap = { version = "4.6.7", features = ["derive"] }
 crossbeam-channel = "0.5.17"
 encoding_rs = "0.8.35"
@@ -17,7 +16,7 @@ hound = "3.5.1"
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 lewton = "0.10.2"
 log = "0.4.34"
-sdl3 = { version = "0.20.0", features = ["ash", "unsafe_textures"] }
+sdl3 = { version = "0.20.0", features = ["unsafe_textures"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 
@@ -25,8 +24,6 @@ toml = "1.1.8"
 default = []
 # Compila SDL3 desde fuente y lo enlaza estáticamente (útil en Windows o sin SDL3 del sistema)
 static-sdl = ["sdl3/build-from-source-static"]
-# APIs y pruebas experimentales de NVIDIA VK_NV_optical_flow; no se usa en reproducción normal.
-nvidia-optical-flow = []
 
 [profile.release]
 lto = "thin"
