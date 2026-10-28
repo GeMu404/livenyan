@@ -10,6 +10,11 @@ pub struct Button {
     pub src: String,
     pub name: String,
     pub src_selected: String,
+    /// Imagen cuando el ítem está deshabilitado (manual: 無効時の画像).
+    pub src_disabled: String,
+    /// Grupo del botón. `-1` es un toggle independiente (manual: グループ番号 -1
+    /// en オート / スキップ). `0` si el archivo no trae el campo.
+    pub group: i32,
 }
 
 struct Rd<'a> {
@@ -57,7 +62,8 @@ pub fn parse(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
         r.take(1).ok_or_else(e)?;
         let name = r.s().ok_or_else(e)?;
         let src_selected = r.s().ok_or_else(e)?;
-        r.s().ok_or_else(e)?;
+        // pylivemaker unk3, justo después de la imagen seleccionada: 無効時の画像.
+        let src_disabled = r.s().ok_or_else(e)?;
         r.s().ok_or_else(e)?;
         if v > 100 {
             r.s().ok_or_else(e)?;
@@ -75,11 +81,12 @@ pub fn parse(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
         }
         let b = (r.u32().ok_or_else(e)? as i32, r.u32().ok_or_else(e)? as i32);
         r.s().ok_or_else(e)?;
+        let mut group = 0i32;
         if v > 103 {
             for _ in 0..5 {
                 r.s().ok_or_else(e)?;
             }
-            r.u32().ok_or_else(e)?;
+            group = r.u32().ok_or_else(e)? as i32;
         }
         if v > 104 {
             r.s().ok_or_else(e)?;
@@ -93,6 +100,8 @@ pub fn parse(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
             src,
             name,
             src_selected,
+            src_disabled,
+            group,
         });
     }
     Ok((v, out))
@@ -137,6 +146,8 @@ pub fn parse_xml(d: &[u8]) -> Result<(u32, Vec<Button>), String> {
             src: txt(it, "Path"),
             name: txt(it, "Name"),
             src_selected,
+            src_disabled: txt(it, "InvalidImagePath"),
+            group: num(it, "Group"),
         });
     }
     Ok((v, out))

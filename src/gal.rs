@@ -684,11 +684,10 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
                 trans: geti(lt, "TransColor", -1) as i32,
             };
             let data = layer_payload(&mut r, &info, w, h, bpp, &frames, &layers)?;
-            let a = if l.alpha_on {
-                alpha_payload(&mut r, &info, w, h, &frames, &layers)?
-            } else {
-                None
-            };
+            // GaleX siempre escribe el tamaño del payload alfa (0 si AlphaOn=0), igual
+            // que Gale binario; omitirlo desalinea capas/frames siguientes.
+            let a = alpha_payload(&mut r, &info, w, h, &frames, &layers)?;
+            let a = if l.alpha_on { a } else { None };
             layers.push((l, data, a));
         }
         if layers.is_empty() {
@@ -803,18 +802,13 @@ pub fn dump(d: &[u8]) -> String {
             }
             for (li, lt) in tags(fx, "Layer").into_iter().enumerate() {
                 o += &format!("    layer {li}: <Layer {}>\n", strip_names(lt));
-                let alpha_on = attr(lt, "AlphaOn").is_some_and(|v| v != "0");
-                for what in if alpha_on {
-                    &["data", "alpha"][..]
-                } else {
-                    &["data"][..]
-                } {
+                for what in ["data", "alpha"] {
                     let Some(n) = rd(p) else {
                         return o + &format!("  EOF @{p}\n");
                     };
                     let body = (p + 4).min(d.len());
                     let mut extra = String::new();
-                    if n > 0 && (comp == 0 || (*what == "alpha" && comp == 2)) {
+                    if n > 0 && (comp == 0 || (what == "alpha" && comp == 2)) {
                         extra = match inflate_stream(&d[body..]) {
                             Ok((out, used)) => format!(
                                 " | zlib stream {used} B -> {} B{}",
@@ -1408,7 +1402,9 @@ mod tests {
         let pixels = z(&[1, 0, 0, 0]);
         data.extend((pixels.len() as u32).to_le_bytes());
         data.extend(pixels);
-        data.extend(0u32.to_le_bytes());
+        data.extend(0u32.to_le_bytes()); // alpha frame 0
+        data.extend(0u32.to_le_bytes()); // data frame 1 omitted
+        data.extend(0u32.to_le_bytes()); // alpha frame 1
 
         let image = decode(&data).unwrap();
         assert_eq!(image.frames.len(), 1);
@@ -1564,12 +1560,58 @@ mod tests {
         d.extend((zx.len() as u32).to_le_bytes());
         d.extend(&zx);
         d.extend(0u32.to_le_bytes()); // capa 0 vacía
+        d.extend(0u32.to_le_bytes()); // alpha capa 0
         let px = z(&[0, 1, 0, 1, 1, 0, 1, 0]);
         d.extend((px.len() as u32).to_le_bytes());
         d.extend(&px);
+        d.extend(0u32.to_le_bytes()); // alpha capa 1
         let img = decode(&d).unwrap();
         let alphas: Vec<u8> = img.rgba.chunks(4).map(|p| p[3]).collect();
         assert_eq!(alphas, vec![255, 0, 255, 0, 0, 255, 0, 255]);
+    }
+
+    /// GaleX con AlphaOn=0 sigue trayendo un u32 de tamaño alfa (0); sin leerlo
+    /// se pierden frames con bloques entre frames (p.ej. icono 滞在中 del mapa).
+    #[test]
+    fn galex_alpha_size_present_when_alpha_on_is_zero() {
+        use std::io::Write;
+        let z = |b: &[u8]| {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b).unwrap();
+            e.finish().unwrap()
+        };
+        // 2x2, 8bpp, BlockWidth=2 → 1 bloque; frame1 copia el bloque del frame0 capa0
+        let xml = r#"<?xml version="1.0"?><Frames Version="200" Width="2" Height="2" Bpp="8" Count="2" SyncPal="1" Randomized="0" CompType="0" BlockWidth="2" BlockHeight="2"><Frame TransColor="-1" Delay="33"><Layers Count="1" Width="2" Height="2" Bpp="8"><RGB>000000FFFFFF</RGB><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/></Layers></Frame><Frame TransColor="-1" Delay="33"><Layers Count="1" Width="2" Height="2" Bpp="8"><Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/></Layers></Frame></Frames>"#;
+        let zx = z(xml.as_bytes());
+        let mut d = b"GaleX200".to_vec();
+        d.extend((zx.len() as u32).to_le_bytes());
+        d.extend(&zx);
+        let mut packed = Vec::new();
+        packed.extend((-1i32).to_le_bytes());
+        packed.extend(0i32.to_le_bytes());
+        packed.extend([1u8, 1, 1, 1]);
+        let pz = z(&packed);
+        d.extend((pz.len() as u32).to_le_bytes());
+        d.extend(&pz);
+        d.extend(0u32.to_le_bytes());
+        let mut packed = Vec::new();
+        packed.extend(0i32.to_le_bytes());
+        packed.extend(0i32.to_le_bytes());
+        let pz = z(&packed);
+        d.extend((pz.len() as u32).to_le_bytes());
+        d.extend(&pz);
+        d.extend(0u32.to_le_bytes());
+
+        let img = decode(&d).unwrap();
+        assert_eq!(
+            img.frames.len(),
+            1,
+            "second frame must parse via cross-frame blocks"
+        );
+        assert_eq!(img.delays, [33, 33]);
+        assert_eq!(&img.rgba[..4], &[255, 255, 255, 255]);
+        assert_eq!(&img.frames[0][..4], &[255, 255, 255, 255]);
+        assert!(stats(&d).unwrap().contains("frames 2 (parsed 2)"));
     }
 
     #[test]

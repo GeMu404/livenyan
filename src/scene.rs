@@ -3,6 +3,7 @@
 use crate::lsb::expr::Value;
 use crate::lsb::{CmdType, Prop, names::prop_id};
 use std::collections::HashMap;
+use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -21,6 +22,26 @@ pub enum Kind {
 
 pub(crate) fn menu_line_height(font_height: f64, line_space: f64) -> i64 {
     (font_height + line_space).round().max(1.0) as i64
+}
+
+pub(crate) fn menu_visible_range(
+    choice_count: usize,
+    row_count: i64,
+    top_index: i64,
+) -> Range<usize> {
+    let visible_count = if row_count > 0 {
+        choice_count.min(usize::try_from(row_count).unwrap_or(usize::MAX))
+    } else {
+        choice_count
+    };
+    let max_start = choice_count.saturating_sub(visible_count);
+    let start = if row_count > 0 {
+        usize::try_from(top_index.max(0)).unwrap_or(usize::MAX)
+    } else {
+        0
+    }
+    .min(max_start);
+    start..start + visible_count
 }
 
 pub(crate) fn native_menu_size(
@@ -58,6 +79,7 @@ impl Kind {
 pub enum TextItem {
     Char(String),
     Newline,
+    Image { source: String, align: u8 },
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +113,83 @@ impl Obj {
             .get(&Prop::VISIBLE)
             .map(|v| v.truthy())
             .unwrap_or(true)
+    }
+
+    /// Escala de dibujo. **fuente primaria** (`docs/livenovel/media.html` Movie):
+    /// `PR_FLOATZOOM*` 1 = 1×; `PR_ZOOM*` 256 = 1×. Sin prop → 1×.
+    pub fn zoom_xy(&self) -> (f64, f64) {
+        zoom_xy_from_props(&self.props)
+    }
+
+    /// `docs/livenovel/graphic.html` (マウス透過) nombra IM_NONE / IM_ALL /
+    /// IM_CLICK / IM_LCLICK / IM_RCLICK y no da los enteros. El novel system
+    /// escribe 0 (recibe), 1 (ignora todo) y 4 (ignora el clic izquierdo).
+    /// 2 = ambos clics y 8 = clic derecho: no confirmado.
+    pub fn ignores_mouse(&self, hit: MouseHit) -> bool {
+        let flags = self.int(Prop::IGNOREMOUSE, 0);
+        if flags & 1 != 0 {
+            return true;
+        }
+        match hit {
+            MouseHit::Hover => false,
+            MouseHit::Left => flags & 0b0110 != 0,
+            MouseHit::Right => flags & 0b1010 != 0,
+        }
+    }
+}
+
+/// Evento de ratón que se está probando contra `PR_IGNOREMOUSE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseHit {
+    Hover,
+    Left,
+    Right,
+}
+
+/// Igual que [`Obj::zoom_xy`], sobre un mapa de props (p. ej. al crear un Movie).
+pub fn zoom_xy_from_props(props: &HashMap<u8, Value>) -> (f64, f64) {
+    let float = |p| props.get(&p).map(Value::as_f64);
+    let fixed = |p| props.get(&p).map(|v| v.as_f64() / 256.0);
+    let positive = |z: f64| z.is_finite().then_some(z).filter(|z| *z > 0.0);
+    let x = float(Prop::FLOATZOOMX)
+        .or_else(|| fixed(Prop::ZOOMX))
+        .and_then(positive)
+        .unwrap_or(1.0);
+    let y = float(Prop::FLOATZOOMY)
+        .or_else(|| fixed(Prop::ZOOMY))
+        .and_then(positive)
+        .unwrap_or(x);
+    (x, y)
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::zoom_xy_from_props;
+    use crate::lsb::expr::Value;
+    use crate::lsb::names::Prop;
+    use std::collections::HashMap;
+
+    #[test]
+    fn zoom_defaults_to_identity_and_honors_fixed_point_256() {
+        assert_eq!(zoom_xy_from_props(&HashMap::new()), (1.0, 1.0));
+        let props = HashMap::from([
+            (Prop::ZOOMX, Value::Int(128)),
+            (Prop::ZOOMY, Value::Int(512)),
+        ]);
+        let (x, y) = zoom_xy_from_props(&props);
+        assert!((x - 0.5).abs() < 1e-9);
+        assert!((y - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn float_zoom_overrides_fixed_point() {
+        let props = HashMap::from([
+            (Prop::ZOOMX, Value::Int(256)),
+            (Prop::FLOATZOOMX, Value::Float(1.5)),
+        ]);
+        let (x, y) = zoom_xy_from_props(&props);
+        assert!((x - 1.5).abs() < 1e-9);
+        assert!((y - 1.5).abs() < 1e-9);
     }
 }
 
@@ -269,6 +368,27 @@ impl Scene {
         self.motions.clear();
     }
 
+    /// Rectángulo visible.
+    ///
+    /// `docs/livenovel/graphic.html`: zoom 256 = 1×; el ancla (`PR_OFFSETX/Y`)
+    /// queda alineada con X/Y. `PR_POSZOOMED`: X/Y reales = X/Y × zoom.
+    /// `width`/`height` son el tamaño sin zoom (la prop, o el intrínseco).
+    pub fn placed_rect(&self, o: &Obj, width: f64, height: f64) -> (f64, f64, f64, f64) {
+        let (mut x, mut y) = self.abs_pos(o);
+        let (zx, zy) = o.zoom_xy();
+        if o.get(Prop::POSZOOMED).is_some_and(Value::truthy) {
+            x *= zx;
+            y *= zy;
+        }
+        let (w, h) = (width * zx, height * zy);
+        (
+            x - o.int(Prop::OFFSETX, 0) as f64 * zx,
+            y - o.int(Prop::OFFSETY, 0) as f64 * zy,
+            w,
+            h,
+        )
+    }
+
     /// Posición absoluta sumando las de los padres.
     pub fn abs_pos(&self, o: &Obj) -> (f64, f64) {
         let mut x = o.int(Prop::LEFT, 0) as f64;
@@ -291,9 +411,10 @@ impl Scene {
 
     /// Visibilidad efectiva (el objeto y todos sus padres).
     pub fn effective_visible(&self, o: &Obj) -> bool {
-        if !o.visible() {
-            return false;
-        }
+        o.visible() && self.parents_visible(o)
+    }
+
+    pub fn parents_visible(&self, o: &Obj) -> bool {
         let mut p = o.str(Prop::PARENT);
         let mut guard = 0;
         while !p.is_empty() && guard < 32 {
@@ -380,30 +501,40 @@ impl Scene {
     }
 
     /// Objeto visible más alto bajo el punto que tenga alguno de los manejadores `props`.
-    pub fn hit_handler(&self, x: f64, y: f64, props: &[u8]) -> Option<&Obj> {
+    pub fn hit_handler(&self, x: f64, y: f64, props: &[u8], hit: MouseHit) -> Option<&Obj> {
         self.draw_order().into_iter().rev().find(|o| {
-            if !props
-                .iter()
-                .any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty()))
+            if o.ignores_mouse(hit)
+                || !props
+                    .iter()
+                    .any(|p| o.get(*p).is_some_and(|v| !v.as_str().trim().is_empty()))
                 || !self.effective_visible(o)
             {
                 return false;
             }
-            let (ox, oy) = self.abs_pos(o);
-            let (w, h) = (o.int(Prop::WIDTH, 0) as f64, o.int(Prop::HEIGHT, 0) as f64);
-            x >= ox && y >= oy && x < ox + w && y < oy + h
+            let (ox, oy, w, h) = self.placed_rect(
+                o,
+                o.int(Prop::WIDTH, 0) as f64,
+                o.int(Prop::HEIGHT, 0) as f64,
+            );
+            w > 0.0 && h > 0.0 && x >= ox && y >= oy && x < ox + w && y < oy + h
         })
     }
 
     /// Objeto clicable (Button) más alto bajo el punto lógico.
     pub fn hit_button(&self, x: f64, y: f64) -> Option<&Obj> {
         self.draw_order().into_iter().rev().find(|o| {
-            if o.kind != Kind::Button || !self.effective_visible(o) {
+            if o.kind != Kind::Button
+                || o.ignores_mouse(MouseHit::Left)
+                || !self.effective_visible(o)
+            {
                 return false;
             }
-            let (ox, oy) = self.abs_pos(o);
-            let (w, h) = (o.int(Prop::WIDTH, 0) as f64, o.int(Prop::HEIGHT, 0) as f64);
-            x >= ox && y >= oy && x < ox + w && y < oy + h
+            let (ox, oy, w, h) = self.placed_rect(
+                o,
+                o.int(Prop::WIDTH, 0) as f64,
+                o.int(Prop::HEIGHT, 0) as f64,
+            );
+            w > 0.0 && h > 0.0 && x >= ox && y >= oy && x < ox + w && y < oy + h
         })
     }
 }
@@ -411,6 +542,14 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_visible_range_respects_row_count_and_top_index() {
+        assert_eq!(menu_visible_range(30, 10, 12), 12..22);
+        assert_eq!(menu_visible_range(30, 10, 100), 20..30);
+        assert_eq!(menu_visible_range(3, 10, 2), 0..3);
+        assert_eq!(menu_visible_range(30, 0, 12), 0..30);
+    }
 
     #[test]
     fn caption_commands_create_renderable_caption_objects() {
@@ -445,5 +584,86 @@ mod tests {
             .map(|obj| obj.name.as_str())
             .collect();
         assert_eq!(order, ["background", "logo"]);
+    }
+
+    fn thumb(zoom: i64) -> Obj {
+        let mut props = HashMap::new();
+        props.insert(Prop::LEFT, Value::Int(150));
+        props.insert(Prop::TOP, Value::Int(80));
+        props.insert(Prop::WIDTH, Value::Int(100));
+        props.insert(Prop::HEIGHT, Value::Int(60));
+        props.insert(Prop::OFFSETX, Value::Int(50));
+        props.insert(Prop::OFFSETY, Value::Int(30));
+        props.insert(Prop::ZOOMX, Value::Int(zoom));
+        props.insert(Prop::ZOOMY, Value::Int(zoom));
+        props.insert(Prop::ONLBTNDOWN, Value::Str("click".into()));
+        props.insert(Prop::ONRBTNDOWN, Value::Str("right".into()));
+        Obj {
+            name: "thumb".into(),
+            kind: Kind::Image,
+            seq: 1,
+            props,
+            text: vec![],
+            shown: 0,
+            text_rev: 0,
+            frame: 0,
+        }
+    }
+
+    #[test]
+    fn placed_rect_anchors_the_offset_and_scales_with_zoom() {
+        let scene = Scene::default();
+        let full = thumb(256);
+        let (x, y, w, h) = scene.placed_rect(&full, 100.0, 60.0);
+        assert!((x - 100.0).abs() < 1e-9 && (y - 50.0).abs() < 1e-9);
+        assert!((w - 100.0).abs() < 1e-9 && (h - 60.0).abs() < 1e-9);
+
+        let half = thumb(128);
+        let (x, y, w, h) = scene.placed_rect(&half, 100.0, 60.0);
+        assert!((x - 125.0).abs() < 1e-9 && (y - 65.0).abs() < 1e-9);
+        assert!((w - 50.0).abs() < 1e-9 && (h - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn left_click_passes_through_ignore_mouse_4_to_the_object_below() {
+        let mut scene = Scene::default();
+        let mut cover = HashMap::new();
+        cover.insert(Prop::LEFT, Value::Int(0));
+        cover.insert(Prop::TOP, Value::Int(0));
+        cover.insert(Prop::WIDTH, Value::Int(200));
+        cover.insert(Prop::HEIGHT, Value::Int(200));
+        cover.insert(Prop::PRIORITY, Value::Int(1100));
+        cover.insert(Prop::IGNOREMOUSE, Value::Int(4));
+        cover.insert(Prop::ONNOTIFY, Value::Str("box".into()));
+        cover.insert(Prop::ONRBTNDOWN, Value::Str("box-right".into()));
+        scene.create("box", Kind::Message, cover);
+
+        let mut under = HashMap::new();
+        under.insert(Prop::LEFT, Value::Int(10));
+        under.insert(Prop::TOP, Value::Int(10));
+        under.insert(Prop::WIDTH, Value::Int(40));
+        under.insert(Prop::HEIGHT, Value::Int(40));
+        under.insert(Prop::PRIORITY, Value::Int(100));
+        under.insert(Prop::ONLBTNDOWN, Value::Str("thumb".into()));
+        under.insert(Prop::ONRBTNDOWN, Value::Str("thumb-right".into()));
+        scene.create("thumb", Kind::Image, under);
+
+        assert_eq!(
+            scene
+                .hit_handler(
+                    20.0,
+                    20.0,
+                    &[Prop::ONLBTNDOWN, Prop::ONNOTIFY],
+                    MouseHit::Left
+                )
+                .map(|o| o.name.as_str()),
+            Some("thumb")
+        );
+        assert_eq!(
+            scene
+                .hit_handler(20.0, 20.0, &[Prop::ONRBTNDOWN], MouseHit::Right)
+                .map(|o| o.name.as_str()),
+            Some("box")
+        );
     }
 }

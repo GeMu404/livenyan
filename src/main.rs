@@ -5,7 +5,7 @@ use livenyan::game::Game;
 use livenyan::lsb::{Field, Lsb};
 use livenyan::vm::{Options, State, Vm};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -43,6 +43,9 @@ struct Cli {
     #[arg(long)]
     #[cfg(feature = "nvidia-optical-flow")]
     optical_flow: bool,
+    /// Filtro de escalado del present: linear | nearest | sharp | off (=linear).
+    #[arg(long, value_name = "FILTER")]
+    scale_filter: Option<String>,
     /// Muestra el medidor de FPS (también se puede alternar con F3).
     #[arg(long)]
     fps_meter: bool,
@@ -112,6 +115,9 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
     #[cfg(feature = "nvidia-optical-flow")]
     if cli.optical_flow {
         cfg.window.optical_flow = true;
+    }
+    if let Some(filter) = &cli.scale_filter {
+        cfg.window.scale_filter = filter.clone();
     }
     cfg.window.fps_meter |= cli.fps_meter;
     if let Some((w, h)) = cli.res {
@@ -222,7 +228,23 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         trace_conds: cli.trace_conds,
         pick: cli.pick,
     };
-    let vm = Vm::new(assets.clone(), &game.entry, opts)?;
+    let mut vm = Vm::new(assets.clone(), &game.entry, opts)?;
+    vm.set_menu_font_override(
+        cfg.text
+            .font
+            .clone()
+            .map(|path| (path, cfg.text.font_index)),
+    );
+    let game_dir = if game.path.is_dir() {
+        game.path.clone()
+    } else {
+        game.path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    if game_dir.join("save.dat").exists() {
+        vm.save_dir = game_dir;
+    } else {
+        vm.save_dir = game.save_dir();
+    }
     if cli.trace {
         return trace(vm, cli.steps, t0);
     }

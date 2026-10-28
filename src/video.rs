@@ -33,6 +33,62 @@ pub struct Decoder {
     temp_file: PathBuf,
 }
 
+/// Ancho×alto nativos del primer stream de vídeo (ffprobe).
+/// **fuente primaria:** Movie no tiene PR_WIDTH/HEIGHT (`docs/livenovel/media.html`);
+/// el tamaño base es el del archivo (`liveVideoGetSourceWidth/Height`).
+pub fn probe_size(data: &[u8]) -> Result<(u32, u32), String> {
+    let temp_file = create_temp_video(data)?;
+    let result = probe_file(&temp_file);
+    if let Err(e) = std::fs::remove_file(&temp_file)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("cannot remove temporary video {}: {e}", temp_file.display());
+    }
+    result
+}
+
+fn probe_file(path: &PathBuf) -> Result<(u32, u32), String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("cannot start ffprobe: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    let (w, h) = text
+        .split_once('x')
+        .ok_or_else(|| format!("ffprobe returned no width×height: {text:?}"))?;
+    let width: u32 = w
+        .trim()
+        .parse()
+        .map_err(|_| format!("ffprobe width is not a number: {w:?}"))?;
+    let height: u32 = h
+        .trim()
+        .parse()
+        .map_err(|_| format!("ffprobe height is not a number: {h:?}"))?;
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "ffprobe reported empty video size {width}x{height}"
+        ));
+    }
+    Ok((width, height))
+}
+
 impl Decoder {
     pub fn start(data: &[u8], width: u32, height: u32, repeat: bool) -> Result<Self, String> {
         if width == 0 || height == 0 {
@@ -407,5 +463,45 @@ mod tests {
             super::parse_showinfo_pts("[Parsed_showinfo_3] config in time_base: 1/30"),
             None
         );
+    }
+
+    #[test]
+    fn probe_size_reads_native_dimensions() {
+        if Command::new("ffprobe")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("ffprobe is unavailable; skipping probe_size test");
+            return;
+        }
+        let path =
+            std::env::temp_dir().join(format!("livenyan-probe-test-{}.mkv", std::process::id()));
+        let result = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=24x18:r=1:d=0.5",
+                "-c:v",
+                "ffv1",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("generate probe test video");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(super::probe_size(&data).unwrap(), (24, 18));
     }
 }

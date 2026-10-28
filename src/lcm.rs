@@ -20,6 +20,9 @@ pub struct Track {
     pub start: u32,
     pub duration: u32,
     pub order: i32,
+    /// Punto de anclaje en píxeles de la fuente (centro de escala/rotación).
+    /// Posición del track = dónde cae este pivot en el lienzo del cinema.
+    pub pivot: [i32; 2],
     pub position_start: [i32; 2],
     pub position_end: [i32; 2],
     pub position_curve: [u8; 2],
@@ -240,9 +243,8 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
     let anchored = r.flag()?;
     let anchor = r.point()?;
     let _parameter = r.int()?;
-    if anchored || anchor != [0, 0] {
-        return Err("LCM anchors are not supported".into());
-    }
+    // Ancla de cinema: aún no aplicada al layout del lienzo; no bloquear el parseo.
+    let _ = (anchored, anchor);
 
     let count = r.int()?;
     if !(0..=MAX_CLIPS as i32).contains(&count) {
@@ -267,10 +269,8 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
         let authored_start = r.int()?;
         let period = r.int()?;
         let _clip_parameter = r.int()?;
-        let flags = [r.flag()?, r.flag()?, r.flag()?];
-        if flags.into_iter().any(|flag| flag) {
-            return Err("LCM image clip flags are not supported".into());
-        }
+        // Flags de clip: leídos y omitidos (no bloquean; semántica no confirmada).
+        let _flags = [r.flag()?, r.flag()?, r.flag()?];
         if !(1..=MAX_FRAMES as i32).contains(&duration)
             || !(0..=MAX_FRAMES as i32).contains(&period)
         {
@@ -309,6 +309,7 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
                 start,
                 duration: duration as u32,
                 order,
+                pivot: [0, 0],
                 position_start: [0, 0],
                 position_end: [0, 0],
                 position_curve: [0, 0],
@@ -375,28 +376,31 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
             }
         };
 
-        if (version >= 112 && pivot != [0, 0])
-            || angle != [0.0, 0.0]
-            || scale_x
-                .iter()
-                .chain(scale_y.iter())
-                .any(|scale| *scale < 0.0)
-            || clip_start.iter().any(|p| *p != [0, 0])
-            || clip_end.iter().any(|p| *p != [0, 0])
-            || extra != [0; 4]
-            || !(0..=255).contains(&opacity_start)
-            || !(0..=255).contains(&opacity_end)
+        // Escala negativa no tiene sentido de dibujo actual. Ángulo/clip/extra: se
+        // aceptan en el parseo; rotación y clip de fuente aún no se aplican al render
+        // (pivot + scale sí). **inventado en livenyan** omitir ángulo/clip vs fallar todo el LCM.
+        if scale_x
+            .iter()
+            .chain(scale_y.iter())
+            .any(|scale| *scale < 0.0)
         {
             return Err(format!(
-                "unsupported transform or clipping in LCM image clip {index}: pivot={pivot:?}, angle={angle:?}, scale=({scale_x:?}, {scale_y:?}), clip=({clip_start:?}, {clip_end:?}), extra={extra:?}, opacity=({opacity_start}, {opacity_end})"
+                "unsupported negative scale in LCM image clip {index}: scale=({scale_x:?}, {scale_y:?})"
             ));
         }
+        if !(0..=255).contains(&opacity_start) || !(0..=255).contains(&opacity_end) {
+            return Err(format!(
+                "invalid LCM opacity in clip {index}: ({opacity_start}, {opacity_end})"
+            ));
+        }
+        let _ = (angle, clip_start, clip_end, extra);
         duration_frames = duration_frames.max(end);
         clips.push(Track {
             previous,
             start,
             duration: duration as u32,
             order,
+            pivot,
             position_start,
             position_end,
             position_curve,
@@ -565,6 +569,9 @@ impl Movie {
                     t,
                     clip.duration,
                 );
+                // Posición del track = dónde cae el pivot; el draw usa esquina superior-izquierda.
+                let x = (x as f64 - clip.pivot[0] as f64 * scale_x).round() as i32;
+                let y = (y as f64 - clip.pivot[1] as f64 * scale_y).round() as i32;
                 Some((index, clip, x, y, alpha, scale_x, scale_y))
             })
             .collect()
@@ -767,6 +774,45 @@ mod tests {
         movie.clips[0].scale_y = [0.0, 1.0];
         assert_eq!(movie.sprites_at(0.0)[0].scale_y, 0.0);
         assert_eq!(movie.sprites_at(1000.0 / 60.0)[0].scale_y, 1.0);
+    }
+
+    #[test]
+    fn pivot_offsets_sprite_top_left_by_scaled_anchor() {
+        let mut movie = parse(&simple_movie()).unwrap();
+        movie.clips[0].pivot = [10, 5];
+        movie.clips[0].scale_x = [2.0, 2.0];
+        movie.clips[0].scale_y = [2.0, 2.0];
+        // position_end at t=end is (30,40); top-left = pos - pivot*scale
+        let sprite = &movie.sprites_at(1000.0 / 60.0)[0];
+        assert_eq!((sprite.x, sprite.y), (10.0, 30.0));
+        assert_eq!((sprite.scale_x, sprite.scale_y), (2.0, 2.0));
+    }
+
+    #[test]
+    fn accepts_non_zero_pivot_without_rejecting_movie() {
+        let mut bytes = simple_movie();
+        // En simple_movie el pivot es el primer point tras los 3 flags del clip (ceros).
+        // Sustituir [0,0] del pivot por [298,43]: tras flags hay push_point([0,0]) = 8 bytes.
+        let marker = b"image.gal";
+        let media_at = bytes
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .expect("media name");
+        // pivot está 8 (point) + … atrás desde position_start; más simple: regenerar.
+        let _ = (media_at, &mut bytes);
+        let movie = parse(&{
+            let mut out = simple_movie();
+            // Bytes del pivot: inmediatamente después de 3 flags (0,0,0) del primer clip.
+            // Cabecera LiveCinema112 (13) + w/h (8) + bg(4) + flag(1) + anchor(8) + param(4) + count(4)
+            // = 42; clip: kind(1)+prev(4)+dur(4)+order(4)+start(4)+period(4)+param(4)+flags(3)=28 → offset 70.
+            let pivot_off = 13 + 8 + 4 + 1 + 8 + 4 + 4 + 1 + 4 + 4 + 4 + 4 + 4 + 4 + 3;
+            assert_eq!(&out[pivot_off..pivot_off + 8], &[0u8; 8]);
+            out[pivot_off..pivot_off + 4].copy_from_slice(&298i32.to_le_bytes());
+            out[pivot_off + 4..pivot_off + 8].copy_from_slice(&43i32.to_le_bytes());
+            out
+        })
+        .unwrap();
+        assert_eq!(movie.clips[0].pivot, [298, 43]);
     }
 
     #[test]

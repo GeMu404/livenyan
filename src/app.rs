@@ -7,8 +7,12 @@ use crate::config::Config;
 use crate::game::Game;
 use crate::input::{Action, Keymap};
 use crate::interpolation::InterpolationMode;
+use crate::lft::PixelFontCatalog;
 use crate::lsb::{Prop, expr::Value};
-use crate::scene::{Kind, Obj, Scene, TextItem, menu_line_height, native_menu_size};
+use crate::scale_filter::ScaleFilter;
+use crate::scene::{
+    Kind, Obj, Scene, TextItem, menu_line_height, menu_visible_range, native_menu_size,
+};
 use crate::slider::{SliderPart, slider_size};
 use crate::text::{TextRenderer, tcolor};
 use crate::vm::{Event as VmEvent, State, Vm};
@@ -31,12 +35,14 @@ struct Gfx {
     images: HashMap<String, (Texture, u32, u32)>,
     image_texture_cache: HashMap<String, ImageTextureCacheEntry>,
     image_texture_cache_clock: u64,
+    image_texture_used_this_frame: HashSet<String>,
     video_textures: HashMap<String, (Texture, u64, u64, u32, u32)>,
     video_previous_textures: HashMap<String, (u64, u64, Texture, u32, u32)>,
     texts: HashMap<String, (u64, usize, Texture)>,
     debug_labels: HashMap<String, (String, Texture, u32, u32)>,
     menu_animation_starts: HashMap<String, f64>,
     menu_fonts: HashMap<String, Option<TextRenderer>>,
+    pixel_fonts: Arc<PixelFontCatalog>,
     toolbar_texts: HashMap<String, (usize, Texture)>,
     crossfade_safety: HashMap<String, bool>,
     #[cfg(feature = "nvidia-optical-flow")]
@@ -56,6 +62,19 @@ struct ImageTextureCacheEntry {
     last_used: u64,
 }
 
+#[derive(Default)]
+struct TextureMemoryStats {
+    image_bytes: usize,
+    video_bytes: usize,
+    optical_flow_bytes: usize,
+    ui_bytes: usize,
+    render_target_bytes: usize,
+    image_count: usize,
+    video_count: usize,
+    optical_flow_count: usize,
+    ui_count: usize,
+}
+
 #[cfg(feature = "nvidia-optical-flow")]
 struct OpticalFlowTexture {
     source: String,
@@ -67,10 +86,12 @@ struct OpticalFlowTexture {
 }
 
 struct MenuCache {
+    name: String,
     choices: Vec<String>,
     font_family: String,
     style: Vec<i64>,
     textures: Vec<Option<Texture>>,
+    rows: Vec<FRect>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +100,7 @@ enum ToolbarAction {
     Fullscreen,
     Options,
     Interpolation(InterpolationMode),
+    ScaleFilter(ScaleFilter),
     ToggleFpsMeter,
     ExportTexts,
 }
@@ -99,24 +121,46 @@ fn toolbar_button_rects(width: u32) -> [(ToolbarAction, FRect); 3] {
 }
 
 fn fps_meter_option_rect(width: u32) -> FRect {
-    FRect::new(width as f32 - 124.0, 108.0, 112.0, 26.0)
+    FRect::new(width as f32 - 124.0, 148.0, 112.0, 26.0)
 }
 
 fn export_texts_option_rect(width: u32) -> FRect {
-    FRect::new(width as f32 - 328.0, 164.0, 310.0, 26.0)
+    FRect::new(width as f32 - 328.0, 204.0, 310.0, 26.0)
+}
+
+fn scale_filter_option_rects(width: u32) -> Vec<(ScaleFilter, FRect)> {
+    let y = 118.0;
+    let modes = [
+        ScaleFilter::Linear,
+        ScaleFilter::Nearest,
+        ScaleFilter::Sharp,
+    ];
+    let w = 84.0;
+    let h = 26.0;
+    let gap = 6.0;
+    let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
+    let x = width as f32 - 6.0 - total_width;
+    modes
+        .into_iter()
+        .enumerate()
+        .map(|(index, mode)| (mode, FRect::new(x + index as f32 * (w + gap), y, w, h)))
+        .collect()
 }
 
 fn image_texture_cache_evictions(
     cache: &HashMap<String, ImageTextureCacheEntry>,
     required_bytes: usize,
     protected_source: &str,
+    used_this_frame: &HashSet<String>,
 ) -> Vec<String> {
     let mut total_bytes = cache
         .values()
         .fold(0usize, |total, entry| total.saturating_add(entry.bytes));
     let mut candidates = cache
         .iter()
-        .filter(|(source, _)| source.as_str() != protected_source)
+        .filter(|(source, _)| {
+            source.as_str() != protected_source && !used_this_frame.contains(source.as_str())
+        })
         .map(|(source, entry)| (source.clone(), entry.last_used, entry.bytes))
         .collect::<Vec<_>>();
     candidates.sort_by_key(|(_, last_used, _)| *last_used);
@@ -144,16 +188,97 @@ fn evict_image_texture_sources(gfx: &mut Gfx, sources: &[String]) {
 }
 
 fn make_image_texture_cache_room(gfx: &mut Gfx, required_bytes: usize, protected_source: &str) {
-    let evictions =
-        image_texture_cache_evictions(&gfx.image_texture_cache, required_bytes, protected_source);
+    let evictions = image_texture_cache_evictions(
+        &gfx.image_texture_cache,
+        required_bytes,
+        protected_source,
+        &gfx.image_texture_used_this_frame,
+    );
     evict_image_texture_sources(gfx, &evictions);
 }
 
 fn touch_image_texture_source(gfx: &mut Gfx, source: &str) {
     gfx.image_texture_cache_clock = gfx.image_texture_cache_clock.saturating_add(1);
+    gfx.image_texture_used_this_frame.insert(source.to_string());
     if let Some(entry) = gfx.image_texture_cache.get_mut(source) {
         entry.last_used = gfx.image_texture_cache_clock;
     }
+}
+
+fn estimated_texture_bytes(width: u32, height: u32) -> usize {
+    (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+}
+
+fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> TextureMemoryStats {
+    let mut stats = TextureMemoryStats {
+        image_bytes: gfx
+            .image_texture_cache
+            .values()
+            .fold(0usize, |bytes, entry| bytes.saturating_add(entry.bytes)),
+        image_count: gfx.images.len(),
+        video_count: gfx.video_textures.len() + gfx.video_previous_textures.len(),
+        ui_count: gfx.texts.len()
+            + gfx.debug_labels.len()
+            + gfx.toolbar_texts.len()
+            + gfx
+                .menu
+                .as_ref()
+                .map_or(0, |menu| menu.textures.iter().flatten().count()),
+        render_target_bytes: estimated_texture_bytes(logical_size.0, logical_size.1),
+        ..TextureMemoryStats::default()
+    };
+
+    stats.video_bytes = gfx
+        .video_textures
+        .values()
+        .fold(0usize, |bytes, texture| {
+            bytes.saturating_add(estimated_texture_bytes(texture.3, texture.4))
+        })
+        .saturating_add(
+            gfx.video_previous_textures
+                .values()
+                .fold(0usize, |bytes, texture| {
+                    bytes.saturating_add(estimated_texture_bytes(texture.3, texture.4))
+                }),
+        );
+    stats.ui_bytes = gfx
+        .texts
+        .values()
+        .map(|(_, _, texture)| texture)
+        .chain(gfx.debug_labels.values().map(|(_, texture, _, _)| texture))
+        .chain(gfx.toolbar_texts.values().map(|(_, texture)| texture))
+        .chain(
+            gfx.menu
+                .iter()
+                .flat_map(|menu| menu.textures.iter().flatten()),
+        )
+        .fold(0usize, |bytes, texture| {
+            let query = texture.query();
+            bytes.saturating_add(estimated_texture_bytes(query.width, query.height))
+        });
+
+    #[cfg(feature = "nvidia-optical-flow")]
+    {
+        stats.optical_flow_count =
+            gfx.optical_flow_textures.len() + gfx.video_optical_flow_textures.len();
+        stats.optical_flow_bytes = gfx
+            .optical_flow_textures
+            .values()
+            .fold(0usize, |bytes, entry| {
+                bytes.saturating_add(estimated_texture_bytes(entry.width, entry.height))
+            })
+            .saturating_add(gfx.video_optical_flow_textures.values().fold(
+                0usize,
+                |bytes, texture| {
+                    let query = texture.query();
+                    bytes.saturating_add(estimated_texture_bytes(query.width, query.height))
+                },
+            ));
+    }
+
+    stats
 }
 
 fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<ToolbarAction> {
@@ -184,20 +309,56 @@ fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<Toolbar
                 return Some(ToolbarAction::Interpolation(mode));
             }
         }
+        for (mode, rect) in scale_filter_option_rects(width) {
+            if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
+                return Some(ToolbarAction::ScaleFilter(mode));
+            }
+        }
     }
     None
 }
 
+/// Edge strip that reveals the toolbar; keep small so it does not steal play space.
+const TOOLBAR_REVEAL_HEIGHT: f32 = 6.0;
+/// Drawn bar height in `draw_toolbar` (fill). Open chrome stays hit-testable while hovered.
+const TOOLBAR_BAR_HEIGHT: f32 = 46.0;
+
 fn toolbar_contains(width: u32, x: f32, y: f32, options_open: bool) -> bool {
-    (y >= 0.0 && y < 32.0 && x >= 0.0 && x < width as f32)
+    (y >= 0.0 && y < TOOLBAR_BAR_HEIGHT && x >= 0.0 && x < width as f32)
         || (options_open
             && x >= width as f32 - 340.0
             && x < width as f32 - 6.0
-            && (32.0..230.0).contains(&y))
+            && (32.0..270.0).contains(&y))
 }
 
-fn is_toolbar_visible(mouse_y: f32, options_open: bool) -> bool {
-    options_open || (0.0..32.0).contains(&mouse_y)
+fn toolbar_in_reveal_strip(mouse_y: f32) -> bool {
+    (0.0..TOOLBAR_REVEAL_HEIGHT).contains(&mouse_y)
+}
+
+/// Visible when latched open (hover chrome) or while the options panel is open.
+fn is_toolbar_visible(toolbar_open: bool, options_open: bool) -> bool {
+    toolbar_open || options_open
+}
+
+/// Open on the thin top strip; stay open while over bar/panel; close when leaving that chrome.
+fn update_toolbar_open(
+    toolbar_open: &mut bool,
+    options_open: &mut bool,
+    width: u32,
+    mouse: (f32, f32),
+) {
+    let (x, y) = mouse;
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        *toolbar_open = false;
+        *options_open = false;
+        return;
+    }
+    if toolbar_in_reveal_strip(y) {
+        *toolbar_open = true;
+    } else if (*toolbar_open || *options_open) && !toolbar_contains(width, x, y, *options_open) {
+        *toolbar_open = false;
+        *options_open = false;
+    }
 }
 
 fn point_in_logical_render(point: (f32, f32), logical: (u32, u32)) -> bool {
@@ -691,6 +852,81 @@ fn draw_language_picker(
     );
 }
 
+fn apply_present_scale_hint(canvas: &Canvas<Window>, present_scale: ScaleFilter) {
+    let mode = if present_scale.present_nearest() {
+        sdl3::sys::surface::SDL_SCALEMODE_NEAREST
+    } else {
+        sdl3::sys::surface::SDL_SCALEMODE_LINEAR
+    };
+    unsafe {
+        let _ = sdl3::sys::render::SDL_SetDefaultTextureScaleMode(canvas.raw(), mode);
+    }
+}
+
+fn apply_cached_texture_scale_modes(gfx: &mut Gfx, mode: ScaleMode) {
+    for (texture, _, _) in gfx.images.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+    for (texture, _, _, _, _) in gfx.video_textures.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+    for (_, _, texture, _, _) in gfx.video_previous_textures.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+    for (_, _, texture) in gfx.texts.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+    for (_, texture) in gfx.toolbar_texts.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+    if let Some(menu) = gfx.menu.as_mut() {
+        for texture in menu.textures.iter_mut().flatten() {
+            texture.set_scale_mode(mode);
+        }
+    }
+    #[cfg(feature = "nvidia-optical-flow")]
+    for entry in gfx.optical_flow_textures.values_mut() {
+        entry.texture.set_scale_mode(mode);
+    }
+    #[cfg(feature = "nvidia-optical-flow")]
+    for texture in gfx.video_optical_flow_textures.values_mut() {
+        texture.set_scale_mode(mode);
+    }
+}
+
+/// Letterbox del framebuffer lógico con nearest (líneas nítidas, sin IA).
+fn present_sharp_frame(
+    canvas: &mut Canvas<Window>,
+    scene_frame: &mut Texture,
+    logical: (u32, u32),
+) -> Result<(), String> {
+    let (lw, lh) = logical;
+    let (pw, ph) = canvas.window().size_in_pixels();
+    let (bx, by, cw, ch) = crate::util::letterbox((pw, ph), (lw, lh));
+    scene_frame.set_scale_mode(ScaleMode::Nearest);
+    canvas
+        .set_logical_size(0, 0, sdl3::sys::render::SDL_LOGICAL_PRESENTATION_DISABLED)
+        .map_err(|e| e.to_string())?;
+    canvas.set_draw_color(Color::RGB(0, 0, 0));
+    canvas.clear();
+    canvas
+        .copy(
+            scene_frame,
+            None,
+            FRect::new(bx as f32, by as f32, cw as f32, ch as f32),
+        )
+        .map_err(|e| e.to_string())?;
+    canvas.present();
+    canvas
+        .set_logical_size(
+            lw,
+            lh,
+            sdl3::sys::render::SDL_LOGICAL_PRESENTATION_LETTERBOX,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn upload(
     tc: &TextureCreator<WindowContext>,
     w: u32,
@@ -933,11 +1169,24 @@ pub fn run(
         .map_err(|e| format!("cannot create persistent scene frame: {e}"))?;
     scene_frame.set_blend_mode(BlendMode::None);
     let mut scene_frame_ready = false;
-    let filter = if cfg.window.scale_filter == "nearest" {
+    let mut present_scale = ScaleFilter::from_config(&cfg.window.scale_filter);
+    apply_present_scale_hint(&canvas, present_scale);
+    if let Some(context) = _native_vulkan.as_mut() {
+        if let Err(error) = context.set_present_scale_filter(present_scale) {
+            log::warn!("{error}");
+        }
+    }
+    let mut filter = if present_scale.asset_nearest() {
         ScaleMode::Nearest
     } else {
         ScaleMode::Linear
     };
+    scene_frame.set_scale_mode(if present_scale.present_nearest() {
+        ScaleMode::Nearest
+    } else {
+        ScaleMode::Linear
+    });
+    let mut sharp_compose: Option<Texture> = None;
 
     // primer frame cuanto antes
     canvas.set_draw_color(Color::RGB(0, 0, 0));
@@ -995,12 +1244,14 @@ pub fn run(
         images: HashMap::new(),
         image_texture_cache: HashMap::new(),
         image_texture_cache_clock: 0,
+        image_texture_used_this_frame: HashSet::new(),
         video_textures: HashMap::new(),
         video_previous_textures: HashMap::new(),
         texts: HashMap::new(),
         debug_labels: HashMap::new(),
         menu_animation_starts: HashMap::new(),
         menu_fonts: HashMap::new(),
+        pixel_fonts: vm.pixel_fonts(),
         toolbar_texts: HashMap::new(),
         crossfade_safety: HashMap::new(),
         #[cfg(feature = "nvidia-optical-flow")]
@@ -1016,16 +1267,19 @@ pub fn run(
     };
     let start = Instant::now();
     let mut menu_sel = 0usize;
+    let mut active_menu: Option<String> = None;
     let mut mouse = (-1.0f32, -1.0f32);
     let mut first_scene_logged = false;
     let mut frame: u64 = 0;
     let mut last_dbg = -1000.0f64;
     let mut options_open = false;
+    let mut toolbar_open = false;
     let mut language_picker_open = !languages.is_empty() && snapshot.is_none();
     let mut language_selection = default_language_selection(languages.len());
     let mut export_status: Option<String> = None;
     let mut fps_meter_enabled = cfg.window.fps_meter;
     let mut fps_epoch = Instant::now();
+    let mut texture_memory_log = Instant::now();
     let mut fps_present_count = 0_u32;
     let mut fps_value = 0_u32;
     let mut vm_time_sum_ms = 0.0_f64;
@@ -1073,6 +1327,7 @@ pub fn run(
                 }
             }
         }
+        let mut mouse_moved_this_frame = false;
         for ev in pump.poll_iter() {
             let ev = ev.get_converted_coords(&canvas).unwrap_or(ev);
             log::trace!("{ev:?}");
@@ -1123,12 +1378,17 @@ pub fn run(
                     }
                     if options_open && k == sdl3::keyboard::Keycode::Escape {
                         options_open = false;
+                        if !toolbar_contains(lw, mouse.0, mouse.1, false) {
+                            toolbar_open = false;
+                        }
                         continue;
                     }
-                    if k == sdl3::keyboard::Keycode::Up {
-                        vm.set_key_push(38, true);
-                    } else if k == sdl3::keyboard::Keycode::Down {
-                        vm.set_key_push(40, true);
+                    if let Some(vk) = windows_vk(k) {
+                        if repeat {
+                            vm.set_key_repeat(vk);
+                        } else {
+                            vm.set_key_push(vk, true);
+                        }
                     }
                     if vm.active_edit_name().is_some() {
                         if let Some(code) = edit_key_code(&k.name()) {
@@ -1190,22 +1450,26 @@ pub fn run(
                 Event::KeyUp {
                     keycode: Some(k), ..
                 } => {
-                    if k == sdl3::keyboard::Keycode::Up {
-                        vm.set_key_push(38, false);
-                    } else if k == sdl3::keyboard::Keycode::Down {
-                        vm.set_key_push(40, false);
+                    if let Some(vk) = windows_vk(k) {
+                        vm.set_key_push(vk, false);
                     }
                     if keys.action(&k.name()) == Some(Action::Skip) {
                         vm.skip = false;
                     }
                 }
                 Event::MouseMotion { x, y, .. } => {
+                    mouse_moved_this_frame = true;
                     if point_in_logical_render((x, y), (lw, lh)) {
                         mouse = (x, y);
                         vm.mouse_move(x as f64, y as f64);
+                        if !language_picker_open && snapshot.is_none() {
+                            update_toolbar_open(&mut toolbar_open, &mut options_open, lw, mouse);
+                        }
                     } else {
                         mouse = (-1.0, -1.0);
                         vm.mouse_move(-1.0, -1.0);
+                        toolbar_open = false;
+                        options_open = false;
                     }
                 }
                 Event::MouseButtonDown {
@@ -1237,7 +1501,9 @@ pub fn run(
                         }
                         continue;
                     }
-                    if let Some(action) = toolbar_hit(lw, x, y, options_open) {
+                    if is_toolbar_visible(toolbar_open, options_open)
+                        && let Some(action) = toolbar_hit(lw, x, y, options_open)
+                    {
                         match action {
                             ToolbarAction::Quit => break 'main,
                             ToolbarAction::Fullscreen => {
@@ -1250,7 +1516,12 @@ pub fn run(
                                     log::warn!("cannot change fullscreen state: {error}");
                                 }
                             }
-                            ToolbarAction::Options => options_open = !options_open,
+                            ToolbarAction::Options => {
+                                options_open = !options_open;
+                                if options_open {
+                                    toolbar_open = true;
+                                }
+                            }
                             ToolbarAction::ToggleFpsMeter => {
                                 fps_meter_enabled = !fps_meter_enabled;
                             }
@@ -1287,6 +1558,34 @@ pub fn run(
                                             Some("Error al crear carpeta (ver consola)".into());
                                     }
                                 }
+                            }
+                            ToolbarAction::ScaleFilter(mode) => {
+                                present_scale = mode;
+                                filter = if present_scale.asset_nearest() {
+                                    ScaleMode::Nearest
+                                } else {
+                                    ScaleMode::Linear
+                                };
+                                scene_frame.set_scale_mode(if present_scale.present_nearest() {
+                                    ScaleMode::Nearest
+                                } else {
+                                    ScaleMode::Linear
+                                });
+                                apply_cached_texture_scale_modes(&mut gfx, filter);
+                                apply_present_scale_hint(&canvas, present_scale);
+                                if let Some(context) = _native_vulkan.as_mut() {
+                                    if let Err(error) =
+                                        context.set_present_scale_filter(present_scale)
+                                    {
+                                        log::warn!("{error}");
+                                    }
+                                }
+                                log::info!(
+                                    "scale_filter → {} (asset={:?}, present_nearest={})",
+                                    present_scale.as_str(),
+                                    filter,
+                                    present_scale.present_nearest()
+                                );
                             }
                             ToolbarAction::Interpolation(mode) => {
                                 #[cfg(feature = "nvidia-optical-flow")]
@@ -1333,12 +1632,25 @@ pub fn run(
                                 }
                             }
                         }
-                    } else if toolbar_contains(lw, x, y, options_open) {
+                    } else if is_toolbar_visible(toolbar_open, options_open)
+                        && toolbar_contains(lw, x, y, options_open)
+                    {
                         continue;
                     } else {
                         options_open = false;
+                        toolbar_open = false;
+                        vm.set_mouse_button(false, true);
                         if let State::Menu { name, choices, .. } = &vm.state {
-                            if let Some(i) = menu_hit(choices, vm.scene.get(name), lw, lh, x, y) {
+                            if let Some(i) = menu_hit_cached(
+                                &gfx,
+                                name,
+                                choices,
+                                lw,
+                                lh,
+                                x,
+                                y,
+                                vm.scene.get(name),
+                            ) {
                                 vm.choose(i);
                             }
                         } else {
@@ -1357,14 +1669,17 @@ pub fn run(
                         vm.mouse_move(-1.0, -1.0);
                         continue;
                     }
+                    vm.set_mouse_button(true, true);
                     vm.click_at(x as f64, y as f64, true);
                 }
-                Event::MouseButtonUp {
-                    mouse_btn: MouseButton::Left,
-                    ..
-                } => {
-                    vm.end_slider_drag();
-                }
+                Event::MouseButtonUp { mouse_btn, .. } => match mouse_btn {
+                    MouseButton::Left => {
+                        vm.set_mouse_button(false, false);
+                        vm.end_slider_drag();
+                    }
+                    MouseButton::Right => vm.set_mouse_button(true, false),
+                    _ => {}
+                },
                 Event::TextInput { text, .. } => {
                     vm.insert_edit_text(&text);
                 }
@@ -1378,15 +1693,79 @@ pub fn run(
                         y
                     };
                     vm.set_mouse_wheel(y > 0.0, y < 0.0);
+                    if y != 0.0 {
+                        let menu_context = match &vm.state {
+                            State::Menu { name, choices, .. } => {
+                                Some((name.clone(), choices.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((name, choices)) = menu_context
+                            && menu_hit_cached(
+                                &gfx,
+                                &name,
+                                &choices,
+                                lw,
+                                lh,
+                                mouse.0,
+                                mouse.1,
+                                vm.scene.get(&name),
+                            )
+                            .is_some()
+                        {
+                            scroll_menu(
+                                &mut vm,
+                                &name,
+                                choices.len(),
+                                y.round() as i64,
+                                &mut menu_sel,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
         }
+        let menu_selection_context = match &vm.state {
+            State::Menu { name, choices, .. } => Some((name.clone(), choices.len())),
+            _ => None,
+        };
         if let State::Menu { name, choices, .. } = &vm.state {
+            if active_menu.as_deref() != Some(name.as_str()) {
+                active_menu = Some(name.clone());
+                menu_sel = vm
+                    .scene
+                    .get(name)
+                    .map(|menu| {
+                        menu_visible_range(
+                            choices.len(),
+                            menu.int(Prop::ROWCOUNT, 0),
+                            menu.int(Prop::TOPINDEX, 0),
+                        )
+                        .start
+                    })
+                    .unwrap_or(0);
+            }
             menu_sel = menu_sel.min(choices.len().saturating_sub(1));
-            if let Some(i) = menu_hit(choices, vm.scene.get(name), lw, lh, mouse.0, mouse.1) {
+            if mouse_moved_this_frame
+                && let Some(i) = menu_hit_cached(
+                    &gfx,
+                    name,
+                    choices,
+                    lw,
+                    lh,
+                    mouse.0,
+                    mouse.1,
+                    vm.scene.get(name),
+                )
+            {
                 menu_sel = i;
             }
+        } else {
+            active_menu = None;
+        }
+        if let Some((name, choice_count)) = menu_selection_context {
+            keep_menu_selection_visible(&mut vm, &name, choice_count, menu_sel);
         }
         if font.is_none()
             && let Ok(r) = frx.try_recv()
@@ -1410,6 +1789,32 @@ pub fn run(
             vm.update(now, 20_000)
         };
         let vm_update_ms = vm_update_started.elapsed().as_secs_f64() * 1000.0;
+        let menu_selection_context = match &vm.state {
+            State::Menu { name, choices, .. } => Some((name.clone(), choices.len())),
+            _ => None,
+        };
+        if let State::Menu { name, choices, .. } = &vm.state {
+            if active_menu.as_deref() != Some(name.as_str()) {
+                active_menu = Some(name.clone());
+                menu_sel = vm
+                    .scene
+                    .get(name)
+                    .map(|menu| {
+                        menu_visible_range(
+                            choices.len(),
+                            menu.int(Prop::ROWCOUNT, 0),
+                            menu.int(Prop::TOPINDEX, 0),
+                        )
+                        .start
+                    })
+                    .unwrap_or(0);
+            }
+        } else {
+            active_menu = None;
+        }
+        if let Some((name, choice_count)) = menu_selection_context {
+            keep_menu_selection_visible(&mut vm, &name, choice_count, menu_sel);
+        }
         let wants_text_input = vm.active_edit_name().is_some();
         if wants_text_input != text_input_active {
             if wants_text_input {
@@ -1500,62 +1905,162 @@ pub fn run(
                 .map_err(|e| format!("cannot render scene frame: {e}"))?;
             scene_frame_ready = true;
         }
-        if scene_frame_ready {
-            canvas
-                .copy(
-                    &scene_frame,
-                    None,
-                    FRect::new(0.0, 0.0, lw as f32, lh as f32),
-                )
-                .map_err(|e| e.to_string())?;
-        } else {
-            canvas.set_draw_color(Color::RGB(0, 0, 0));
-            canvas.clear();
-        }
-        if language_picker_open && snapshot.is_none() {
-            draw_language_picker(
-                &mut canvas,
-                &tc,
-                &mut gfx,
-                font.as_mut(),
-                (lw, lh),
-                &languages,
-                language_selection,
-                (mouse.0, mouse.1),
-            );
-        }
         let scene_render_ms = scene_render_started.elapsed().as_secs_f64() * 1000.0;
         let toolbar_visible = snapshot.is_none()
             && !language_picker_open
-            && is_toolbar_visible(mouse.1, options_open);
-        if toolbar_visible {
-            draw_toolbar(
-                &mut canvas,
-                &tc,
-                &mut gfx,
-                font.as_mut(),
-                (lw, lh),
-                (mouse.0, mouse.1),
-                options_open,
-                interpolation_mode,
-                vsync_active,
-                fps_meter_enabled,
-                export_status.as_deref(),
-            );
+            && is_toolbar_visible(toolbar_open, options_open);
+        let use_sharp_present = present_scale.present_nearest() && scene_frame_ready;
+        let draw_lang = language_picker_open && snapshot.is_none();
+        let draw_fps = fps_meter_enabled && snapshot.is_none() && !language_picker_open;
+        let sharp_needs_overlay = use_sharp_present && (draw_lang || toolbar_visible || draw_fps);
+        if sharp_needs_overlay {
+            if sharp_compose.as_ref().is_none_or(|texture| {
+                let q = texture.query();
+                q.width != lw || q.height != lh
+            }) {
+                let mut texture = tc
+                    .create_texture_target(PixelFormat::RGBA32, lw, lh)
+                    .map_err(|e| format!("cannot create sharp compose target: {e}"))?;
+                texture.set_blend_mode(BlendMode::None);
+                texture.set_scale_mode(ScaleMode::Nearest);
+                sharp_compose = Some(texture);
+            }
+            let compose = sharp_compose
+                .as_mut()
+                .ok_or_else(|| "sharp compose target missing".to_string())?;
+            canvas
+                .with_texture_canvas(compose, |overlay| {
+                    overlay.set_draw_color(Color::RGB(0, 0, 0));
+                    let _ = overlay.clear();
+                    let _ = overlay.copy(
+                        &scene_frame,
+                        None,
+                        FRect::new(0.0, 0.0, lw as f32, lh as f32),
+                    );
+                    if draw_lang {
+                        draw_language_picker(
+                            overlay,
+                            &tc,
+                            &mut gfx,
+                            font.as_mut(),
+                            (lw, lh),
+                            &languages,
+                            language_selection,
+                            (mouse.0, mouse.1),
+                        );
+                    }
+                    if toolbar_visible {
+                        draw_toolbar(
+                            overlay,
+                            &tc,
+                            &mut gfx,
+                            font.as_mut(),
+                            (lw, lh),
+                            (mouse.0, mouse.1),
+                            options_open,
+                            interpolation_mode,
+                            present_scale,
+                            vsync_active,
+                            fps_meter_enabled,
+                            export_status.as_deref(),
+                        );
+                    }
+                    if draw_fps {
+                        draw_fps_meter(
+                            overlay,
+                            &tc,
+                            &mut gfx,
+                            font.as_mut(),
+                            fps_value,
+                            refresh_rate,
+                            vm_time_ms,
+                            scene_time_ms,
+                            present_time_ms,
+                            vm_steps_per_frame,
+                            vm.budget_location(),
+                        );
+                    }
+                })
+                .map_err(|e| format!("cannot composite sharp overlays: {e}"))?;
+        } else if !use_sharp_present {
+            if scene_frame_ready {
+                canvas
+                    .copy(
+                        &scene_frame,
+                        None,
+                        FRect::new(0.0, 0.0, lw as f32, lh as f32),
+                    )
+                    .map_err(|e| e.to_string())?;
+            } else {
+                canvas.set_draw_color(Color::RGB(0, 0, 0));
+                canvas.clear();
+            }
+            if language_picker_open && snapshot.is_none() {
+                draw_language_picker(
+                    &mut canvas,
+                    &tc,
+                    &mut gfx,
+                    font.as_mut(),
+                    (lw, lh),
+                    &languages,
+                    language_selection,
+                    (mouse.0, mouse.1),
+                );
+            }
+            if toolbar_visible {
+                draw_toolbar(
+                    &mut canvas,
+                    &tc,
+                    &mut gfx,
+                    font.as_mut(),
+                    (lw, lh),
+                    (mouse.0, mouse.1),
+                    options_open,
+                    interpolation_mode,
+                    present_scale,
+                    vsync_active,
+                    fps_meter_enabled,
+                    export_status.as_deref(),
+                );
+            }
+            if fps_meter_enabled && snapshot.is_none() && !language_picker_open {
+                draw_fps_meter(
+                    &mut canvas,
+                    &tc,
+                    &mut gfx,
+                    font.as_mut(),
+                    fps_value,
+                    refresh_rate,
+                    vm_time_ms,
+                    scene_time_ms,
+                    present_time_ms,
+                    vm_steps_per_frame,
+                    vm.budget_location(),
+                );
+            }
         }
-        if fps_meter_enabled && snapshot.is_none() && !language_picker_open {
-            draw_fps_meter(
-                &mut canvas,
-                &tc,
-                &mut gfx,
-                font.as_mut(),
-                fps_value,
-                refresh_rate,
-                vm_time_ms,
-                scene_time_ms,
-                present_time_ms,
-                vm_steps_per_frame,
-                vm.budget_location(),
+        if texture_memory_log.elapsed() >= std::time::Duration::from_secs(5) {
+            texture_memory_log = Instant::now();
+            let stats = texture_memory_stats(&gfx, (lw, lh));
+            let total_bytes = stats
+                .image_bytes
+                .saturating_add(stats.video_bytes)
+                .saturating_add(stats.optical_flow_bytes)
+                .saturating_add(stats.ui_bytes)
+                .saturating_add(stats.render_target_bytes);
+            let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+            log::info!(
+                "estimated GPU textures: total {:.1} MiB | GAL/images {:.1} MiB ({} textures) | video {:.1} MiB ({} textures) | Optical Flow {:.1} MiB ({} textures) | UI/text {:.1} MiB ({} textures) | scene target {:.1} MiB",
+                mib(total_bytes),
+                mib(stats.image_bytes),
+                stats.image_count,
+                mib(stats.video_bytes),
+                stats.video_count,
+                mib(stats.optical_flow_bytes),
+                stats.optical_flow_count,
+                mib(stats.ui_bytes),
+                stats.ui_count,
+                mib(stats.render_target_bytes)
             );
         }
         frame += 1;
@@ -1637,7 +2142,19 @@ pub fn run(
             break;
         }
         let present_started = Instant::now();
-        canvas.present();
+        if use_sharp_present {
+            let source = if sharp_needs_overlay {
+                sharp_compose.as_mut().unwrap_or(&mut scene_frame)
+            } else {
+                &mut scene_frame
+            };
+            if let Err(error) = present_sharp_frame(&mut canvas, source, (lw, lh)) {
+                log::warn!("sharp present failed; using SDL letterbox: {error}");
+                canvas.present();
+            }
+        } else {
+            canvas.present();
+        }
         let present_ms = present_started.elapsed().as_secs_f64() * 1000.0;
         fps_present_count = fps_present_count.saturating_add(1);
         vm_time_sum_ms += vm_update_ms;
@@ -1678,6 +2195,14 @@ pub fn run(
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
     }
+    if vm.unimpl.is_empty() {
+        log::warn!("# unimplemented: none");
+    } else {
+        log::warn!("# unimplemented ({} unique):", vm.unimpl.len());
+        for (k, n) in &vm.unimpl {
+            log::warn!("#   {k} x{n}");
+        }
+    }
     Ok(())
 }
 
@@ -1690,6 +2215,7 @@ fn draw_toolbar(
     mouse: (f32, f32),
     options_open: bool,
     interpolation_mode: InterpolationMode,
+    present_scale: ScaleFilter,
     vsync_active: bool,
     fps_meter_enabled: bool,
     export_status: Option<&str>,
@@ -1718,6 +2244,7 @@ fn draw_toolbar(
             ToolbarAction::Fullscreen => "Pantalla",
             ToolbarAction::Options => "Opciones",
             ToolbarAction::Interpolation(_)
+            | ToolbarAction::ScaleFilter(_)
             | ToolbarAction::ToggleFpsMeter
             | ToolbarAction::ExportTexts => continue,
         };
@@ -1735,7 +2262,7 @@ fn draw_toolbar(
         );
     }
     if options_open {
-        let panel = FRect::new(width as f32 - 340.0, 32.0, 334.0, 198.0);
+        let panel = FRect::new(width as f32 - 340.0, 32.0, 334.0, 238.0);
         canvas.set_draw_color(Color::RGBA(16, 18, 26, 248));
         let _ = canvas.fill_rect(panel);
         canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
@@ -1776,6 +2303,50 @@ fn draw_toolbar(
                 InterpolationMode::Crossfade => "Fundido",
                 #[cfg(feature = "nvidia-optical-flow")]
                 InterpolationMode::OpticalFlow => "Optical Flow",
+            };
+            draw_toolbar_text(
+                canvas,
+                tc,
+                gfx,
+                font.as_deref_mut(),
+                label,
+                rect.x + 5.0,
+                rect.y,
+                rect.w as u32 - 10,
+                rect.h as u32,
+            );
+        }
+        draw_toolbar_text(
+            canvas,
+            tc,
+            gfx,
+            font.as_deref_mut(),
+            "Escalado present",
+            panel.x + 12.0,
+            108.0,
+            310,
+            20,
+        );
+        for (mode, rect) in scale_filter_option_rects(width) {
+            let selected = mode == present_scale;
+            let hovered = mouse.0 >= rect.x
+                && mouse.0 < rect.x + rect.w
+                && mouse.1 >= rect.y
+                && mouse.1 < rect.y + rect.h;
+            canvas.set_draw_color(if selected {
+                Color::RGBA(55, 112, 84, 255)
+            } else if hovered {
+                Color::RGBA(73, 99, 145, 255)
+            } else {
+                Color::RGBA(43, 47, 61, 255)
+            });
+            let _ = canvas.fill_rect(rect);
+            canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+            let _ = canvas.draw_rect(rect);
+            let label = match mode {
+                ScaleFilter::Linear => "Linear",
+                ScaleFilter::Nearest => "Nearest",
+                ScaleFilter::Sharp => "Sharp",
             };
             draw_toolbar_text(
                 canvas,
@@ -1832,7 +2403,7 @@ fn draw_toolbar(
             font.as_deref_mut(),
             detail,
             panel.x + 16.0,
-            138.0,
+            178.0,
             310,
             20,
         );
@@ -1868,7 +2439,7 @@ fn draw_toolbar(
                 font.as_deref_mut(),
                 status,
                 panel.x + 12.0,
-                196.0,
+                236.0,
                 310,
                 20,
             );
@@ -1943,6 +2514,16 @@ fn draw_fps_meter(
 }
 
 fn menu_geometry(choices: &[String], menu: Option<&Obj>, lw: u32, lh: u32) -> (FRect, Vec<FRect>) {
+    menu_geometry_with_width(choices, menu, lw, lh, None)
+}
+
+fn menu_geometry_with_width(
+    choices: &[String],
+    menu: Option<&Obj>,
+    lw: u32,
+    lh: u32,
+    measured_width: Option<f32>,
+) -> (FRect, Vec<FRect>) {
     let font_height = menu
         .and_then(|o| o.get(Prop::FONTHEIGHT))
         .map(|v| v.as_f64())
@@ -1956,9 +2537,12 @@ fn menu_geometry(choices: &[String], menu: Option<&Obj>, lw: u32, lh: u32) -> (F
     let (default_w, default_h) =
         native_menu_size(choices.len(), lw, font_height, line_space, margin_y as i64);
     let width = menu
-        .map(|o| o.int(Prop::WIDTH, default_w))
-        .unwrap_or(default_w)
-        .max(0) as f32;
+        .and_then(|o| o.get(Prop::WIDTH).map(Value::as_int))
+        .filter(|width| *width > 0)
+        .map(|width| width as f32)
+        .or_else(|| measured_width.map(|width| width.min(lw as f32)))
+        .unwrap_or(default_w as f32)
+        .max(0.0);
     let height = menu
         .map(|o| o.int(Prop::HEIGHT, default_h))
         .unwrap_or(default_h)
@@ -1979,6 +2563,97 @@ fn menu_geometry(choices: &[String], menu: Option<&Obj>, lw: u32, lh: u32) -> (F
     (frame, rows)
 }
 
+fn menu_content_rows(
+    mut frame: FRect,
+    rows: &[FRect],
+    left_inset: f32,
+    right_inset: f32,
+    top_inset: f32,
+    bottom_inset: f32,
+    min_row_height: f32,
+) -> (FRect, Vec<FRect>) {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return (frame, Vec::new());
+    };
+    let top = first.y.max(frame.y + top_inset.max(0.0));
+    let original_bottom = (last.y + last.h).min(frame.y + frame.h - bottom_inset.max(0.0));
+    let available_height = original_bottom - top;
+    if !available_height.is_finite() {
+        return (frame, rows.to_vec());
+    }
+    let min_content_height = min_row_height.max(1.0) * rows.len() as f32;
+    let content_height = if available_height < min_content_height {
+        frame.h = (top - frame.y + min_content_height + bottom_inset.max(0.0)).max(frame.h);
+        min_content_height
+    } else {
+        available_height
+    };
+    let row_height = content_height / rows.len() as f32;
+    let content_x = frame.x + left_inset.max(0.0);
+    let content_width = (frame.w - left_inset.max(0.0) - right_inset.max(0.0)).max(0.0);
+    let content_rows = rows
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            FRect::new(
+                content_x,
+                top + index as f32 * row_height,
+                content_width,
+                row_height,
+            )
+        })
+        .collect();
+    (frame, content_rows)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MenuScrollbarGeometry {
+    x: f32,
+    top: f32,
+    button_size: f32,
+    track_height: f32,
+    thumb_offset: f32,
+    thumb_height: f32,
+}
+
+fn menu_scrollbar_geometry(
+    frame: FRect,
+    track_top: f32,
+    track_bottom: f32,
+    right_inset: f32,
+    source_cell: (u32, u32),
+    choice_count: usize,
+    row_count: i64,
+    top_index: i64,
+) -> Option<MenuScrollbarGeometry> {
+    let visible = menu_visible_range(choice_count, row_count, top_index);
+    if visible.len() >= choice_count || source_cell.0 == 0 || source_cell.1 == 0 {
+        return None;
+    }
+    let button_size = source_cell.1 as f32;
+    let track_height = (track_bottom - track_top - button_size * 2.0).max(0.0);
+    if button_size > track_bottom - track_top || track_height <= 0.0 {
+        return None;
+    }
+    let max_top = choice_count.saturating_sub(visible.len());
+    let thumb_height = (track_height * visible.len() as f32 / choice_count as f32)
+        .max(button_size.min(track_height));
+    let max_offset = track_height - thumb_height;
+    let progress = if max_top == 0 {
+        0.0
+    } else {
+        visible.start as f32 / max_top as f32
+    };
+    Some(MenuScrollbarGeometry {
+        x: frame.x + frame.w - right_inset - source_cell.0 as f32,
+        top: track_top,
+        button_size,
+        track_height,
+        thumb_offset: max_offset * progress,
+        thumb_height,
+    })
+}
+
 fn menu_hit(
     choices: &[String],
     menu: Option<&Obj>,
@@ -1987,10 +2662,190 @@ fn menu_hit(
     x: f32,
     y: f32,
 ) -> Option<usize> {
-    menu_geometry(choices, menu, lw, lh)
-        .1
-        .iter()
+    let range = menu_visible_range(
+        choices.len(),
+        menu.map(|object| object.int(Prop::ROWCOUNT, 0))
+            .unwrap_or(0),
+        menu.map(|object| object.int(Prop::TOPINDEX, 0))
+            .unwrap_or(0),
+    );
+    let rows = menu_geometry(&choices[range.clone()], menu, lw, lh).1;
+    menu_hit_rows(&rows, x, y).map(|index| range.start + index)
+}
+
+fn menu_hit_rows(rows: &[FRect], x: f32, y: f32) -> Option<usize> {
+    rows.iter()
         .position(|r| x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h)
+}
+
+fn menu_hit_cached(
+    gfx: &Gfx,
+    name: &str,
+    choices: &[String],
+    lw: u32,
+    lh: u32,
+    x: f32,
+    y: f32,
+    menu: Option<&Obj>,
+) -> Option<usize> {
+    let range = menu_visible_range(
+        choices.len(),
+        menu.map(|object| object.int(Prop::ROWCOUNT, 0))
+            .unwrap_or(0),
+        menu.map(|object| object.int(Prop::TOPINDEX, 0))
+            .unwrap_or(0),
+    );
+    let visible_choices = &choices[range.clone()];
+    if let Some(cache) = gfx
+        .menu
+        .as_ref()
+        .filter(|cache| cache.name == name && cache.choices == visible_choices)
+    {
+        menu_hit_rows(&cache.rows, x, y).map(|index| range.start + index)
+    } else {
+        menu_hit(choices, menu, lw, lh, x, y)
+    }
+}
+
+fn keep_menu_selection_visible(vm: &mut Vm, name: &str, choice_count: usize, selection: usize) {
+    let Some(menu) = vm.scene.get(name) else {
+        return;
+    };
+    let row_count = menu.int(Prop::ROWCOUNT, 0);
+    if row_count <= 0 || choice_count == 0 {
+        return;
+    }
+    let current_top = menu.int(Prop::TOPINDEX, 0);
+    let range = menu_visible_range(choice_count, row_count, current_top);
+    let next_top = if selection < range.start {
+        selection
+    } else if selection >= range.end {
+        selection.saturating_add(1).saturating_sub(range.len())
+    } else {
+        range.start
+    };
+    if i64::try_from(next_top).unwrap_or(i64::MAX) != current_top {
+        vm.scene.set(
+            name,
+            Prop::TOPINDEX,
+            Value::Int(i64::try_from(next_top).unwrap_or(i64::MAX)),
+        );
+    }
+}
+
+fn scroll_menu(vm: &mut Vm, name: &str, choice_count: usize, amount: i64, selection: &mut usize) {
+    let Some(menu) = vm.scene.get(name) else {
+        return;
+    };
+    let row_count = menu.int(Prop::ROWCOUNT, 0);
+    if row_count <= 0 || choice_count == 0 {
+        return;
+    }
+    let current = menu_visible_range(choice_count, row_count, menu.int(Prop::TOPINDEX, 0));
+    if current.len() >= choice_count {
+        return;
+    }
+    let max_top = choice_count.saturating_sub(current.len());
+    let current_top = i64::try_from(current.start).unwrap_or(i64::MAX);
+    let max_top = i64::try_from(max_top).unwrap_or(i64::MAX);
+    let next_top = usize::try_from((current_top - amount).clamp(0, max_top)).unwrap_or(usize::MAX);
+    if next_top == current.start {
+        return;
+    }
+    if next_top > current.start {
+        *selection = selection.saturating_add(next_top - current.start);
+    } else {
+        *selection = selection.saturating_sub(current.start - next_top);
+    }
+    vm.scene.set(
+        name,
+        Prop::TOPINDEX,
+        Value::Int(i64::try_from(next_top).unwrap_or(i64::MAX)),
+    );
+}
+
+/// Código de tecla de Windows (`@KeyPush` / `@KeyClick`, docs/livenovel/calc.html).
+fn windows_vk(key: sdl3::keyboard::Keycode) -> Option<usize> {
+    use sdl3::keyboard::Keycode::*;
+    Some(match key {
+        Backspace => 0x08,
+        Tab => 0x09,
+        Return | KpEnter => 0x0D,
+        LShift | RShift => 0x10,
+        LCtrl | RCtrl => 0x11,
+        LAlt | RAlt => 0x12,
+        Escape => 0x1B,
+        Space => 0x20,
+        PageUp => 0x21,
+        PageDown => 0x22,
+        End => 0x23,
+        Home => 0x24,
+        Left => 0x25,
+        Up => 0x26,
+        Right => 0x27,
+        Down => 0x28,
+        Insert => 0x2D,
+        Delete => 0x2E,
+        _0 => 0x30,
+        _1 => 0x31,
+        _2 => 0x32,
+        _3 => 0x33,
+        _4 => 0x34,
+        _5 => 0x35,
+        _6 => 0x36,
+        _7 => 0x37,
+        _8 => 0x38,
+        _9 => 0x39,
+        A => 0x41,
+        B => 0x42,
+        C => 0x43,
+        D => 0x44,
+        E => 0x45,
+        F => 0x46,
+        G => 0x47,
+        H => 0x48,
+        I => 0x49,
+        J => 0x4A,
+        K => 0x4B,
+        L => 0x4C,
+        M => 0x4D,
+        N => 0x4E,
+        O => 0x4F,
+        P => 0x50,
+        Q => 0x51,
+        R => 0x52,
+        S => 0x53,
+        T => 0x54,
+        U => 0x55,
+        V => 0x56,
+        W => 0x57,
+        X => 0x58,
+        Y => 0x59,
+        Z => 0x5A,
+        Kp0 => 0x60,
+        Kp1 => 0x61,
+        Kp2 => 0x62,
+        Kp3 => 0x63,
+        Kp4 => 0x64,
+        Kp5 => 0x65,
+        Kp6 => 0x66,
+        Kp7 => 0x67,
+        Kp8 => 0x68,
+        Kp9 => 0x69,
+        F1 => 0x70,
+        F2 => 0x71,
+        F3 => 0x72,
+        F4 => 0x73,
+        F5 => 0x74,
+        F6 => 0x75,
+        F7 => 0x76,
+        F8 => 0x77,
+        F9 => 0x78,
+        F10 => 0x79,
+        F11 => 0x7A,
+        F12 => 0x7B,
+        _ => return None,
+    })
 }
 
 fn edit_key_code(name: &str) -> Option<i64> {
@@ -2033,7 +2888,35 @@ fn draw_menu(
     filter: ScaleMode,
     font_override: bool,
 ) {
-    let (frame, rows) = menu_geometry(choices, menu, lw, lh);
+    let visible_range = menu_visible_range(
+        choices.len(),
+        menu.map(|object| object.int(Prop::ROWCOUNT, 0))
+            .unwrap_or(0),
+        menu.map(|object| object.int(Prop::TOPINDEX, 0))
+            .unwrap_or(0),
+    );
+    let visible_choices = &choices[visible_range.clone()];
+    let visible_sel = sel
+        .checked_sub(visible_range.start)
+        .filter(|index| *index < visible_choices.len())
+        .unwrap_or(usize::MAX);
+    let (left_inset, right_inset, top_inset, bottom_inset) =
+        menu_border_insets(tc, assets, gfx, menu, filter);
+    let scrollbar_key = if visible_choices.len() < choices.len() {
+        menu.map(|object| object.str(Prop::SCROLLSOURCE))
+            .filter(|source| !source.is_empty())
+            .and_then(|source| image_for(tc, assets, gfx, &source, filter))
+    } else {
+        None
+    };
+    let scrollbar_size = scrollbar_key
+        .as_ref()
+        .and_then(|key| gfx.images.get(key))
+        .map(|(_, width, height)| (*width, *height));
+    let scrollbar_cell = scrollbar_size
+        .and_then(|(width, height)| (width >= 7 && height > 0).then_some((width / 7, height)));
+    let scrollbar_width = scrollbar_cell.map(|(width, _)| width as f32).unwrap_or(0.0);
+    let scrollbar_gap = if scrollbar_width > 0.0 { 4.0 } else { 0.0 };
     let alpha = menu
         .map(|o| o.int(Prop::ALPHA, 255).clamp(0, 255) as u8)
         .unwrap_or(255);
@@ -2055,29 +2938,10 @@ fn draw_menu(
         .unwrap_or(normal);
     let hover_bg = menu.map(|o| o.int(Prop::HOVERCOLOR, -1)).unwrap_or(-1);
     let fill = menu.map(|o| o.int(Prop::COLOR, -1)).unwrap_or(-1);
-    let style = vec![
-        frame.w as i64,
-        frame.h as i64,
-        (font_height * 100.0).round() as i64,
-        margin_x as i64,
-        halign as i64,
-        normal,
-        hover,
-        sel as i64,
-    ];
-    if !font_override && !font_family.is_empty() && !gfx.menu_fonts.contains_key(&font_family) {
-        let loaded = crate::text::find_font_family(&font_family).and_then(|(path, index)| {
-            match TextRenderer::load(&path, index) {
-                Ok(renderer) => {
-                    log::info!("menu font {font_family:?} loaded from {}", path.display());
-                    Some(renderer)
-                }
-                Err(error) => {
-                    log::warn!("cannot load menu font {font_family:?}: {error}");
-                    None
-                }
-            }
-        });
+    let prefer_pixel = !font_family.is_empty() && gfx.pixel_fonts.get(&font_family).is_some();
+    let use_named = !font_family.is_empty() && (!font_override || prefer_pixel);
+    if use_named && !gfx.menu_fonts.contains_key(&font_family) {
+        let loaded = TextRenderer::load_family(&font_family, &gfx.pixel_fonts, None);
         if loaded.is_none() {
             log::warn!(
                 "no font match for menu font family {font_family:?}; using configured fallback"
@@ -2085,10 +2949,75 @@ fn draw_menu(
         }
         gfx.menu_fonts.insert(font_family.clone(), loaded);
     }
+    let font_size = if let Some(renderer) = use_named
+        .then(|| {
+            gfx.menu_fonts
+                .get_mut(&font_family)
+                .and_then(Option::as_mut)
+        })
+        .flatten()
+    {
+        Some(renderer.size_for_cell_height(font_height as f32))
+    } else {
+        font.as_deref_mut()
+            .map(|renderer| renderer.size_for_cell_height(font_height as f32))
+    };
+    let measured_text_width = font_size.and_then(|font_size| {
+        let renderer = if use_named {
+            gfx.menu_fonts
+                .get_mut(&font_family)
+                .and_then(Option::as_mut)
+        } else {
+            None
+        }
+        .or_else(|| font.as_deref_mut())?;
+        choices
+            .iter()
+            .map(|choice| renderer.measure_text_width(choice, font_size))
+            .reduce(f32::max)
+    });
+    let natural_width = measured_text_width.map(|text_width| {
+        (text_width
+            + 2.0 * margin_x as f32
+            + left_inset
+            + right_inset
+            + scrollbar_width
+            + scrollbar_gap
+            + font_height as f32 * 0.5)
+            .min((lw as f32 - left_inset - right_inset).max(1.0))
+    });
+    let (frame, rows) = menu_geometry_with_width(visible_choices, menu, lw, lh, natural_width);
+    let (frame, content_rows) = menu_content_rows(
+        frame,
+        &rows,
+        left_inset,
+        right_inset + scrollbar_width + scrollbar_gap,
+        top_inset,
+        bottom_inset,
+        font_height as f32,
+    );
+    let style = vec![
+        frame.w as i64,
+        frame.h as i64,
+        (left_inset * 100.0).round() as i64,
+        (right_inset * 100.0).round() as i64,
+        (top_inset * 100.0).round() as i64,
+        (bottom_inset * 100.0).round() as i64,
+        (font_height * 100.0).round() as i64,
+        margin_x as i64,
+        halign as i64,
+        normal,
+        hover,
+        visible_sel as i64,
+    ];
     if gfx.menu.as_ref().is_none_or(|cache| {
-        cache.choices != choices || cache.font_family != font_family || cache.style != style
+        cache.name != menu.map_or("", |object| object.name.as_str())
+            || cache.choices != visible_choices
+            || cache.font_family != font_family
+            || cache.style != style
+            || cache.textures.len() != visible_choices.len()
     }) {
-        let selected_font = if !font_override && !font_family.is_empty() {
+        let selected_font = if use_named {
             gfx.menu_fonts
                 .get_mut(&font_family)
                 .and_then(Option::as_mut)
@@ -2099,13 +3028,13 @@ fn draw_menu(
             render_menu_textures(
                 f,
                 tc,
-                choices,
-                &rows,
+                visible_choices,
+                &content_rows,
                 margin_x,
                 font_height,
                 normal,
                 hover,
-                sel,
+                visible_sel,
                 halign,
                 filter,
             )
@@ -2113,27 +3042,29 @@ fn draw_menu(
             render_menu_textures(
                 f,
                 tc,
-                choices,
-                &rows,
+                visible_choices,
+                &content_rows,
                 margin_x,
                 font_height,
                 normal,
                 hover,
-                sel,
+                visible_sel,
                 halign,
                 filter,
             )
         } else {
             Vec::new()
         };
-        if !textures.is_empty() {
-            gfx.menu = Some(MenuCache {
-                choices: choices.to_vec(),
-                font_family: font_family.clone(),
-                style,
-                textures,
-            });
-        }
+        gfx.menu = Some(MenuCache {
+            name: menu.map_or_else(String::new, |object| object.name.clone()),
+            choices: visible_choices.to_vec(),
+            font_family: font_family.clone(),
+            style,
+            textures,
+            rows: content_rows.clone(),
+        });
+    } else if let Some(cache) = &mut gfx.menu {
+        cache.rows.clone_from(&content_rows);
     }
     canvas.set_blend_mode(BlendMode::Blend);
     if fill >= 0 {
@@ -2141,17 +3072,16 @@ fn draw_menu(
         canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
         let _ = canvas.fill_rect(frame);
     }
-    let (left_inset, _, _, _) = menu_border_insets(tc, assets, gfx, menu, filter);
     draw_menu_border(canvas, tc, assets, gfx, menu, frame, alpha, filter);
     if hover_bg >= 0
-        && let Some(row) = rows.get(sel)
+        && let Some(row) = content_rows.get(visible_sel)
     {
         let c = tcolor(hover_bg, alpha);
         canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
         let _ = canvas.fill_rect(*row);
     }
     if let Some(cache) = &mut gfx.menu {
-        for (row, texture) in rows.iter().zip(&mut cache.textures) {
+        for (row, texture) in content_rows.iter().zip(&mut cache.textures) {
             if let Some(texture) = texture {
                 texture.set_alpha_mod(alpha);
                 let query = texture.query();
@@ -2159,14 +3089,84 @@ fn draw_menu(
                     texture,
                     None,
                     FRect::new(
-                        row.x + left_inset + margin_x as f32,
+                        row.x + margin_x as f32,
                         row.y,
-                        row.w.min(query.width as f32),
+                        (row.w - margin_x as f32 * 2.0)
+                            .max(0.0)
+                            .min(query.width as f32),
                         row.h,
                     ),
                 );
             }
         }
+    }
+    if let (Some(key), Some((cell_width, cell_height))) = (scrollbar_key, scrollbar_cell)
+        && let Some(geometry) = menu_scrollbar_geometry(
+            frame,
+            content_rows
+                .first()
+                .map(|row| row.y)
+                .unwrap_or(frame.y + top_inset),
+            content_rows
+                .last()
+                .map(|row| row.y + row.h)
+                .unwrap_or(frame.y + frame.h - bottom_inset),
+            right_inset,
+            (cell_width, cell_height),
+            choices.len(),
+            menu.map(|object| object.int(Prop::ROWCOUNT, 0))
+                .unwrap_or(0),
+            menu.map(|object| object.int(Prop::TOPINDEX, 0))
+                .unwrap_or(0),
+        )
+        && let Some((texture, _, _)) = gfx.images.get_mut(&key)
+    {
+        texture.set_alpha_mod(alpha);
+        let cell_source = |index: u32| {
+            FRect::new(
+                (index * cell_width) as f32,
+                0.0,
+                cell_width as f32,
+                cell_height as f32,
+            )
+        };
+        let copy_part =
+            |canvas: &mut Canvas<Window>, texture: &mut Texture, index: u32, destination: FRect| {
+                let _ = canvas.copy(texture, Some(cell_source(index)), destination);
+            };
+        let button = geometry.button_size;
+        let track_top = geometry.top + button;
+        let track_bottom = track_top + geometry.track_height;
+        let track = FRect::new(
+            geometry.x,
+            track_top,
+            cell_width as f32,
+            geometry.track_height,
+        );
+        copy_part(canvas, texture, 4, track);
+        copy_part(
+            canvas,
+            texture,
+            0,
+            FRect::new(geometry.x, geometry.top, button, button),
+        );
+        copy_part(
+            canvas,
+            texture,
+            2,
+            FRect::new(geometry.x, track_bottom, button, button),
+        );
+        copy_part(
+            canvas,
+            texture,
+            6,
+            FRect::new(
+                geometry.x,
+                track_top + geometry.thumb_offset,
+                cell_width as f32,
+                geometry.thumb_height,
+            ),
+        );
     }
 }
 
@@ -2396,6 +3396,7 @@ fn image_for(
             last_used,
         },
     );
+    gfx.image_texture_used_this_frame.insert(name.clone());
     if uploaded_bytes > IMAGE_TEXTURE_CACHE_LIMIT_BYTES {
         log::warn!(
             "image texture set {name} uses {} MiB, exceeding the {} MiB GPU cache budget",
@@ -2423,6 +3424,14 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
     for object in ordered_objects {
         if !vm.scene.effective_visible(object) {
             continue;
+        }
+        for source in object.text.iter().filter_map(|item| match item {
+            TextItem::Image { source, .. } => Some(source.as_str()),
+            _ => None,
+        }) {
+            if !image_ready(source) {
+                return false;
+            }
         }
         if object.kind == Kind::Movie
             && object.get(Prop::PLAYING).is_some_and(Value::truthy)
@@ -2456,14 +3465,15 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
             && let Some(menu) = vm.prevmenus.get(&object.name)
         {
             for (index, button) in menu.buttons.iter().enumerate() {
-                if !vm.menu_item_visible(&object.name, index) {
+                if !vm.prevmenu_item_visible(&object.name, index, &button.name) {
                     continue;
                 }
-                let source = if menu.hover == Some(index) && !button.src_selected.is_empty() {
-                    &button.src_selected
-                } else {
-                    &button.src
-                };
+                let source = vm.prevmenu_button_image(
+                    &object.name,
+                    index,
+                    button,
+                    menu.hover == Some(index),
+                );
                 if !source.is_empty() && !image_ready(source) {
                     return false;
                 }
@@ -2652,19 +3662,7 @@ fn draw_caption_text(
     }
     let family = o.str(Prop::FONTNAME);
     if !family.is_empty() && !gfx.menu_fonts.contains_key(&family) {
-        let loaded =
-            crate::text::find_font_family(&family).and_then(
-                |(path, index)| match TextRenderer::load(&path, index) {
-                    Ok(renderer) => {
-                        log::info!("caption font {family:?} loaded from {}", path.display());
-                        Some(renderer)
-                    }
-                    Err(error) => {
-                        log::warn!("cannot load caption font {family:?}: {error}");
-                        None
-                    }
-                },
-            );
+        let loaded = TextRenderer::load_family(&family, &gfx.pixel_fonts, None);
         if loaded.is_none() {
             log::warn!(
                 "no font match for caption font family {family:?}; using configured fallback"
@@ -2755,6 +3753,7 @@ fn draw_caption_text(
 fn draw_message_text(
     canvas: &mut Canvas<Window>,
     tc: &TextureCreator<WindowContext>,
+    assets: &Assets,
     gfx: &mut Gfx,
     font: Option<&mut TextRenderer>,
     o: &Obj,
@@ -2781,22 +3780,84 @@ fn draw_message_text(
     if items.is_empty() {
         return "empty text";
     }
-    let extra = 0;
+    let family = o.str(Prop::FONTNAME);
+    if !family.is_empty() && !gfx.menu_fonts.contains_key(&family) {
+        let loaded = TextRenderer::load_family(&family, &gfx.pixel_fonts, None);
+        if loaded.is_none() {
+            log::warn!("no font match for message font {family:?}; using configured fallback");
+        }
+        gfx.menu_fonts.insert(family.clone(), loaded);
+    }
+    let font_height = o
+        .get(Prop::FONTHEIGHT)
+        .map(|v| v.as_f64() as f32)
+        .filter(|v| *v > 4.0)
+        .unwrap_or(cfg.text.size);
+    let color = o
+        .get(Prop::FONTCOLOR)
+        .map(|v| tcolor(v.as_int(), 255))
+        .unwrap_or(cfg.text.color);
+    let shadow = o
+        .get(Prop::FONTSHADOW)
+        .map(Value::truthy)
+        .unwrap_or(cfg.text.shadow);
+    let shadow_color = o
+        .get(Prop::FONTSHADOWCOLOR)
+        .map(|v| tcolor(v.as_int(), 255))
+        .unwrap_or([0, 0, 0, color[3] / 2 + 64]);
+    let border = o.get(Prop::FONTBORDER).is_some_and(Value::truthy);
+    let border_color = o
+        .get(Prop::FONTBORDERCOLOR)
+        .map(|v| tcolor(v.as_int(), 255))
+        .unwrap_or([0, 0, 0, 255]);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        family.as_str(),
+        font_height.to_bits(),
+        color,
+        shadow,
+        shadow_color,
+        border,
+        border_color,
+    )
+        .hash(&mut hasher);
+    let extra = hasher.finish() as usize;
     let stale = gfx
         .texts
         .get(&o.name)
         .is_none_or(|(rev, ex, _)| *rev != o.text_rev || *ex != extra);
     if stale {
-        let px = o
-            .get(Prop::FONTHEIGHT)
-            .map(|v| v.as_f64() as f32)
-            .filter(|v| *v > 4.0)
-            .unwrap_or(cfg.text.size);
-        let color = o
-            .get(Prop::FONTCOLOR)
-            .map(|v| tcolor(v.as_int(), 255))
-            .unwrap_or(cfg.text.color);
-        let img = font.render(&items, w, h, px, color, cfg.text.shadow);
+        let images = items
+            .iter()
+            .filter_map(|item| match item {
+                TextItem::Image { source, .. } => match assets.try_get(source) {
+                    Some(Asset::Image(image)) => Some((source.clone(), image)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let selected = if !family.is_empty() {
+            gfx.menu_fonts.get_mut(&family).and_then(Option::as_mut)
+        } else {
+            None
+        };
+        let renderer = selected.unwrap_or(font);
+        // FONTHEIGHT = "フォントの高さ" (docs/livenovel/text.html); unidades exactas no confirmadas.
+        let px = renderer.size_for_cell_height(font_height);
+        let img = renderer.render_aligned_with_images(
+            &items,
+            w,
+            h,
+            px,
+            color,
+            shadow,
+            shadow_color,
+            border,
+            border_color,
+            0,
+            &images,
+        );
         if let Some(t) = upload(tc, img.w, img.h, &img.rgba, filter) {
             gfx.texts.insert(o.name.clone(), (o.text_rev, extra, t));
         }
@@ -2832,6 +3893,7 @@ fn draw_scene(
     >,
 ) -> Vec<Drawn> {
     let order = ordered_objects;
+    gfx.image_texture_used_this_frame.clear();
     let interpolation_areas = if interpolation_mode == InterpolationMode::Off {
         HashMap::new()
     } else {
@@ -2839,6 +3901,7 @@ fn draw_scene(
     };
     let mut sizes: Vec<(String, u32, u32)> = vec![];
     let mut active_menu_animations = HashSet::new();
+    let mut active_crossfade_pairs = HashSet::new();
     #[cfg(feature = "nvidia-optical-flow")]
     let mut active_optical_flow_pairs = HashSet::new();
     #[cfg(feature = "nvidia-optical-flow")]
@@ -2865,7 +3928,9 @@ fn draw_scene(
                 drawn[di].status
             };
         }
-        if !vm.scene.effective_visible(o) {
+        let active_edit =
+            o.kind == Kind::Edit && vm.active_edit_name().is_some_and(|name| name == o.name);
+        if !vm.scene.effective_visible(o) && !active_edit {
             st!() = "hidden";
             continue;
         }
@@ -2886,7 +3951,7 @@ fn draw_scene(
                 && let Some(pm) = vm.prevmenus.get(&o.name)
             {
                 for (i, button) in pm.buttons.iter().enumerate() {
-                    if !vm.menu_item_visible(&o.name, i) {
+                    if !vm.prevmenu_item_visible(&o.name, i, &button.name) {
                         continue;
                     }
                     let key = format!("{}:{i}", o.name);
@@ -2947,14 +4012,20 @@ fn draw_scene(
                 }
             }
             if w > 0 && h > 0 {
+                let (dx, dy, dw, dh) = if matches!(o.kind, Kind::Image | Kind::Button) {
+                    let (vx, vy, vw, vh) = vm.scene.placed_rect(o, w as f64, h as f64);
+                    (vx as f32, vy as f32, vw as f32, vh as f32)
+                } else {
+                    (x as f32, y as f32, w as f32, h as f32)
+                };
                 debug_outline(
                     canvas,
                     tc,
                     gfx,
                     font.as_deref_mut(),
                     &o.name,
-                    &format!("{} [{}x{}]", o.name, w, h),
-                    FRect::new(x as f32, y as f32, w as f32, h as f32),
+                    &format!("{} [{}x{}]", o.name, dw as i64, dh as i64),
+                    FRect::new(dx, dy, dw, dh),
                     color,
                     filter,
                 );
@@ -2962,6 +4033,7 @@ fn draw_scene(
                     let _ = draw_message_text(
                         canvas,
                         tc,
+                        assets,
                         gfx,
                         font.as_deref_mut(),
                         o,
@@ -2986,8 +4058,7 @@ fn draw_scene(
         }
         if let Some(playback) = vm.cinema_movies.get(&o.name) {
             let mut rendered = 0;
-            let elapsed = vm.now - playback.started_at;
-            for sprite in playback.movie.sprites_at(elapsed) {
+            for sprite in playback.sprites_at(vm.now) {
                 let Some(key) = image_for(tc, assets, gfx, &sprite.media, filter) else {
                     continue;
                 };
@@ -3008,7 +4079,7 @@ fn draw_scene(
                 }
             }
             let mut rendered_text = 0;
-            for (index, text) in playback.movie.texts_at(elapsed).into_iter().enumerate() {
+            for (index, text) in playback.texts_at(vm.now).into_iter().enumerate() {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 (
                     text.value.as_str(),
@@ -3116,10 +4187,16 @@ fn draw_scene(
                 if ow <= 0 || oh <= 0 {
                     sizes.push((o.name.clone(), iw, ih));
                 }
-                let (dw, dh) = (
-                    if ow > 0 { ow as f32 } else { iw as f32 },
-                    if oh > 0 { oh as f32 } else { ih as f32 },
-                );
+                let base_w = if ow > 0 { ow as f64 } else { f64::from(iw) };
+                let base_h = if oh > 0 { oh as f64 } else { f64::from(ih) };
+                // Tile: el zoom escala el mosaico, no la superficie (graphic.html).
+                let (x, y, dw, dh) = if o.kind == Kind::Tile {
+                    (x, y, base_w as f32, base_h as f32)
+                } else {
+                    let (vx, vy, vw, vh) = vm.scene.placed_rect(o, base_w, base_h);
+                    (vx, vy, vw as f32, vh as f32)
+                };
+                drawn[di].rect = (x as f32, y as f32, dw, dh);
                 let interpolation_area = interpolation_areas
                     .get(&o.name)
                     .copied()
@@ -3294,6 +4371,9 @@ fn draw_scene(
                                     )
                             )
                         });
+                if crossfade_active {
+                    active_crossfade_pairs.insert(crossfade_key.clone());
+                }
                 #[cfg(feature = "nvidia-optical-flow")]
                 let optical_flow_texture = optical_flow_midpoint
                     .then(|| {
@@ -3363,6 +4443,50 @@ fn draw_scene(
                     dw as i64,
                     dh as i64
                 );
+                // Buttons with TEXT render a label centred over the image
+                if o.kind == Kind::Button {
+                    let text = o.str(Prop::TEXT);
+                    if !text.is_empty() {
+                        if let Some(font) = font.as_deref_mut() {
+                            let px = o
+                                .get(Prop::FONTHEIGHT)
+                                .map(Value::as_f64)
+                                .filter(|v| *v > 0.0)
+                                .unwrap_or(cfg.text.size as f64)
+                                as f32;
+                            let color = o
+                                .get(Prop::FONTCOLOR)
+                                .map(|v| tcolor(v.as_int(), 255))
+                                .unwrap_or(cfg.text.color);
+                            let items: Vec<TextItem> = text
+                                .chars()
+                                .map(|c| TextItem::Char(c.to_string()))
+                                .collect();
+                            let text_width = font.measure_text_width(&text, px).ceil().max(1.0);
+                            let text_height = (px * 1.5).ceil().max(1.0);
+                            let img = font.render_aligned(
+                                &items,
+                                text_width.min(dw).max(1.0) as u32,
+                                text_height.min(dh).max(1.0) as u32,
+                                px,
+                                color,
+                                false,
+                                1,
+                            );
+                            if img.w > 0 && img.h > 0 {
+                                if let Some(texture) = upload(tc, img.w, img.h, &img.rgba, filter) {
+                                    let tx = x as f32 + (dw - img.w as f32) / 2.0;
+                                    let ty = y as f32 + (dh - img.h as f32) / 2.0;
+                                    let _ = canvas.copy(
+                                        &texture,
+                                        None,
+                                        FRect::new(tx, ty, img.w as f32, img.h as f32),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Kind::Slider => {
                 let horizontal = o.int(Prop::ORIENTATION, 0) == 0;
@@ -3593,14 +4717,12 @@ fn draw_scene(
                 let pm = vm.prevmenus[&o.name].clone();
                 let mut n = 0;
                 for (i, b) in pm.buttons.iter().enumerate() {
-                    if !vm.menu_item_visible(&o.name, i) {
+                    // Deshabilitado se dibuja igual (docs/livenovel/selimg.html).
+                    // El clic lo filtra prevmenu_hit.
+                    if !vm.prevmenu_item_visible(&o.name, i, &b.name) {
                         continue;
                     }
-                    let src = if pm.hover == Some(i) && !b.src_selected.is_empty() {
-                        &b.src_selected
-                    } else {
-                        &b.src
-                    };
+                    let src = vm.prevmenu_button_image(&o.name, i, b, pm.hover == Some(i));
                     let Some(key) = image_for(tc, assets, gfx, src, filter) else {
                         continue;
                     };
@@ -3645,6 +4767,7 @@ fn draw_scene(
                 st!() = draw_message_text(
                     canvas,
                     tc,
+                    assets,
                     gfx,
                     font.as_deref_mut(),
                     o,
@@ -3741,8 +4864,23 @@ fn draw_scene(
                     }
                     *current_sequence = display_sequence;
                 }
-                let dw = if ow > 0 { ow as f32 } else { lw as f32 };
-                let dh = if oh > 0 { oh as f32 } else { lh as f32 };
+                // Misma regla que Image: base = fuente (o WIDTH de prop), zoom/OFFSET
+                // vía placed_rect (`media.html` / `graphic.html`). Sin fallback a pantalla.
+                let base_w = if ow > 0 {
+                    ow as f64
+                } else {
+                    f64::from(video_width)
+                };
+                let base_h = if oh > 0 {
+                    oh as f64
+                } else {
+                    f64::from(video_height)
+                };
+                let (x, y, dw, dh) = {
+                    let (vx, vy, vw, vh) = vm.scene.placed_rect(o, base_w, base_h);
+                    (vx, vy, vw as f32, vh as f32)
+                };
+                drawn[di].rect = (x as f32, y as f32, dw, dh);
                 #[cfg(feature = "nvidia-optical-flow")]
                 let optical_flow_video = interpolation_mode == InterpolationMode::OpticalFlow
                     && alpha == u8::MAX
@@ -3912,6 +5050,8 @@ fn draw_scene(
         .retain(|name, _| vm.scene.get(name).is_some_and(|o| o.kind == Kind::Movie));
     gfx.video_previous_textures
         .retain(|name, _| active_videos.contains(name));
+    gfx.crossfade_safety
+        .retain(|key, _| active_crossfade_pairs.contains(key));
     #[cfg(feature = "nvidia-optical-flow")]
     {
         gfx.video_optical_flow_textures
@@ -3936,15 +5076,17 @@ mod tests {
     #[cfg(feature = "nvidia-optical-flow")]
     use super::rgba_frame_is_opaque;
     use super::{
-        ImageTextureCacheEntry, add_rect_to_bounds, default_language_selection, edit_key_code,
-        gal_animation_frame, image_texture_cache_evictions, inferred_mask_group,
-        interpolation_group_key, is_toolbar_visible, menu_geometry, menu_hit,
-        should_interpolate_gal, toolbar_hit,
+        FRect, ImageTextureCacheEntry, add_rect_to_bounds, default_language_selection,
+        edit_key_code, estimated_texture_bytes, gal_animation_frame, image_texture_cache_evictions,
+        inferred_mask_group, interpolation_group_key, is_toolbar_visible, menu_content_rows,
+        menu_geometry, menu_geometry_with_width, menu_hit, menu_hit_rows, menu_scrollbar_geometry,
+        should_interpolate_gal, toolbar_contains, toolbar_hit, toolbar_in_reveal_strip,
+        update_toolbar_open,
     };
     use crate::interpolation::InterpolationMode;
     use crate::lsb::{Prop, expr::Value};
     use crate::scene::{Kind, Scene};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     #[cfg(feature = "nvidia-optical-flow")]
@@ -3990,17 +5132,35 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            toolbar_hit(800, 700.0, 115.0, true),
+            toolbar_hit(800, 700.0, 155.0, true),
             Some(super::ToolbarAction::ToggleFpsMeter)
         ));
         assert!(matches!(
-            toolbar_hit(800, 700.0, 170.0, true),
+            toolbar_hit(800, 700.0, 210.0, true),
             Some(super::ToolbarAction::ExportTexts)
         ));
-        assert!(is_toolbar_visible(12.0, false));
-        assert!(is_toolbar_visible(31.0, false));
-        assert!(!is_toolbar_visible(32.0, false));
-        assert!(is_toolbar_visible(200.0, true));
+        assert!(matches!(
+            toolbar_hit(800, 700.0, 125.0, true),
+            Some(super::ToolbarAction::ScaleFilter(_))
+        ));
+        assert!(toolbar_in_reveal_strip(0.0));
+        assert!(toolbar_in_reveal_strip(5.0));
+        assert!(!toolbar_in_reveal_strip(6.0));
+        assert!(!is_toolbar_visible(false, false));
+        assert!(is_toolbar_visible(true, false));
+        assert!(is_toolbar_visible(false, true));
+        assert!(toolbar_contains(800, 400.0, 20.0, false));
+        assert!(toolbar_contains(800, 400.0, 40.0, false));
+        assert!(!toolbar_contains(800, 400.0, 46.0, false));
+        assert!(toolbar_contains(800, 700.0, 100.0, true));
+        let mut toolbar_open = false;
+        let mut options_open = false;
+        update_toolbar_open(&mut toolbar_open, &mut options_open, 800, (400.0, 3.0));
+        assert!(toolbar_open);
+        update_toolbar_open(&mut toolbar_open, &mut options_open, 800, (400.0, 20.0));
+        assert!(toolbar_open);
+        update_toolbar_open(&mut toolbar_open, &mut options_open, 800, (400.0, 80.0));
+        assert!(!toolbar_open);
         assert!(!super::point_in_logical_render((-1.0, 300.0), (800, 600)));
         assert!(!super::point_in_logical_render((400.0, 600.0), (800, 600)));
         assert!(super::point_in_logical_render((799.0, 599.0), (800, 600)));
@@ -4014,35 +5174,42 @@ mod tests {
     }
 
     #[test]
-    fn image_texture_cache_evicts_least_recently_used_sources_first() {
+    fn image_texture_cache_evicts_lru_sources_but_protects_used_sources() {
         let cache = HashMap::from([
             (
                 "old".to_string(),
                 ImageTextureCacheEntry {
-                    bytes: 100 * 1024 * 1024,
+                    bytes: 200 * 1024 * 1024,
                     last_used: 1,
                 },
             ),
             (
                 "recent".to_string(),
                 ImageTextureCacheEntry {
-                    bytes: 100 * 1024 * 1024,
+                    bytes: 20 * 1024 * 1024,
                     last_used: 2,
                 },
             ),
             (
                 "current".to_string(),
                 ImageTextureCacheEntry {
-                    bytes: 100 * 1024 * 1024,
+                    bytes: 20 * 1024 * 1024,
                     last_used: 3,
                 },
             ),
         ]);
+        let used_this_frame = HashSet::from(["recent".to_string()]);
 
         assert_eq!(
-            image_texture_cache_evictions(&cache, 100 * 1024 * 1024, "current"),
-            vec!["old", "recent"]
+            image_texture_cache_evictions(&cache, 100 * 1024 * 1024, "current", &used_this_frame),
+            vec!["old"]
         );
+    }
+
+    #[test]
+    fn texture_memory_estimate_uses_rgba_bytes_and_saturates() {
+        assert_eq!(estimated_texture_bytes(16, 8), 16 * 8 * 4);
+        assert_eq!(estimated_texture_bytes(u32::MAX, u32::MAX), usize::MAX);
     }
 
     #[test]
@@ -4197,6 +5364,91 @@ mod tests {
     }
 
     #[test]
+    fn native_menu_hit_testing_maps_visible_rows_to_full_choice_indices() {
+        let choices: Vec<_> = (0..30).map(|index| format!("slot {index}")).collect();
+        let mut scene = Scene::default();
+        scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([
+                (Prop::LEFT, Value::Int(20)),
+                (Prop::TOP, Value::Int(30)),
+                (Prop::WIDTH, Value::Int(200)),
+                (Prop::FONTHEIGHT, Value::Int(20)),
+                (Prop::ROWCOUNT, Value::Int(10)),
+                (Prop::TOPINDEX, Value::Int(12)),
+            ]),
+        );
+        let menu = scene.get("menu");
+
+        assert_eq!(menu_hit(&choices, menu, 800, 600, 40.0, 31.0), Some(12));
+        assert_eq!(menu_hit(&choices, menu, 800, 600, 40.0, 230.0), None);
+    }
+
+    #[test]
+    fn native_menu_uses_measured_width_unless_script_sets_width() {
+        let choices = vec!["short".to_string(), "a much longer option".to_string()];
+        let mut scene = Scene::default();
+        scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([(Prop::TOP, Value::Int(30))]),
+        );
+
+        let (frame, _) =
+            menu_geometry_with_width(&choices, scene.get("menu"), 800, 600, Some(240.0));
+        assert_eq!(frame.w, 240.0);
+        assert_eq!(frame.x, 280.0);
+
+        scene.set("menu", Prop::WIDTH, Value::Int(0));
+        let (frame, _) =
+            menu_geometry_with_width(&choices, scene.get("menu"), 800, 600, Some(240.0));
+        assert_eq!(frame.w, 240.0);
+        assert_eq!(frame.x, 280.0);
+
+        scene.set("menu", Prop::ROWCOUNT, Value::Int(10));
+        scene.set("menu", Prop::LEFT, Value::Int(400));
+        let (frame, _) =
+            menu_geometry_with_width(&choices, scene.get("menu"), 800, 600, Some(240.0));
+        assert_eq!(frame.w, 240.0);
+        assert_eq!(frame.x, 400.0);
+
+        scene.set("menu", Prop::WIDTH, Value::Int(0));
+        let (frame, _) =
+            menu_geometry_with_width(&choices, scene.get("menu"), 800, 600, Some(240.0));
+        assert_eq!(frame.w, 240.0);
+        assert_eq!(frame.x, 400.0);
+
+        scene.set("menu", Prop::WIDTH, Value::Int(200));
+        let (frame, _) =
+            menu_geometry_with_width(&choices, scene.get("menu"), 800, 600, Some(240.0));
+        assert_eq!(frame.w, 200.0);
+        assert_eq!(frame.x, 400.0);
+    }
+
+    #[test]
+    fn menu_scrollbar_is_vertical_on_the_right_and_tracks_top_index() {
+        let frame = FRect::new(100.0, 100.0, 480.0, 300.0);
+        let top = menu_scrollbar_geometry(frame, 120.0, 380.0, 8.0, (20, 20), 30, 10, 0)
+            .expect("scrollbar should be visible when choices overflow");
+        assert_eq!(top.x, 552.0);
+        assert_eq!(top.top, 120.0);
+        assert_eq!(top.button_size, 20.0);
+        assert_eq!(top.track_height, 220.0);
+        assert_eq!(top.thumb_offset, 0.0);
+        assert!((top.thumb_height - 220.0 / 3.0).abs() < f32::EPSILON);
+
+        let bottom = menu_scrollbar_geometry(frame, 120.0, 380.0, 8.0, (20, 20), 30, 10, 20)
+            .expect("scrollbar should be visible at the last page");
+        assert_eq!(bottom.x, 552.0);
+        assert!(
+            (bottom.thumb_offset - (bottom.track_height - bottom.thumb_height)).abs()
+                < f32::EPSILON
+        );
+        assert!(menu_scrollbar_geometry(frame, 120.0, 380.0, 8.0, (20, 20), 10, 10, 0).is_none());
+    }
+
+    #[test]
     fn native_menu_rows_follow_script_font_and_spacing_properties() {
         let choices = vec!["first".to_string(), "second".to_string()];
         let mut scene = Scene::default();
@@ -4218,5 +5470,86 @@ mod tests {
         assert_eq!(rows[0].y, 32.0);
         assert_eq!(rows[0].h, 26.0);
         assert_eq!(rows[1].y, 58.0);
+    }
+
+    #[test]
+    fn native_menu_border_insets_reflow_all_rows_without_hiding_options() {
+        let choices = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let mut scene = Scene::default();
+        scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([
+                (Prop::LEFT, Value::Int(20)),
+                (Prop::TOP, Value::Int(30)),
+                (Prop::FONTHEIGHT, Value::Int(22)),
+                (Prop::LINESPACE, Value::Int(4)),
+                (Prop::MARGINY, Value::Int(0)),
+            ]),
+        );
+
+        let (frame, rows) = menu_geometry(&choices, scene.get("menu"), 800, 600);
+        let (frame, content_rows) = menu_content_rows(frame, &rows, 3.0, 4.0, 5.0, 7.0, 22.0);
+
+        assert_eq!(content_rows.len(), choices.len());
+        assert_eq!(content_rows[0].y, frame.y + 5.0);
+        assert_eq!(content_rows[0].h, 22.0);
+        assert_eq!(content_rows[1].h, content_rows[0].h);
+        assert_eq!(content_rows[2].h, content_rows[0].h);
+        assert_eq!(content_rows[0].x, frame.x + 3.0);
+        assert_eq!(content_rows[0].w, frame.w - 7.0);
+        assert!(content_rows[0].y >= frame.y);
+        assert!(content_rows[2].y + content_rows[2].h <= frame.y + frame.h - 7.0);
+        assert_eq!(
+            menu_hit_rows(&content_rows, 30.0, content_rows[0].y + 1.0),
+            Some(0)
+        );
+        assert_eq!(
+            menu_hit_rows(&content_rows, 30.0, content_rows[1].y + 1.0),
+            Some(1)
+        );
+        assert_eq!(
+            menu_hit_rows(&content_rows, 30.0, content_rows[2].y + 1.0),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn native_menu_with_short_suboptions_expands_without_clipping_rows() {
+        let choices = vec!["first".to_string(), "second".to_string()];
+        let mut scene = Scene::default();
+        scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([
+                (Prop::LEFT, Value::Int(20)),
+                (Prop::TOP, Value::Int(30)),
+                (Prop::FONTHEIGHT, Value::Int(22)),
+                (Prop::LINESPACE, Value::Int(4)),
+                (Prop::MARGINY, Value::Int(0)),
+            ]),
+        );
+
+        let (frame, rows) = menu_geometry(&choices, scene.get("menu"), 800, 600);
+        let (frame, content_rows) = menu_content_rows(frame, &rows, 10.0, 10.0, 30.0, 30.0, 22.0);
+
+        assert_eq!(content_rows.len(), choices.len());
+        assert_eq!(frame.h, 104.0);
+        assert_eq!(content_rows[0].h, 22.0);
+        assert_eq!(content_rows[1].h, 22.0);
+        assert!(content_rows[0].y >= frame.y + 30.0);
+        assert!(content_rows[1].y + content_rows[1].h <= frame.y + frame.h - 30.0);
+        assert_eq!(
+            menu_hit_rows(&content_rows, 30.0, content_rows[0].y + 1.0),
+            Some(0)
+        );
+        assert_eq!(
+            menu_hit_rows(&content_rows, 30.0, content_rows[1].y + 1.0),
+            Some(1)
+        );
     }
 }

@@ -12,6 +12,11 @@ pub fn cp932(b: &[u8]) -> String {
         .into_owned()
 }
 
+/// Codifica a CP932 (Windows-31J / MS Shift-JIS).
+pub fn to_cp932(s: &str) -> Vec<u8> {
+    encoding_rs::SHIFT_JIS.encode(s).0.into_owned()
+}
+
 #[cfg(unix)]
 pub fn read_at(f: &File, buf: &mut [u8], off: u64) -> io::Result<()> {
     use std::os::unix::fs::FileExt;

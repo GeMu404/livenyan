@@ -24,7 +24,7 @@ pub struct WindowCfg {
     pub fullscreen: bool,
     pub vsync: bool,
     pub interpolate_animations: bool,
-    /// "linear" o "nearest" para el escalado.
+    /// Escalado del present (letterbox): "linear", "nearest", "sharp" o "off" (=linear).
     pub scale_filter: String,
     /// Driver de SDL; por defecto usa Vulkan y cae al renderer automático si no está disponible.
     pub renderer: String,
@@ -108,7 +108,7 @@ impl Default for WindowCfg {
             fullscreen: false,
             vsync: true,
             interpolate_animations: false,
-            scale_filter: "linear".into(),
+            scale_filter: "sharp".into(),
             renderer: "vulkan".into(),
             optical_flow: false,
             fps_meter: false,

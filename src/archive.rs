@@ -619,6 +619,107 @@ impl GameData {
     }
 }
 
+/// Serializa un archivo VF (LiveMaker Virtual File) en memoria con compresión Zlib.
+pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let count = entries.len();
+    let version = 103u32;
+
+    // 1. Comprimir los datos de cada entrada
+    let mut compressed_data = Vec::with_capacity(count);
+    let mut sums = Vec::with_capacity(count);
+    for (_, raw) in entries {
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw)?;
+        let comp = enc.finish()?;
+        sums.push(checksum(&comp));
+        compressed_data.push(comp);
+    }
+
+    // 2. Codificar nombres a CP932
+    let cp932_names: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(name, _)| crate::util::to_cp932(name))
+        .collect();
+
+    // 3. Calcular tamaño exacto del directorio
+    let mut dir_size = 2 + 4 + 4; // "vf" + version + count
+    for name in &cp932_names {
+        dir_size += 4 + name.len(); // len + raw bytes
+    }
+    dir_size += (count + 1) * 8; // offsets: 8 bytes cada uno (lo, hi)
+    dir_size += count; // compress_type: 1 byte
+    dir_size += count * 4; // unk1: 4 bytes
+    dir_size += count * 4; // checksum: 4 bytes
+    dir_size += count; // encrypt_flag: 1 byte
+
+    // 4. Calcular offsets acumulados empezando justo después del directorio
+    let mut offsets = Vec::with_capacity(count + 1);
+    let mut cur_offset = dir_size as u64;
+    offsets.push(cur_offset);
+    for comp in &compressed_data {
+        cur_offset += comp.len() as u64;
+        offsets.push(cur_offset);
+    }
+
+    // 5. Construir el buffer de salida
+    let mut out = Vec::with_capacity(cur_offset as usize);
+    out.extend_from_slice(b"vf");
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+
+    // Nombres ofuscados
+    let mut ob_names = Obfuscator::new();
+    for name in &cp932_names {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        for &b in name {
+            out.push(b ^ (ob_names.next() as u8));
+        }
+    }
+
+    // Offsets ofuscados
+    let mut ob_lo = Obfuscator::new();
+    let mut ob_hi = Obfuscator::new();
+    for &off in &offsets {
+        let lo = (off as u32) ^ ob_lo.next();
+        let hi = ((off >> 32) as u32) ^ ob_hi.next();
+        out.extend_from_slice(&lo.to_le_bytes());
+        out.extend_from_slice(&hi.to_le_bytes());
+    }
+
+    // Compression types (0 = Zlib)
+    for _ in 0..count {
+        out.push(0u8);
+    }
+
+    // Unk1 (0)
+    for _ in 0..count {
+        out.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    // Checksums
+    for sum in sums {
+        out.extend_from_slice(&sum.to_le_bytes());
+    }
+
+    // Encrypt flags (0 = None)
+    for _ in 0..count {
+        out.push(0u8);
+    }
+
+    assert_eq!(out.len(), dir_size);
+
+    // 6. Escribir los datos de los ficheros
+    for comp in compressed_data {
+        out.extend_from_slice(&comp);
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,6 +837,31 @@ mod tests {
         d.extend_from_slice(&1234u32.to_le_bytes());
         d.extend_from_slice(b"hello world");
         assert_eq!(unscramble(&d).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn vf_archive_roundtrip() {
+        let files = vec![
+            ("STATUSSAVEDATA", b"Status103testdata1234567890".as_slice()),
+            (
+                "GAMESAVEDATA0",
+                b"GameSaveDataSlot0ContentsHere!".as_slice(),
+            ),
+        ];
+        let bytes = write_vf_archive(&files).expect("write archive ok");
+        assert!(bytes.starts_with(b"vf"));
+
+        let (ver, entries) = parse_directory(&bytes).expect("parse directory ok");
+        assert_eq!(ver, 103);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "STATUSSAVEDATA");
+        assert_eq!(entries[1].name, "GAMESAVEDATA0");
+
+        for (orig, entry) in files.iter().zip(entries.iter()) {
+            let slice = &bytes[entry.offset as usize..(entry.offset + entry.size) as usize];
+            let decompressed = decompress(entry, slice.to_vec()).expect("decompress ok");
+            assert_eq!(decompressed.as_slice(), orig.1);
+        }
     }
 }
 

@@ -6,7 +6,7 @@ height = 0
 fullscreen = false
 vsync = true
 interpolate_animations = false # funde cuadros en GAL animados grandes de escena
-scale_filter = "linear"   # o "nearest"
+scale_filter = "sharp"    # "linear" | "nearest" | "sharp" | "off" (=linear)
 
 [game]
 # duración (ms) del placeholder de vídeo (Cinema); un clic lo salta

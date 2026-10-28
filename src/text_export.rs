@@ -200,6 +200,11 @@ fn is_runtime_translation_id(id: &str) -> bool {
             && encoded.len().is_multiple_of(2)
             && encoded.bytes().all(|byte| byte.is_ascii_hexdigit());
     }
+    if let Some(encoded) = id.strip_prefix("text:item=") {
+        return !encoded.is_empty()
+            && encoded.len().is_multiple_of(2)
+            && encoded.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
     let Some((prefix, field)) = id.rsplit_once(":field=") else {
         return false;
     };
@@ -221,12 +226,20 @@ fn is_runtime_translation_id(id: &str) -> bool {
 }
 
 pub fn menu_item_id(source: &str) -> String {
+    encoded_text_id("menu:item=", source)
+}
+
+pub fn text_item_id(source: &str) -> String {
+    encoded_text_id("text:item=", source)
+}
+
+fn encoded_text_id(prefix: &str, source: &str) -> String {
     let encoded = source
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("menu:item={encoded}")
+    format!("{prefix}{encoded}")
 }
 
 fn collect_menu_item_labels(
@@ -494,7 +507,7 @@ fn push_entry(entries: &mut Vec<CatalogEntry>, id: String, text: String) -> bool
 mod tests {
     use super::{
         Catalog, collect_menu_item_labels, collect_static_string_variables, export,
-        is_runtime_translation_id, menu_item_id,
+        is_runtime_translation_id, menu_item_id, text_item_id,
     };
     use crate::archive::GameData;
     use crate::lsb::{CmdType, Command, Field, LiveParser, Lsb, OpeData, Param, names::Func, op};
@@ -722,6 +735,35 @@ text = "nombre de objeto"
         assert_eq!(
             languages[0].translations.get(&id).map(String::as_str),
             Some("Guardar")
+        );
+
+        std::fs::remove_file(directory.join("es.toml")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn loader_accepts_component_text_translations() {
+        let directory = std::env::temp_dir().join(format!(
+            "livenyan-component-text-language-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let id = text_item_id("OK");
+        std::fs::write(
+            directory.join("es.toml"),
+            format!("version = 1\n\n[[entries]]\nid = {id:?}\ntext = \"Aceptar\"\n"),
+        )
+        .unwrap();
+
+        let languages = super::load_languages(&directory).unwrap();
+        assert_eq!(languages.len(), 1);
+        assert_eq!(
+            languages[0].translations.get(&id).map(String::as_str),
+            Some("Aceptar")
         );
 
         std::fs::remove_file(directory.join("es.toml")).unwrap();

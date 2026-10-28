@@ -7,6 +7,9 @@ Es una reimplementación compatible del motor, no un reproductor exclusivo de un
 el soporte depende de los formatos y comandos LiveMaker implementados, así que la compatibilidad
 se amplía y valida progresivamente con fixtures sintéticos y juegos de prueba.
 
+Para consultar semántica confirmada y decisiones aún no verificadas de los componentes de interfaz,
+véase la [referencia de interfaz LiveMaker](./LIVEMAKER-INTERFACE-REFERENCE.md).
+
 ## Compilar
 
 Arch Linux:
@@ -23,6 +26,10 @@ La interpolación experimental con NVIDIA Optical Flow se excluye del build por 
 Para habilitar el modo de prueba, compila con `--features nvidia-optical-flow` y ejecuta
 con `--optical-flow` (también se puede seleccionar desde Opciones). Requiere una GPU/driver
 que exponga `VK_NV_optical_flow`; el renderer Vulkan normal no activa ni requiere esa extensión.
+
+Escalado del present (letterbox lógico→ventana): `scale_filter` / `--scale-filter` /
+Opciones → **Linear** (suave), **Nearest** (píxel duro en assets y present) o
+**Sharp** (assets linear + present nearest, líneas nítidas baratas). Sin upscale IA.
 
 Binario: `target/release/livenyan`
 
@@ -94,7 +101,13 @@ lógica; usa sus timestamps para situar el punto medio y omite el Optical Flow e
 Los demás vídeos mantienen su reproducción normal. Esto agrega trabajo síncrono al cambiar de cuadro
 y puede bajar los FPS; si ocurre, desactívalo desde Opciones. Las texturas SDL de imágenes y todos
 los cuadros GAL comparten una caché GPU LRU de hasta 256 MiB; los recursos recientes se liberan al
-cambiar de escena para limitar el crecimiento de memoria.
+cambiar de escena para limitar el crecimiento de memoria. Las texturas ya usadas en el frame actual
+no se expulsan mientras se dibuja ese frame; si la escena activa supera el presupuesto, la caché
+puede excederlo temporalmente para no hacer desaparecer recursos visibles.
+Cada cinco segundos, el log `info` informa una estimación del uso de texturas por categoría
+(GAL/imágenes, vídeo, Optical Flow, UI y destino de escena). Se basa en dimensiones y formato RGBA
+estimado; no es una lectura del driver y no incluye buffers internos de Vulkan. Para verlo con la
+configuración predeterminada de logs, inicia livenyan con `LIVENYAN_LOG=info`.
 
 La prueba sintética procesa dos cuadros de 800×600 con una máscara de 48×48 desplazada 12 px sobre
 un fondo fijo: en una RTX 4060 el flujo medio local devuelve (12.00, 0.03) px y el shader reconstruye
@@ -138,18 +151,25 @@ Si el renderer no acepta VSync, el bucle limita el render a 60 FPS para evitar c
 Implementado: archivo VF (exe/dat/partido, zlib, cifrado LM Pro), LSB completo (52+ comandos parseados),
 expresiones, VM (Calc, If/Elseif/Else, Call/Exit, Jump/Label, While*, Break/Continue, Wait, VarNew/VarDel),
 objetos (ImgNew/MesNew/BoxNew/TileNew/Button/EditNew, SetProp/GetProp/ObjDel, PropMotion lineal), TextIns con
-efecto máquina de escribir, menús PrevMenu con miniaturas GAL animadas, botones GAL animados en bucle
+efecto máquina de escribir e imágenes GAL inline (primer cuadro, proporción conservada y alineación
+vertical), menús PrevMenu con miniaturas GAL animadas, botones GAL animados en bucle
 por defecto, clips WMV como componentes animados, sonido wav/ogg, decodificación en hilos con el primer fotograma listo antes de mostrar el clip
 y reproducción de pistas de imagen
 LiveCinema 108-112 (posición y opacidad animadas; clips de imagen sin rotación, escala ni recorte),
 conservación del último frame completo mientras se decodifican recursos de la escena siguiente,
 menús nativos básicos con posición, tipografía, colores y marcos definidos por las propiedades y
-manejadores del script, altura tipográfica de menús normalizada a las métricas de la fuente,
+manejadores del script; las funciones de estado de ítems aceptan índices numéricos y nombres,
+altura tipográfica de menús normalizada a las métricas de la fuente,
 escritura Unicode en EditNew y descarte de menús por RCLICKSCRAP/MenuClose.
+Historial de diálogo básico con `TextIns.Hist`, `GetHistoryCount`, `GetGroupIndex`, `CallHist` y `ClrHist`;
+eventos de texto `PAUSE`, `MESOFF`, `PLAYMOVIE` y `STOPMOVIE`.
+Los temporizadores disparan `ONPLAYEND` al vencer, una vez o repetidamente según `REPEAT`; al
+pausarlos con `PAUSED`, conservan el tiempo restante hasta el siguiente disparo.
+`GameSave` / `GameLoad` escriben y leen slots en `save.dat` (página, etiqueta, caption y variables globales).
 
 Pendiente: audio de los vídeos, pistas LiveCinema de audio/color y transformaciones de imagen,
-transiciones Flip, guardado/carga, historial, eventos de texto restantes, lógica completa de menús/botones
-de LiveNovel, Timer, fuentes/estilos del juego.
+transiciones Flip distintas de NONE/FADE, eventos de texto restantes, lógica
+completa de menús/botones de LiveNovel y fuentes/estilos del juego.
 La reproducción WAV/OGG usa el dispositivo de salida predeterminado de SDL3; SDL convierte los
 formatos y sigue los cambios de salida predeterminada del sistema. El log de inicio muestra el
 dispositivo seleccionado.

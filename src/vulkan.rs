@@ -74,6 +74,7 @@ pub struct SdlVulkanContext {
     scene_frame: Option<SceneFrameResources>,
     pending_texture_uploads: Vec<PendingTextureUpload>,
     retired_scene_textures: Vec<RetiredSceneTexture>,
+    present_scale_filter: crate::scale_filter::ScaleFilter,
 }
 
 struct VulkanImage {
@@ -2934,6 +2935,7 @@ impl SdlVulkanContext {
             pending_texture_uploads: Vec::new(),
             retired_scene_textures: Vec::new(),
             native_swapchain_active: true,
+            present_scale_filter: crate::scale_filter::ScaleFilter::Linear,
         })
     }
 
@@ -3495,6 +3497,23 @@ impl SdlVulkanContext {
         Ok((flow.0, flow.1, luminance))
     }
 
+    /// Filtro del blit de present (letterbox lógico → swapchain).
+    pub fn set_present_scale_filter(
+        &mut self,
+        filter: crate::scale_filter::ScaleFilter,
+    ) -> Result<(), String> {
+        self.present_scale_filter = filter;
+        Ok(())
+    }
+
+    fn present_blit_filter(&self) -> vk::Filter {
+        if self.present_scale_filter.present_nearest() {
+            vk::Filter::NEAREST
+        } else {
+            vk::Filter::LINEAR
+        }
+    }
+
     pub fn present_clear(&mut self, color: [f32; 4]) -> Result<(), String> {
         if !self.native_swapchain_active {
             return Err("native Vulkan swapchain was handed to the SDL renderer".into());
@@ -3705,7 +3724,7 @@ impl SdlVulkanContext {
                 self.swapchain_images[image_index as usize],
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &blit,
-                vk::Filter::LINEAR,
+                self.present_blit_filter(),
             );
             let to_present = [
                 vk::ImageMemoryBarrier2::default()

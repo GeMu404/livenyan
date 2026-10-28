@@ -102,12 +102,21 @@ pub trait Env {
 }
 
 fn cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
-    if a.is_num() && b.is_num() {
-        a.as_f64()
-            .partial_cmp(&b.as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    } else {
-        a.as_str().cmp(&b.as_str())
+    let number = |value: &Value| match value {
+        Value::Str(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                Some(0.0)
+            } else {
+                s.parse::<f64>().ok()
+            }
+        }
+        value if value.is_num() => Some(value.as_f64()),
+        _ => None,
+    };
+    match (number(a), number(b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        _ => a.as_str().cmp(&b.as_str()),
     }
 }
 
@@ -121,9 +130,21 @@ fn arith(a: &Value, b: &Value, fi: fn(i64, i64) -> Option<i64>, ff: fn(f64, f64)
     }
 }
 
+fn numeric_value(value: &Value) -> Value {
+    let Value::Str(s) = value else {
+        return value.clone();
+    };
+    let s = s.trim();
+    s.parse::<i64>()
+        .map(Value::Int)
+        .or_else(|_| s.parse::<f64>().map(Value::Float))
+        .unwrap_or(Value::Int(0))
+}
+
 /// Evalúa una expresión. Las temporales `____*` viven solo durante la evaluación.
 pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
     let mut temps: HashMap<&str, Value> = HashMap::new();
+    let mut array_lvalues: HashMap<&str, (String, usize)> = HashMap::new();
     let mut last = Value::Empty;
     for e in &lp.entries {
         let mut args = Vec::with_capacity(e.operands.len());
@@ -139,13 +160,25 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
         let a = args.first().cloned().unwrap_or_default();
         let b = args.get(1).cloned().unwrap_or_default();
         let v = match e.op {
-            op::TO => args.last().cloned().unwrap_or_default(),
-            op::PLUS => {
-                if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
-                    Value::Str(a.as_str() + &b.as_str())
-                } else {
-                    arith(&a, &b, |x, y| Some(x.wrapping_add(y)), |x, y| x + y)
+            op::TO => {
+                let val = args.last().cloned().unwrap_or_default();
+                if let Some((arr_name, idx)) = array_lvalues.get(e.name.as_str()) {
+                    let mut arr = match env.get_var(arr_name) {
+                        Value::Array(v) => v,
+                        Value::Empty => vec![],
+                        other => vec![other],
+                    };
+                    if *idx >= arr.len() {
+                        arr.resize(*idx + 1, Value::Empty);
+                    }
+                    arr[*idx] = val.clone();
+                    env.set_var(arr_name, Value::Array(arr));
                 }
+                val
+            }
+            op::PLUS => {
+                let (a, b) = (numeric_value(&a), numeric_value(&b));
+                arith(&a, &b, |x, y| Some(x.wrapping_add(y)), |x, y| x + y)
             }
             op::MINUS => arith(&a, &b, |x, y| Some(x.wrapping_sub(y)), |x, y| x - y),
             op::MUL => arith(&a, &b, |x, y| Some(x.wrapping_mul(y)), |x, y| x * y),
@@ -179,6 +212,16 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
             op::ESMALL => Value::Bool(cmp(&a, &b).is_le()),
             op::COMBOSTR => Value::Str(a.as_str() + &b.as_str()),
             op::DIMTO => {
+                if let (Some(Param::Var(arr_var)), Some(idx_val)) =
+                    (e.operands.first(), args.get(1))
+                {
+                    if !arr_var.starts_with("____") {
+                        array_lvalues.insert(
+                            e.name.as_str(),
+                            (arr_var.clone(), idx_val.as_int().max(0) as usize),
+                        );
+                    }
+                }
                 let mut cur = a;
                 for idx in &args[1.min(args.len())..] {
                     cur = match cur {
@@ -218,6 +261,44 @@ fn var_name(raw: &[Param], i: usize) -> Option<&str> {
 
 fn chars(s: &str) -> Vec<char> {
     s.chars().collect()
+}
+
+fn eval_calc_assignment(source: &str, env: &mut dyn Env) -> Option<Value> {
+    let (target, expression) = source.split_once('=')?;
+    let target = target.trim();
+    if target.is_empty() || target.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    let expression = expression.trim();
+    let value = if let Some(call) = expression
+        .strip_prefix("GetProp(")
+        .and_then(|expression| expression.strip_suffix(')'))
+    {
+        let (object_expression, property) = call.rsplit_once(',')?;
+        let (prefix, index_var) = object_expression.split_once("++")?;
+        let prefix = prefix.trim().strip_prefix('"')?.strip_suffix('"')?;
+        let index_var = index_var.trim();
+        if index_var.is_empty() || index_var.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let property = property.trim().parse::<i32>().ok()?;
+        let object = Value::Str(format!("{prefix}{}", env.get_var(index_var).as_str()));
+        let arguments = [object, Value::Int(i64::from(property))];
+        let raw = [Param::Str(arguments[0].as_str()), Param::Int(property)];
+        env.call_engine(Func::GETPROP, &arguments, &raw)?
+    } else if !expression.is_empty()
+        && !expression.chars().any(char::is_whitespace)
+        && !expression
+            .chars()
+            .any(|c| matches!(c, '"' | '(' | ')' | '=' | ','))
+    {
+        env.get_var(expression)
+    } else {
+        return None;
+    };
+    env.set_var(target, value.clone());
+    Some(value)
 }
 
 /// Funciones puras + manipulación de arrays por nombre de variable.
@@ -439,8 +520,17 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             Value::Empty
         }
         Func::CALC => {
-            env.warn_once("Calc()", "Calc() string evaluation not supported");
-            Value::Int(0)
+            let source = s(0);
+            match eval_calc_assignment(&source, env) {
+                Some(value) => value,
+                None => {
+                    env.warn_once(
+                        "Calc()",
+                        "Calc() only supports assignments from indexed GetProp expressions",
+                    );
+                    Value::Int(0)
+                }
+            }
         }
         _ => match env.call_engine(f, a, raw) {
             Some(v) => v,
@@ -465,8 +555,12 @@ mod tests {
         fn set_var(&mut self, n: &str, v: Value) {
             self.0.insert(n.into(), v);
         }
-        fn call_engine(&mut self, _: u8, _: &[Value], _: &[Param]) -> Option<Value> {
-            None
+        fn call_engine(&mut self, func: u8, args: &[Value], _: &[Param]) -> Option<Value> {
+            if func == Func::GETPROP {
+                self.0.get(&args.first()?.as_str()).cloned()
+            } else {
+                None
+            }
         }
         fn random(&mut self) -> f64 {
             0.5
@@ -540,5 +634,134 @@ mod tests {
             )],
         };
         assert_eq!(eval(&lp, &mut e), Value::Str("いう".into()));
+
+        // Test array element assignment through DIMTO and TO (e.g. @Result[i] = S)
+        e.0.insert("@Result".into(), Value::Array(vec![Value::Empty; 3]));
+        e.0.insert("i".into(), Value::Int(1));
+        e.0.insert("S".into(), Value::Str("Ranura 1".into()));
+        let lp_arr = LiveParser {
+            entries: vec![
+                od(
+                    op::DIMTO,
+                    "____d_0",
+                    None,
+                    vec![Param::Var("@Result".into()), Param::Var("i".into())],
+                ),
+                od(op::TO, "____d_0", None, vec![Param::Var("S".into())]),
+            ],
+        };
+        eval(&lp_arr, &mut e);
+        assert_eq!(
+            e.0["@Result"],
+            Value::Array(vec![
+                Value::Empty,
+                Value::Str("Ranura 1".into()),
+                Value::Empty
+            ])
+        );
+    }
+
+    #[test]
+    fn plus_adds_numeric_strings_while_concat_operator_joins_strings() {
+        let mut env = E(HashMap::new());
+        let add = LiveParser {
+            entries: vec![od(
+                op::PLUS,
+                "result",
+                None,
+                vec![Param::Str("500".into()), Param::Int(306)],
+            )],
+        };
+        assert_eq!(eval(&add, &mut env), Value::Int(806));
+
+        let add_float = LiveParser {
+            entries: vec![od(
+                op::PLUS,
+                "result",
+                None,
+                vec![Param::Str("1.5".into()), Param::Float(0.25)],
+            )],
+        };
+        assert_eq!(eval(&add_float, &mut env), Value::Float(1.75));
+
+        let concat = LiveParser {
+            entries: vec![od(
+                op::COMBOSTR,
+                "result",
+                None,
+                vec![Param::Str("500".into()), Param::Int(306)],
+            )],
+        };
+        assert_eq!(eval(&concat, &mut env), Value::Str("500306".into()));
+    }
+
+    #[test]
+    fn calc_assigns_existing_and_indexed_getprop_values() {
+        let mut env = E(HashMap::new());
+        env.0.insert("i".into(), Value::Int(0));
+        env.0.insert("エディット0".into(), Value::Str("12".into()));
+        env.0
+            .insert("職業（姉）".into(), Value::Str("初期値".into()));
+        let initial_value = LiveParser {
+            entries: vec![od(
+                op::FUNC,
+                "____result",
+                Some(Func::CALC),
+                vec![Param::Str("__s = 職業（姉）".into())],
+            )],
+        };
+        assert_eq!(eval(&initial_value, &mut env), Value::Str("初期値".into()));
+        assert_eq!(env.0["__s"], Value::Str("初期値".into()));
+
+        let calc = LiveParser {
+            entries: vec![od(
+                op::FUNC,
+                "____result",
+                Some(Func::CALC),
+                vec![Param::Str(
+                    "職業（姉） = GetProp(\"エディット\"++i,50)".into(),
+                )],
+            )],
+        };
+
+        assert_eq!(eval(&calc, &mut env), Value::Str("12".into()));
+        assert_eq!(env.0["職業（姉）"], Value::Str("12".into()));
+    }
+
+    #[test]
+    fn comparisons_coerce_numeric_strings_but_keep_text_order_for_non_numbers() {
+        let mut env = E(HashMap::new());
+        let less_than_limit = LiveParser {
+            entries: vec![od(
+                op::SMALL,
+                "result",
+                None,
+                vec![Param::Int(3), Param::Str("15".into())],
+            )],
+        };
+        assert_eq!(eval(&less_than_limit, &mut env), Value::Bool(true));
+
+        let text_order = LiveParser {
+            entries: vec![od(
+                op::SMALL,
+                "result",
+                None,
+                vec![Param::Str("alpha".into()), Param::Str("beta".into())],
+            )],
+        };
+        assert_eq!(eval(&text_order, &mut env), Value::Bool(true));
+
+        let zero_is_not_different_from_empty_string = LiveParser {
+            entries: vec![od(
+                op::NEQUAL,
+                "result",
+                None,
+                vec![Param::Int(0), Param::Str(String::new())],
+            )],
+        };
+        assert_eq!(
+            eval(&zero_is_not_different_from_empty_string, &mut env),
+            Value::Bool(false)
+        );
     }
 }
