@@ -21,13 +21,16 @@ Si hace falta verificar layout visual: wireframe. Si hace falta ver un asset gr�
 
 ## Semántica LiveMaker (no inventar)
 
-- Fuente primaria local: `docs/livenovel/` (manual LiveNovel). Notas tipadas: `LIVEMAKER-INTERFACE-REFERENCE.md` (`fuente primaria` / `no confirmado` / `inventado en livenyan`).
+- **Índice de compatibilidad (leer primero):** [`COMPATIBILITY.md`](COMPATIBILITY.md) — comandos, tags, workarounds, pendiente, anclas de código. No reconstruir el mapa desde el repo si ya está ahí.
+- Detalle menú/LFT/media tipado: [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERFACE-REFERENCE.md) (`fuente primaria` / `no confirmado` / `inventado en livenyan`).
+- Fuente primaria local: `docs/livenovel/` (manual LiveNovel).
 - Strings/exports de `live.dll`: `docs/live-dll-strings.txt` (API media; **no** es tabla Prop/Cmd LSB).
 - **Fix ambiguo** (comportamiento de motor, props, layout, comandos no documentados con certeza): requiere **cita** a al menos uno de:
   1. **manual** — página bajo `docs/livenovel/` (o ancla concreta), o
   2. **strings** — símbolo/línea en `docs/live-dll-strings.txt` u otro extracto explícito, o
   3. **experimento** — comparación controlada vs motor original (describir qué se observó).
 - Sin cita: marcar `no confirmado` o `inventado en livenyan`; no presentar como semántica LiveMaker.
+- Tras cambiar compatibilidad: **actualizar `COMPATIBILITY.md`** (y la interface reference si aplica).
 - No desensamblar ni publicar binarios del juego; no copiar código de DLLs.
 
 ## Tokens y herramientas

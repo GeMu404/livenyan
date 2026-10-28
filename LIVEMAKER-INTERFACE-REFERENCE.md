@@ -1,6 +1,9 @@
 # LiveMaker interface reference
 
-Working reference for LiveMaker interface behavior in LiveNyan.  
+Working reference for LiveMaker **interface** behavior (menu, LFT, media surface) in LiveNyan.
+
+For the full command/tag/workaround inventory (what is implemented, how, expected vs actual, pending), see **[`COMPATIBILITY.md`](COMPATIBILITY.md)** first.
+
 **Do not invent semantics.** Every claim below is tagged by source tier.
 
 ## Source tiers

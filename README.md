@@ -7,8 +7,8 @@ Es una reimplementación compatible del motor, no un reproductor exclusivo de un
 el soporte depende de los formatos y comandos LiveMaker implementados, así que la compatibilidad
 se amplía y valida progresivamente con fixtures sintéticos y juegos de prueba.
 
-Para consultar semántica confirmada y decisiones aún no verificadas de los componentes de interfaz,
-véase la [referencia de interfaz LiveMaker](./LIVEMAKER-INTERFACE-REFERENCE.md).
+Compatibilidad (comandos, tags, workarounds, pendiente): [`COMPATIBILITY.md`](./COMPATIBILITY.md).  
+Detalle de interfaz (menú, LFT, media): [`LIVEMAKER-INTERFACE-REFERENCE.md`](./LIVEMAKER-INTERFACE-REFERENCE.md).
 
 ## Compilar
 
