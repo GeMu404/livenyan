@@ -102,6 +102,22 @@ refresco detectada; con VSync, ambos valores permiten comprobar si la presentaci
 
 Tiempos de arranque: `LIVENYAN_LOG=info livenyan juego.exe`.
 
+### Depuración
+
+| Opción | Qué hace |
+|---|---|
+| `--trace [--steps N]` | VM sin ventana durante N pasos (5000 por defecto) |
+| `--pick N` | con `--trace`: opción elegida en los menús (0 = primera habilitada) |
+| `--trace-conds` | con `--trace`: imprime las condiciones If/Elseif/While con sus valores |
+| `--gal-stats RUTA` | decodifica una imagen GAL del archivo y muestra solo estadísticas |
+| `--snapshot-frame N SALIDA.png` | renderiza oculto hasta el frame N (reloj simulado a 60 fps), guarda la captura y sale |
+
+| Variable | Qué hace |
+|---|---|
+| `LIVENYAN_LOG` | nivel de log de `env_logger` (`warn` por defecto; `info`, `debug`, `livenyan::vm=debug`…) |
+| `LIVENYAN_CONDS` | parte del nombre de un script: sus condiciones van al log `debug`, también con ventana |
+| `LIVENYAN_TEST_GAME_DIR`, `LIVENYAN_TEST_FONT` | solo para los tests ignorados (ver [Pruebas](#pruebas)) |
+
 - Configuración: `$XDG_CONFIG_HOME/livenyan/config.toml` (ver `config.example.toml`).
 - Partidas: `$XDG_DATA_HOME/livenyan/<juego>/`.
 - Nunca se modifican los archivos del juego.
