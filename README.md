@@ -19,8 +19,10 @@ sudo pacman -S --needed rust sdl3 ffmpeg fontconfig noto-fonts-cjk
 cargo build --release
 ```
 
-Sin SDL3 del sistema (o en Windows): `cargo build --release --features static-sdl`
-(necesita `cmake` y un compilador de C).
+Requiere **SDL ≥ 3.4** (el present usa `SDL_SetDefaultTextureScaleMode`, que no existe
+en 3.2: con 3.2 el enlazado falla). Sin SDL 3.4 del sistema (o en Windows):
+`cargo build --release --features static-sdl` (necesita `cmake` y compiladores de C y C++;
+compila el SDL incluido en `sdl3-sys`).
 
 El renderer SDL es automático por defecto (`window.renderer` / `--renderer` vacío).
 Puedes forzar un driver (`opengl`, `vulkan`, `software`, `gpu`, …); si no está
