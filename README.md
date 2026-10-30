@@ -29,9 +29,10 @@ Puedes forzar un driver (`opengl`, `vulkan`, `software`, `gpu`, …); si no est�
 disponible, cae al automático. El backend Vulkan/ash experimental y NVIDIA Optical
 Flow quedaron archivados en el tag `archive/vulkan-optical-flow`.
 
-Escalado del present (letterbox lógico→ventana): `scale_filter` / `--scale-filter` /
-Opciones → **Linear** (suave), **Nearest** (píxel duro en assets y present) o
-**Sharp** (assets nearest + present nearest). Sin upscale IA.
+Escalado del present: `scale_filter` / `--scale-filter` / Opciones → **Linear**
+(suave), **Nearest**, **Sharp** (letterbox nítido), o **Native** (ventana = resolución
+lógica 1:1, sin HiDPI ni letterbox interno; para Lossless Scaling / Magpie / Gamescope).
+Aliases: `1x`, `ls`, `external`. Sin upscale IA en el motor.
 
 Binario: `target/release/livenyan`
 

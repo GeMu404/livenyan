@@ -38,7 +38,7 @@ struct Cli {
     /// Driver de render de SDL (opengl, vulkan, software, gpu...; vacío = automático).
     #[arg(long)]
     renderer: Option<String>,
-    /// Filtro de escalado del present: linear | nearest | sharp | off (=linear).
+    /// Filtro de escalado: linear | nearest | sharp | native (=1x/ls, upscaler externo) | off (=linear).
     #[arg(long, value_name = "FILTER")]
     scale_filter: Option<String>,
     /// Muestra el medidor de FPS (también se puede alternar con F3).

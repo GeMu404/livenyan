@@ -9,6 +9,9 @@ pub enum ScaleFilter {
     Nearest,
     /// Nearest en assets y present.
     Sharp,
+    /// 1:1 lógico→ventana, sin letterbox ni HiDPI. Para upscalers externos
+    /// (Lossless Scaling, Magpie, Gamescope…). **interpretación** I2b.
+    Native,
 }
 
 impl ScaleFilter {
@@ -17,6 +20,7 @@ impl ScaleFilter {
             "linear" | "off" => Some(Self::Linear),
             "nearest" => Some(Self::Nearest),
             "sharp" | "crisp" => Some(Self::Sharp),
+            "native" | "1x" | "external" | "ls" => Some(Self::Native),
             _ => None,
         }
     }
@@ -26,15 +30,21 @@ impl ScaleFilter {
             Self::Linear => "linear",
             Self::Nearest => "nearest",
             Self::Sharp => "sharp",
+            Self::Native => "native",
         }
     }
 
     pub fn present_nearest(self) -> bool {
-        matches!(self, Self::Nearest | Self::Sharp)
+        matches!(self, Self::Nearest | Self::Sharp | Self::Native)
     }
 
     pub fn asset_nearest(self) -> bool {
-        matches!(self, Self::Nearest | Self::Sharp)
+        matches!(self, Self::Nearest | Self::Sharp | Self::Native)
+    }
+
+    /// Present a resolución lógica; el escalado lo hace otra herramienta.
+    pub fn external_upscale(self) -> bool {
+        matches!(self, Self::Native)
     }
 
     pub fn from_config(value: &str) -> Self {
@@ -56,10 +66,13 @@ mod tests {
             ScaleFilter::Linear,
             ScaleFilter::Nearest,
             ScaleFilter::Sharp,
+            ScaleFilter::Native,
         ] {
             assert_eq!(ScaleFilter::parse(mode.as_str()), Some(mode));
         }
         assert_eq!(ScaleFilter::parse("off"), Some(ScaleFilter::Linear));
+        assert_eq!(ScaleFilter::parse("1x"), Some(ScaleFilter::Native));
+        assert_eq!(ScaleFilter::parse("ls"), Some(ScaleFilter::Native));
         assert_eq!(ScaleFilter::parse("nope"), None);
     }
 }

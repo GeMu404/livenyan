@@ -75,10 +75,22 @@ fn interpolation_is_limited_to_large_image_gals_and_toolbar_hit_targets() {
         toolbar_hit(800, ex, ey, true),
         Some(super::ToolbarAction::ExportTexts)
     ));
-    let (sx, sy) = mid(super::scale_filter_option_rects(800)[0].1);
+    let scale_opts = super::scale_filter_option_rects(800);
+    assert_eq!(scale_opts.len(), 4);
+    assert!(scale_opts
+        .iter()
+        .any(|(mode, _)| *mode == crate::scale_filter::ScaleFilter::Native));
+    let (sx, sy) = mid(scale_opts[0].1);
     assert!(matches!(
         toolbar_hit(800, sx, sy, true),
         Some(super::ToolbarAction::ScaleFilter(_))
+    ));
+    let (nx, ny) = mid(scale_opts[3].1);
+    assert!(matches!(
+        toolbar_hit(800, nx, ny, true),
+        Some(super::ToolbarAction::ScaleFilter(
+            crate::scale_filter::ScaleFilter::Native
+        ))
     ));
     assert!(
         toolbar_hit(800, fx, fy, false).is_none(),

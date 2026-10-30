@@ -17,7 +17,7 @@ const TOOLBAR_REVEAL_HEIGHT: f32 = 6.0;
 /// Drawn bar height. Open chrome stays hit-testable while hovered.
 pub(super) const TOOLBAR_BAR_HEIGHT: f32 = 48.0;
 
-const OPTIONS_PANEL_WIDTH: f32 = 336.0;
+const OPTIONS_PANEL_WIDTH: f32 = 360.0;
 
 const OPTIONS_PANEL_HEIGHT: f32 = 252.0;
 
@@ -69,10 +69,12 @@ pub(super) fn scale_filter_option_rects(width: u32) -> Vec<(ScaleFilter, FRect)>
         ScaleFilter::Linear,
         ScaleFilter::Nearest,
         ScaleFilter::Sharp,
+        ScaleFilter::Native,
     ];
-    let w = 96.0;
+    // Cuatro chips en el panel: ancho acotado para caber junto a Native (LS/1:1).
+    let w = 76.0;
     let h = 28.0;
-    let gap = 8.0;
+    let gap = 6.0;
     let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
     let x = panel.x + panel.w - 12.0 - total_width;
     modes
@@ -752,6 +754,7 @@ pub(super) fn draw_toolbar(
                 ScaleFilter::Linear => "Linear",
                 ScaleFilter::Nearest => "Nearest",
                 ScaleFilter::Sharp => "Sharp",
+                ScaleFilter::Native => "Native",
             };
             draw_toolbar_chip_label(
                 canvas,

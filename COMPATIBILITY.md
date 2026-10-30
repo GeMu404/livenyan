@@ -154,6 +154,7 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 |----|------|--------------|----------|---------|
 | I1 | Decode Movie/Cinema frames | Escalar en ffmpeg al tamaño lógico/pantalla (latencia alta) | Decode a **tamaño nativo**; escala en present/SDL | Menos CPU al abrir; letterbox/sharp ya escalan |
 | I2 | Present | Ventana GDI LiveMaker | SDL3 + letterbox + `scale_filter` | Portabilidad / nitidez moderna |
+| I2b | Present nativo | Ventana a tamaño de monitor / GDI | `scale_filter=native`: ventana = lógico, sin HiDPI ni letterbox; el escalado lo hace LS/Magpie/Gamescope | Un solo escalado externo (sin doble upscale) |
 | I3 | Tipografía host | ＭＳ ゴシック | Noto CJK u otra si falta | Linux/Windows sin fuentes JP |
 | I4 | `TOSCREEN*` / coords | Espacio ventana Windows | Identidad en espacio lógico | El letterbox lo resuelve el present |
 | I5 | Renderer | DirectDraw/GDI/etc. | SDL auto (sin Vulkan/OF propio) | Mantenibilidad; OF archivado |

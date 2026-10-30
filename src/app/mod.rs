@@ -142,26 +142,46 @@ pub fn run(
     let video = sdl.video().map_err(|e| e.to_string())?;
     log::info!("video driver: {}", video.current_video_driver());
     let (lw, lh) = game.logical;
-    let (ww, wh) = if cfg.window.width > 0 && cfg.window.height > 0 {
+    let present_scale_boot = ScaleFilter::from_config(&cfg.window.scale_filter);
+    let native_present = present_scale_boot.external_upscale() && snapshot.is_none();
+    // Native (Lossless Scaling / Magpie / Gamescope): ventana = lógico, sin HiDPI ni
+    // letterbox interno — un solo escalado externo (**interpretación** I2b).
+    let (ww, wh) = if snapshot.is_some() || native_present {
+        if native_present
+            && cfg.window.width > 0
+            && (cfg.window.width != lw || cfg.window.height != lh)
+        {
+            log::warn!(
+                "scale_filter=native: ignoring window {}x{}, using logical {lw}x{lh}",
+                cfg.window.width,
+                cfg.window.height
+            );
+        }
+        (lw, lh)
+    } else if cfg.window.width > 0 && cfg.window.height > 0 {
         (cfg.window.width, cfg.window.height)
     } else {
         (lw, lh)
     };
-    let (ww, wh) = if snapshot.is_some() {
-        (lw, lh)
-    } else {
-        (ww, wh)
-    };
     let mut wb = video.window(&format!("livenyan — {}", game.title), ww, wh);
-    wb.resizable();
+    if !native_present {
+        wb.resizable();
+    }
     if snapshot.is_some() {
         wb.hidden();
-    } else {
+    } else if !native_present {
+        // HiDPI duplicaría píxeles antes de un upscaler externo.
         wb.high_pixel_density();
     }
     let mut window = wb.build().map_err(|e| e.to_string())?;
     if cfg.window.fullscreen {
-        let _ = window.set_fullscreen(true);
+        if native_present {
+            log::warn!(
+                "scale_filter=native: ignoring fullscreen (use the external scaler instead)"
+            );
+        } else {
+            let _ = window.set_fullscreen(true);
+        }
     }
     if !cfg.window.renderer.is_empty() {
         // Probar el driver antes: si no funciona en este sistema, avisar y usar el automático
@@ -249,8 +269,13 @@ pub fn run(
         .map_err(|e| format!("cannot create persistent scene frame: {e}"))?;
     scene_frame.set_blend_mode(BlendMode::None);
     let mut scene_frame_ready = false;
-    let mut present_scale = ScaleFilter::from_config(&cfg.window.scale_filter);
+    let mut present_scale = present_scale_boot;
     apply_present_scale_hint(&canvas, present_scale);
+    if native_present {
+        log::info!(
+            "present native {lw}x{lh}: 1:1 for external upscalers (Lossless Scaling / Magpie / Gamescope)"
+        );
+    }
     let mut filter = if present_scale.asset_nearest() {
         ScaleMode::Nearest
     } else {
@@ -404,7 +429,11 @@ pub fn run(
                     win_event: WindowEvent::PixelSizeChanged(..) | WindowEvent::Resized(..),
                     ..
                 } => {
-                    // La presentación lógica de SDL ya recalcula el letterbox
+                    if present_scale.external_upscale() {
+                        // Mantener 1:1: si el SO/compositor cambia el tamaño, volver al lógico.
+                        let _ = canvas.window_mut().set_size(lw, lh);
+                    }
+                    // Con letterbox SDL, el resto se recalcula solo.
                 }
                 Event::Window {
                     win_event: WindowEvent::MouseLeave,
@@ -627,6 +656,7 @@ pub fn run(
                                 }
                             }
                             ToolbarAction::ScaleFilter(mode) => {
+                                let was_native = present_scale.external_upscale();
                                 present_scale = mode;
                                 filter = if present_scale.asset_nearest() {
                                     ScaleMode::Nearest
@@ -640,6 +670,18 @@ pub fn run(
                                 });
                                 apply_cached_texture_scale_modes(&mut gfx, filter);
                                 apply_present_scale_hint(&canvas, present_scale);
+                                if present_scale.external_upscale() {
+                                    let _ = canvas.window_mut().set_fullscreen(false);
+                                    let _ = canvas.window_mut().set_size(lw, lh);
+                                    // set_resizable: si la API falla, el snap en Resized basta.
+                                    log::info!(
+                                        "present native {lw}x{lh}: external upscaler owns scaling"
+                                    );
+                                } else if was_native {
+                                    log::info!(
+                                        "left native present; resize/letterbox enabled again (restart clears HiDPI limits)"
+                                    );
+                                }
                                 log::info!(
                                     "scale_filter → {} (asset={:?}, present_nearest={})",
                                     present_scale.as_str(),
