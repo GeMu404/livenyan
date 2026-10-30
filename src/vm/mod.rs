@@ -25,6 +25,7 @@ mod step_obj;
 mod step_prop;
 mod step_save;
 mod step_text;
+mod sysevent;
 mod text_hist;
 mod wipe;
 
