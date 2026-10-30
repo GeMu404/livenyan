@@ -183,7 +183,7 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
             }
             op::MINUS => arith(&a, &b, |x, y| Some(x.wrapping_sub(y)), |x, y| x - y),
             op::MUL => arith(&a, &b, |x, y| Some(x.wrapping_mul(y)), |x, y| x * y),
-            // Nota: la semántica exacta de división entera en LiveMaker no está verificada.
+            // División entera: semántica en LiveMaker **no confirmada**.
             op::DIV => arith(&a, &b, |x, y| x.checked_div(y), |x, y| x / y),
             op::MOD => arith(&a, &b, |x, y| x.checked_rem(y), |x, y| x % y),
             op::OR | op::AND | op::XOR => {
@@ -747,7 +747,7 @@ mod tests {
         };
         assert_eq!(eval(&lp, &mut e), Value::Str("あ".into()));
 
-        // Test array element assignment through DIMTO and TO (e.g. @Result[i] = S)
+        // Asignación a elemento de array con DIMTO y TO (p. ej. @Result[i] = S).
         e.0.insert("@Result".into(), Value::Array(vec![Value::Empty; 3]));
         e.0.insert("i".into(), Value::Int(1));
         e.0.insert("S".into(), Value::Str("Ranura 1".into()));

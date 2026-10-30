@@ -205,7 +205,7 @@ fn unpack_blocks(
                     }
                 }
                 _ => {
-                    // bloque igual al del frame `fr`, capa `lr`, misma posición
+                    // Bloque igual al del frame `fr`, capa `lr`, misma posición
                     let Some(src) = prev.block_src(fr, lr) else {
                         return err(format!(
                             "block references frame {fr} layer {lr}, not available"
@@ -244,7 +244,7 @@ fn layer_payload(
     };
     let n = r.usize()?;
     if n == 0 {
-        // capa vacía (GaleX: capas sin contenido en este frame)
+        // Capa vacía (GaleX: capas sin contenido en este frame)
         return Ok(Vec::new());
     }
     if info.compression == Some(0) {
@@ -258,7 +258,7 @@ fn layer_payload(
             let img = image::load_from_memory_with_format(raw, image::ImageFormat::Jpeg)
                 .map_err(|e| GalError(format!("jpeg: {e}")))?
                 .to_rgb8();
-            // devolvemos en BGR 24bpp con stride alineado para unificar
+            // Salida en BGR 24bpp con stride alineado, como el resto de capas
             let mut out = vec![0u8; stride(w, 24) * h as usize];
             let s24 = stride(w, 24);
             for (x, y, p) in img.enumerate_pixels() {
@@ -330,7 +330,7 @@ fn zlib_block(r: &mut Rd, n: usize) -> R<Vec<u8>> {
             Ok(out)
         }
         Err(e) => {
-            // último recurso: tolerante (salida parcial)
+            // Último recurso: tolerante (salida parcial)
             let raw = r.take(n)?;
             inflate(raw).map_err(|e2| GalError(format!("{e2} (streaming: {e})")))
         }
@@ -592,7 +592,7 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     let hs = r.usize()?;
     let xml_raw = inflate(r.take(hs)?)?;
     let xml = cp932(&xml_raw);
-    // raíz = primera etiqueta que no sea <?xml ...?> ni comentario
+    // Raíz = primera etiqueta que no sea <?xml ...?> ni comentario
     let root = {
         let mut s = xml.as_str();
         let mut found = "";
@@ -625,7 +625,7 @@ fn parse_galex_all(d: &[u8], max: usize) -> R<(Info, Vec<Frame>)> {
     if info.randomized {
         return err("LiveMaker Pro randomized (encrypted) images are not supported");
     }
-    // primer <Frame>: su <Layers> y sus <Layer>
+    // Primer <Frame>: su <Layers> y sus <Layer>
     let find_frame = |from: usize| -> Option<usize> {
         let mut i = from;
         while let Some(j) = xml[i..].find("<Frame") {
@@ -779,7 +779,7 @@ pub fn dump(d: &[u8]) -> String {
             Err(e) => return o + &format!("  xml: {e}\n"),
         };
         let strip_names = |t: &str| {
-            // atributos sin Name (los nombres de capa podrían ser texto del juego)
+            // Atributos sin Name (los nombres de capa podrían ser texto del juego)
             t.split_whitespace()
                 .filter(|kv| !kv.starts_with("Name"))
                 .collect::<Vec<_>>()
@@ -1194,7 +1194,7 @@ fn compose(info: &Info, frame: &Frame, previous: Option<&[u8]>) -> R<(u32, u32, 
         .iter()
         .filter(|(l, d, _)| l.visible && !d.is_empty())
         .collect();
-    // caso rápido: una sola capa a tamaño completo
+    // Caso rápido: una sola capa a tamaño completo
     if visible.is_empty() {
         return Ok((
             frame.w,
@@ -1608,7 +1608,7 @@ mod tests {
         d.extend(frame([(0, 0), (-1, 0)], &[[255, 0, 0]], "F1", true));
         let img = decode(&d).unwrap();
         assert_eq!(img.frames.len(), 1);
-        // bloque izquierdo copiado del frame 0 (rojo), derecho nuevo (azul)
+        // Bloque izquierdo copiado del frame 0 (rojo), derecho nuevo (azul)
         assert_eq!(&img.frames[0][0..4], &[255, 0, 0, 255]);
         assert_eq!(&img.frames[0][8 * 4..8 * 4 + 4], &[0, 0, 255, 255]);
         assert!(dump(&d).contains("(MISMATCH)"));

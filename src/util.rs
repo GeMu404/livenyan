@@ -75,7 +75,7 @@ pub fn slug(s: &str) -> String {
     }
     let out = out.trim_matches('-').to_string();
     if out.is_empty() {
-        // nombres totalmente no-ASCII: hash FNV estable
+        // Nombres totalmente no-ASCII: hash FNV estable
         let mut h: u64 = 0xcbf29ce484222325;
         for b in s.bytes() {
             h = (h ^ b as u64).wrapping_mul(0x100000001b3);

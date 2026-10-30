@@ -214,7 +214,7 @@ impl LivePixelFont {
         {
             return self.raster_info(*info, scale);
         }
-        // inventado en livenyan: U+0020 ausente (H20) → avance promedio de cabecera.
+        // Inventado en livenyan: U+0020 ausente (H20) → avance promedio de cabecera.
         if ch == ' ' {
             return RasterGlyph {
                 advance: f32::from(self.ave_char_width) * scale,
@@ -225,7 +225,7 @@ impl LivePixelFont {
                 cov: Vec::new(),
             };
         }
-        // inventado en livenyan: ideographic space / fullwidth space → celda completa.
+        // Inventado en livenyan: ideographic space / fullwidth space → celda completa.
         if ch == '\u{3000}' || ch == '\u{00A0}' {
             return RasterGlyph {
                 advance: f32::from(self.cell_height) * scale,

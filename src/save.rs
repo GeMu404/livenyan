@@ -67,7 +67,7 @@ pub fn encode_status_variables(vars: &HashMap<String, Value>) -> Vec<u8> {
                 out.extend_from_slice(&0u32.to_le_bytes()); // scope
                 out.extend_from_slice(&1u32.to_le_bytes()); // arr_len
                 out.push(if *b { 1u8 } else { 0u8 });
-                // extra padding flags
+                // Extra padding flags
                 out.extend_from_slice(&[1, 0, 0xff, 0xff, 0xff, 0xff, 0]);
             }
             Value::Int(i) => {

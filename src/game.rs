@@ -303,7 +303,7 @@ pub fn exe_forms(path: &Path) -> Vec<ExeForm> {
     if !b.starts_with(b"MZ") {
         return vec![];
     }
-    // cortar en el archivo anexado (trailer "<u32 offset>lv")
+    // Cortar en el archivo anexado (trailer "<u32 offset>lv")
     if b.len() > 6 && &b[b.len() - 2..] == b"lv" {
         let off = u32::from_le_bytes(b[b.len() - 6..b.len() - 2].try_into().unwrap()) as usize;
         if off < b.len() {
@@ -332,7 +332,7 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
         let Some(&cl) = b.get(i) else { break };
         let class = String::from_utf8_lossy(b.get(i + 1..i + 1 + cl as usize).unwrap_or_default())
             .to_string();
-        // propiedades del formulario raíz: dentro de una ventana razonable
+        // Propiedades del formulario raíz: dentro de una ventana razonable
         let end = (start + 4096).min(b.len());
         let next = find(&b[i..end], b"TPF0").map(|q| i + q).unwrap_or(end);
         let blk = &b[i..next];

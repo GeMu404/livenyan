@@ -314,7 +314,7 @@ fn store(sh: &Shared, name: &str, a: Asset) {
     let clock = g.1;
     g.2 += a.bytes();
     g.0.insert(name.to_string(), Slot::Ready(a, clock));
-    // expulsión LRU aproximada si superamos el límite (nunca scripts)
+    // Expulsión LRU aproximada si superamos el límite (nunca scripts)
     if g.2 > sh.cap_bytes {
         let mut v: Vec<(u64, String, usize)> =
             g.0.iter()

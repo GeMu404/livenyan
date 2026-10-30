@@ -1,4 +1,4 @@
-//! Reader and sampler for LiveCinema 108-112 image and text tracks.
+//! Lector y muestreo de pistas de imagen y texto de LiveCinema 108-112.
 
 use encoding_rs::SHIFT_JIS;
 
@@ -255,7 +255,7 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
     for index in 0..count as usize {
         let kind = r.take(1)?[0];
         let is_text = kind == 1;
-        // kind 0 = image, 1 = text; el resto (p. ej. 2 legacy / pistas no soportadas)
+        // Kind 0 = imagen, 1 = texto; el resto (p. ej. 2 legacy / pistas no soportadas)
         // se salta como opaco para no tumbar el cinema entero.
         let skip_opaque = kind != 0 && !is_text;
         let previous_raw = r.int()?;
@@ -786,7 +786,7 @@ mod tests {
         movie.clips[0].pivot = [10, 5];
         movie.clips[0].scale_x = [2.0, 2.0];
         movie.clips[0].scale_y = [2.0, 2.0];
-        // position_end at t=end is (30,40); top-left = pos - pivot*scale
+        // position_end en t=end es (30,40); esquina = pos - pivot*scale
         let sprite = &movie.sprites_at(1000.0 / 60.0)[0];
         assert_eq!((sprite.x, sprite.y), (10.0, 30.0));
         assert_eq!((sprite.scale_x, sprite.scale_y), (2.0, 2.0));
@@ -802,7 +802,7 @@ mod tests {
             .windows(marker.len())
             .position(|w| w == marker)
             .expect("media name");
-        // pivot está 8 (point) + … atrás desde position_start; más simple: regenerar.
+        // El pivot queda 8 bytes (point) antes de position_start; se regenera el LCM.
         let _ = (media_at, &mut bytes);
         let movie = parse(&{
             let mut out = simple_movie();

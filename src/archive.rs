@@ -404,7 +404,7 @@ pub enum Source {
 /// Índice unificado con búsqueda insensible a mayúsculas y separadores.
 pub struct GameData {
     pub source: Source,
-    /// nombre normalizado -> (nombre original, índice de entrada o ruta)
+    /// Nombre normalizado -> (nombre original, índice de entrada o ruta)
     index: HashMap<String, usize>,
     names: Vec<String>,
 }
@@ -530,7 +530,7 @@ impl GameData {
         None
     }
 
-    /// Resolves a resource reference first from the archive root, then relative to its owner.
+    /// Resuelve una referencia primero desde la raíz del archivo y luego relativa a su dueño.
     pub fn resolve_relative(&self, owner: &str, name: &str, exts: &[&str]) -> Option<String> {
         self.resolve(name, exts).or_else(|| {
             if name.starts_with(['\\', '/']) || name.as_bytes().get(1) == Some(&b':') {

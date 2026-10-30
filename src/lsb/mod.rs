@@ -56,7 +56,7 @@ impl<'a> Reader<'a> {
     pub fn count(&mut self) -> Result<usize> {
         let n = self.u32()? as usize;
         if n > self.d.len() - self.p.min(self.d.len()) + 1 {
-            // cada elemento ocupa al menos un byte: protege contra basura
+            // Cada elemento ocupa al menos un byte: protege contra basura
             return Err(ParseError(format!("implausible count {n} at {}", self.p)));
         }
         Ok(n)

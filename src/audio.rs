@@ -257,7 +257,7 @@ impl Audio {
             .sub
             .new_stream(Some(&spec), None)
             .map_err(|e| e.to_string())?;
-        // enlazar primero: el formato de destino lo fija el dispositivo
+        // Enlazar primero: el formato de destino lo fija el dispositivo
         self.device
             .bind_stream(&stream)
             .map_err(|e| e.to_string())?;

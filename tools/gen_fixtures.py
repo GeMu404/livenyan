@@ -22,7 +22,7 @@ def to(name, val): return OpeData(T.To, name, operands=[val])
 def lit(v): return expr(to("____arg", v))
 def op(t, name, a, b): return OpeData(t, name, operands=[a, b])
 
-# command_params: one bool list per command type; component commands use bit j -> PropertyType(j+1)
+# command_params: una lista de bools por tipo de comando; en componentes, bit j -> PropertyType(j+1)
 NPROPS = 0xAD
 cmd_params = [[False] * NPROPS for _ in range(0x40)]
 def enable(ctype, *props):
@@ -34,7 +34,7 @@ enable(C.CommandType.Sound, PT.PR_NAME, PT.PR_SOURCE, PT.PR_VOLUME, PT.PR_REPEAT
 enable(C.CommandType.Menu, PT.PR_NAME, PT.PR_TEXT)
 
 def comps(ctype, vals):
-    # vals: dict PropertyType -> LiveParser, in enabled order
+    # vals: dict PropertyType -> LiveParser, en orden de bits activos
     order = [i + 1 for i, f in enumerate(cmd_params[ctype]) if f]
     return [vals.get(PT(p), expr()) for p in order]
 
@@ -60,7 +60,7 @@ def add(cls, indent=0, **kw):
     cmds.append(mk(cls, n, indent, **kw))
     return len(cmds) - 1
 
-# main script: counter loop, if/else, call sub, image, text, wait, sound, jump to label
+# Script principal: bucle con contador, if/else, Call, imagen, texto, Wait, sonido y salto a etiqueta
 add(C.VarNew, Name="count", Type=P.Int, InitVal=lit(I(0)), Scope=0)
 add(C.VarNew, Name="name", Type=P.Str, InitVal=lit(S("nyan")), Scope=0)
 add(C.Label, Name="top")
@@ -100,8 +100,8 @@ add(C.Exit, Calc=expr())
 gm = LMScript(version=117, flags=0, command_params=cmd_params_list, commands=cmds)
 open(os.path.join(out, "ゲームメイン.lsb"), "wb").write(gm.to_lsb())
 
-# --- evt/: regresión del bucle de espera de LiveNovel (終了待ち): TextIns a un objeto que aún no
-# existe, luego MesNew con ONPLAYEND y un While que espera la variable que pone el manejador ---
+# evt/: regresión del bucle de espera de LiveNovel (終了待ち): TextIns a un objeto que aún no
+# existe, luego MesNew con ONPLAYEND y un While que espera la variable que pone el manejador
 evt = os.path.join(out, "evt"); os.makedirs(evt, exist_ok=True)
 enable(C.CommandType.MesNew, PT.PR_ONPLAYEND)
 cmds = []; n = 0
@@ -123,7 +123,7 @@ add(C.Calc, Calc=expr(to("__done", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt2/: Exit condicional (Calc falso no sale) + TextIns vacío que igual dispara ONPLAYEND ---
+# evt2/: Exit condicional (Calc falso no sale) + TextIns vacío que igual dispara ONPLAYEND
 evt2 = os.path.join(out, "evt2"); os.makedirs(evt2, exist_ok=True)
 cmds = []; n = 0
 add(C.VarNew, Name="__done", Type=P.Flag, InitVal=lit(B(False)), Scope=0)
@@ -146,7 +146,7 @@ add(C.Calc, Calc=expr(to("__done", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt2, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt3/: @ParamStr/@ParamCount por marco (Call anidado, se restauran al volver) ---
+# evt3/: @ParamStr/@ParamCount por marco (Call anidado, se restauran al volver)
 evt3 = os.path.join(out, "evt3"); os.makedirs(evt3, exist_ok=True)
 def pick(i): return OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(i)])
 def call(page, label, *ps):
@@ -167,9 +167,9 @@ add(C.Calc, indent=1, Calc=expr(to("restored_ok", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt3, "p.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt4/: While con End = índice tras el WhileLoop (como en juegos reales) y cadena
+# evt4/: While con End = índice tras el WhileLoop (como en juegos reales) y cadena
 # If/Elseif dentro; ListCompo; SetProp con índice de propiedad numérico (base 0);
-# IsDelimiter; Timer que dispara su manejador ---
+# IsDelimiter; Timer que dispara su manejador
 evt4 = os.path.join(out, "evt4"); os.makedirs(evt4, exist_ok=True)
 enable(C.CommandType.ImgNew, PT.PR_PARENT)
 enable(C.CommandType.Timer, PT.PR_NAME, PT.PR_DELAY, PT.PR_ONPLAYEND)
@@ -205,7 +205,7 @@ add(C.Calc, Calc=expr(to("__tick", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt4, "tick.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt5/: bucle infinito con efectos repetidos (SetProp): --trace debe declararlo estancado ---
+# evt5/: bucle infinito con efectos repetidos (SetProp): --trace debe declararlo estancado
 evt5 = os.path.join(out, "evt5"); os.makedirs(evt5, exist_ok=True)
 cmds = []; n = 0
 add(C.BoxNew, components=comps(C.CommandType.BoxNew, {PT.PR_NAME: lit(S("b"))}))
@@ -216,8 +216,8 @@ cmds[w].args["End"] = wl + 1
 add(C.Exit, Calc=expr())
 open(os.path.join(evt5, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt6/: Cinema (placeholder con PR_DURATION -> ONPLAYEND), PrevMenu elegido por --trace
-# (respetando SetEnabled), InPrimary ---
+# evt6/: Cinema (placeholder con PR_DURATION -> ONPLAYEND), PrevMenu elegido por --trace
+# (respetando SetEnabled), InPrimary
 evt6 = os.path.join(out, "evt6"); os.makedirs(evt6, exist_ok=True)
 enable(C.CommandType.Cinema, PT.PR_NAME, PT.PR_SOURCE, PT.PR_DURATION, PT.PR_ONPLAYEND)
 enable(C.CommandType.PrevMenuNew, PT.PR_NAME, PT.PR_ONSELECT)
@@ -248,7 +248,7 @@ add(C.Calc, Calc=expr(to("__sel", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(evt6, "sel.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt7/: bucle de escenas sin fin (a > b > a > ...): --trace debe informar del ciclo ---
+# evt7/: bucle de escenas sin fin (a > b > a > ...): --trace debe informar del ciclo
 evt7 = os.path.join(out, "evt7"); os.makedirs(evt7, exist_ok=True)
 cmds = []; n = 0
 add(C.Label, Name="top")
@@ -262,7 +262,7 @@ for nm in ("a", "b"):
     add(C.Exit, Calc=expr())
     open(os.path.join(evt7, nm + ".lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- GAL (Gale106, zlib, 24bpp, 4x3, alpha) ---
+# GAL (Gale106, zlib, 24bpp, 4x3, alpha)
 def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     stride = ((w * bpp + 7) // 8 + 3) & ~3
     astride = (w + 3) & ~3
@@ -271,7 +271,7 @@ def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     hdr[0x15] = 0; hdr[0x16] = 0
     struct.pack_into("<Iii", hdr, 0x18, 0, block[0], block[1])
     b = bytearray(b"Gale106") + struct.pack("<i", len(hdr)) + hdr
-    b += struct.pack("<I", 0)  # frame name
+    b += struct.pack("<I", 0)  # nombre del frame
     b += struct.pack("<I", 0) + b"\0" * 9
     b += struct.pack("<Iiii", 1, w, h, bpp)
     b += struct.pack("<ii", 0, 0) + bytes([1]) + struct.pack("<ii", -1, 255) + bytes([1 if alpha else 0]) + struct.pack("<I", 0)
@@ -284,16 +284,16 @@ def gal(w, h, bpp, pixels, alpha=None, block=(0, 0)):
     else:
         b += struct.pack("<i", 0)
     return bytes(b)
-px = [bytes([0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255]) for _ in range(3)]  # BGR: red, green, blue, white
+px = [bytes([0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255]) for _ in range(3)]  # BGR: rojo, verde, azul, blanco
 al = [bytes([255, 128, 0, 255]) for _ in range(3)]
 open(os.path.join(out, "bg.gal"), "wb").write(gal(4, 3, 24, px, al))
 
-# WAV: 0.1 s silence
+# WAV: 0,1 s de silencio
 import wave
 with wave.open(os.path.join(out, "se.wav"), "wb") as wf:
     wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(22050); wf.writeframes(b"\0\0" * 2205)
 
-# --- archives: standalone .dat and fake exe (MZ stub + archive + trailer) ---
+# Archivos: .dat suelto y exe falso (stub MZ + archivo + trailer).
 files = ["00000001.lsb", "sub.lsb", "ゲームメイン.lsb", "bg.gal", "se.wav"]
 fake_exe = os.path.join(out, "stub.bin")
 open(fake_exe, "wb").write(b"MZ" + b"\0" * 62)
@@ -306,7 +306,7 @@ with LMArchive(os.path.join(out, "game.dat"), "w") as ar:
 os.remove(fake_exe)
 print("ok")
 
-# --- GaleX 8bpp con paleta y bloques 2x2 (incluye referencia -2), esperado vía pylivemaker/PIL ---
+# GaleX 8bpp con paleta y bloques 2x2 (incluye referencia -2), esperado vía pylivemaker/PIL
 def galex_pal_blocks():
     w, h, bw, bh = 5, 3, 2, 2
     pal = [(i * 40 % 256, i * 80 % 256, i * 20 % 256) for i in range(256)]  # (b,g,r)
@@ -347,7 +347,7 @@ open(os.path.join(out, "pal_blocks.rgba"), "wb").write(im.convert("RGBA").tobyte
 im = Image.open(os.path.join(out, "bg.gal")); im.load()
 print("bg.gal via pylivemaker:", im.mode, im.size, list(im.convert("RGBA").getdata())[:4])
 
-# --- datos cifrados (LiveMaker Pro scramble), esperado vía pylivemaker.scramble.decrypt ---
+# Datos cifrados (LiveMaker Pro scramble), esperado vía pylivemaker.scramble.decrypt
 from livemaker.scramble import LMScramble, decrypt, LIVEMAKER3_SCRAMBLE_KEY
 plain = bytes(range(256)) * 3
 chunk, seed = 100, 0x1234
@@ -364,8 +364,8 @@ if ok:
     open(os.path.join(out, "scrambled.plain"), "wb").write(plain)
 print("scramble fixture:", ok)
 
-# --- render/: un Box contenedor sin COLOR con PRIORITY alta y una imagen hija; la imagen
-# debe verse (antes el Box se pintaba negro a pantalla completa encima) ---
+# render/: un Box contenedor sin COLOR con PRIORITY alta y una imagen hija; la imagen
+# debe verse (antes el Box se pintaba negro a pantalla completa encima)
 rd = os.path.join(out, "render"); os.makedirs(rd, exist_ok=True)
 open(os.path.join(rd, "pic.gal"), "wb").write(gal(16, 8, 24, [bytes([0, 0, 255] * 16) for _ in range(8)]))
 cmds = []; n = 0
@@ -375,8 +375,8 @@ add(C.Wait, Calc=lit(B(True)), Time=lit(I(100000)), StopEvent=expr())
 add(C.Exit, Calc=expr())
 open(os.path.join(rd, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- render2/: capa raíz "\x01" como PARENT y en SetProp; COLOR como TColor (0x00BBGGRR);
-# GetProp de PARENT en objeto inexistente = "" ---
+# Render2/: capa raíz "\x01" como PARENT y en SetProp; COLOR como TColor (0x00BBGGRR);
+# GetProp de PARENT en objeto inexistente = ""
 enable(C.CommandType.BoxNew, PT.PR_PARENT, PT.PR_COLOR)
 r2 = os.path.join(out, "render2"); os.makedirs(r2, exist_ok=True)
 cmds = []; n = 0
@@ -391,8 +391,8 @@ add(C.Exit, Calc=expr())
 open(os.path.join(r2, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 open(os.path.join(r2, "pic.gal"), "wb").write(gal(16, 8, 24, [bytes([255, 0, 0] * 16) for _ in range(8)]))
 
-# --- evt8/: título en bucle que pide clics de texto en cada vuelta (como 0000009C.lsb):
-# --trace debe seguir haciendo clic Y acabar eligiendo el menú; --pick elige el ítem ---
+# evt8/: título en bucle que pide clics de texto en cada vuelta (como 0000009C.lsb):
+# --trace debe seguir haciendo clic Y acabar eligiendo el menú; --pick elige el ítem
 e8 = os.path.join(out, "evt8"); os.makedirs(e8, exist_ok=True)
 enable(C.CommandType.MesNew, PT.PR_NAME)
 cmds = []; n = 0
@@ -413,8 +413,8 @@ add(C.Calc, Calc=expr(OpeData(T.DimTo, "____1", operands=[V("@ParamStr"), I(0)])
 add(C.Exit, Calc=expr())
 open(os.path.join(e8, "sel.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt9/: como el flujo real repetido: TextIns vacío + espera tipo 終了待ち; la caja de
-# mensajes solo libera la espera con un clic (ONLBTNUP). Debe avanzar 5 veces ---
+# evt9/: como el flujo real repetido: TextIns vacío + espera tipo 終了待ち; la caja de
+# mensajes solo libera la espera con un clic (ONLBTNUP). Debe avanzar 5 veces
 e9 = os.path.join(out, "evt9"); os.makedirs(e9, exist_ok=True)
 enable(C.CommandType.MesNew, PT.PR_ONLBTNUP)
 cmds = []; n = 0
@@ -441,8 +441,8 @@ add(C.Calc, Calc=expr(to("__end", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e9, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt10/: GAL animado (3 frames, con bytes intermedios entre frames) en un ImgNew con
-# ONPLAYEND; el script espera a que termine (PR_PLAYING / ONPLAYEND) ---
+# evt10/: GAL animado (3 frames, con bytes intermedios entre frames) en un ImgNew con
+# ONPLAYEND; el script espera a que termine (PR_PLAYING / ONPLAYEND)
 e10 = os.path.join(out, "evt10"); os.makedirs(e10, exist_ok=True)
 def galframe(bgr, name, delay=67):
     raw = bytes(bgr) * (16 * 8)
@@ -469,8 +469,8 @@ add(C.Calc, Calc=expr(to("__ae", B(True))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e10, "ae.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt11/: caja de mensajes OCULTA (VISIBLE=0) con ONLBTNUP; texto a otra caja que nunca
-# se crea (retenida). El clic de pantalla de --trace debe llegar igual ---
+# evt11/: caja de mensajes OCULTA (VISIBLE=0) con ONLBTNUP; texto a otra caja que nunca
+# se crea (retenida). El clic de pantalla de --trace debe llegar igual
 e11 = os.path.join(out, "evt11"); os.makedirs(e11, exist_ok=True)
 enable(C.CommandType.MesNew, PT.PR_VISIBLE)
 cmds = []; n = 0
@@ -487,8 +487,8 @@ add(C.Calc, Calc=expr(to("__end", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e11, "end.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt12/: la caja (hija de un Box) se borra en cascada con ObjDel del padre; luego TextIns
-# con <EVENT>MESEND: el sustituto hereda ONNOTIFY y el evento llega a ev.lsc ---
+# evt12/: la caja (hija de un Box) se borra en cascada con ObjDel del padre; luego TextIns
+# con <EVENT>MESEND: el sustituto hereda ONNOTIFY y el evento llega a ev.lsc
 from livemaker.lsb.novel import TWdOpeEvent
 e12 = os.path.join(out, "evt12"); os.makedirs(e12, exist_ok=True)
 enable(C.CommandType.MesNew, PT.PR_PARENT)
@@ -509,7 +509,7 @@ add(C.Calc, Calc=expr(to("__end", I(1))))
 add(C.Exit, Calc=expr())
 open(os.path.join(e12, "ev.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt13/: {CREATECG} incrustado en el texto crea un fondo de color sólido ---
+# evt13/: {CREATECG} incrustado en el texto crea un fondo de color sólido
 e13 = os.path.join(out, "evt13"); os.makedirs(e13, exist_ok=True)
 cmds = []; n = 0
 add(C.MesNew, components=comps(C.CommandType.MesNew, {PT.PR_NAME: lit(S("mb"))}))
@@ -521,8 +521,8 @@ waitflag("__end")
 add(C.Exit, Calc=expr())
 open(os.path.join(e13, "ゲームメイン.lsb"), "wb").write(LMScript(version=117, flags=0, command_params=cmd_params, commands=cmds).to_lsb())
 
-# --- evt14/: CREATECG con WAIT de una imagen animada y luego CHANGECG a negro: el texto
-# espera a que termine la animación antes del CHANGECG ---
+# evt14/: CREATECG con WAIT de una imagen animada y luego CHANGECG a negro: el texto
+# espera a que termine la animación antes del CHANGECG
 import shutil
 e14 = os.path.join(out, "evt14"); os.makedirs(e14, exist_ok=True)
 shutil.copy(os.path.join(out, "evt10", "anim.gal"), os.path.join(e14, "anim.gal"))

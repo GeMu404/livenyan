@@ -161,7 +161,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         let n = match game.data.resolve(name, livenyan::assets::IMAGE_EXTS) {
             Some(n) => n,
             None => {
-                // por sufijo / nombre base (sin carpetas, con o sin extensión)
+                // Por sufijo / nombre base (sin carpetas, con o sin extensión)
                 let want = name.replace('/', "\\").to_lowercase();
                 let stem = want
                     .rsplit_once('.')
@@ -265,7 +265,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
         );
     }
     let r = livenyan::app::run(game, cfg, assets, vm, languages, t0, snap, cli.debug_layout);
-    // salir de verdad aunque queden hilos de decodificación/audio vivos
+    // Salir de verdad aunque queden hilos de decodificación/audio vivos
     if let Err(e) = &r {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -309,7 +309,7 @@ fn info(
             p.exit_lsb,
             p.settings.len()
         );
-        // claves y valores numéricos (las cadenas solo como longitud salvo --show-text): sirve
+        // Claves y valores numéricos (las cadenas solo como longitud salvo --show-text): sirve
         // para localizar dónde guarda el .lpb el tamaño de pantalla sin filtrar texto del juego
         println!("  lpb unk:   {:?}", p.unk);
         for (k, v) in &p.settings {
@@ -337,7 +337,7 @@ fn info(
         );
     }
     println!("entry:       {}", game.entry);
-    // autocomprobación del decodificador GAL: primeras 30 imágenes
+    // Autocomprobación del decodificador GAL: primeras 30 imágenes
     {
         let gals: Vec<&String> = names
             .iter()
@@ -384,7 +384,7 @@ fn info(
     );
     println!("save dir:    {}", game.save_dir().display());
     println!("open time:   {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
-    // parseo de todos los LSB en paralelo
+    // Parseo de todos los LSB en paralelo
     let t = Instant::now();
     let lsbs: Vec<String> = names
         .iter()
@@ -442,7 +442,7 @@ fn dump(game: &Game, name: &str, show: bool) -> Result<(), String> {
         for (k, f) in &c.fields {
             let s = match f {
                 Field::Expr(e) if e.is_empty() => continue,
-                // nombres de objeto / destinos no son texto del juego
+                // Nombres de objeto / destinos no son texto del juego
                 Field::Expr(e) => {
                     e.render(!show && !matches!(*k, "Target" | "Name" | "ObjName" | "ObjProp"))
                 }
@@ -541,7 +541,7 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         idle = if new_code || acted { 0 } else { idle + 1 };
         cov_idle = if new_code { 0 } else { cov_idle + 1 };
         last_sig = sig;
-        // a partir de 60 frames sin código nuevo, intentar cada frame hasta que haya un menú
+        // A partir de 60 frames sin código nuevo, intentar cada frame hasta que haya un menú
         // (en un bucle de título el menú puede existir solo en algunos frames del ciclo)
         if cov_idle >= 60
             && let Some(m) = vm.auto_menu()
@@ -550,7 +550,7 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
             cov_idle = 0;
             println!("[{t:>8.0}ms] auto-select menu {m}");
         }
-        // el script espera y no hay texto pendiente: clic en la caja de mensajes
+        // El script espera y no hay texto pendiente: clic en la caja de mensajes
         if idle > 0
             && idle % 30 == 0
             && idle % 60 != 0

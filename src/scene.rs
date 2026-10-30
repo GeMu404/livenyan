@@ -417,7 +417,7 @@ impl Scene {
     }
 
     pub fn create(&mut self, name: &str, kind: Kind, props: HashMap<u8, Value>) {
-        // Replacing an object updates it in place: preserve its draw order and text state.
+        // Recrear un objeto lo actualiza en su sitio: conserva orden de dibujo y estado del texto.
         let (text, shown, text_rev, seq, play, anim, placeholder, ended_unnotified) =
             match self.slots.remove(name) {
                 Some(Slot::Live(old)) => {
