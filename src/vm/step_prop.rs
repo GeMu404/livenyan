@@ -61,7 +61,7 @@ impl Vm {
                 }
                 // Flip FL_OUT con targets (MESOFF) archiva en `back`. 再生中/MESON
                 // vuelven a poner VISIBLE=1 sin otro Flip de entrada: hay que
-                // desarchivar. **experimento** test2: tras menú→iniciar el 土台
+                // desarchivar. **experimento** H3: tras menú→iniciar el 土台
                 // seguía en back y el diálogo no se dibujaba.
                 if show {
                     self.scene.unmark_back(&obj);

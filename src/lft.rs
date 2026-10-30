@@ -1,7 +1,7 @@
 //! LiveMaker LivePixelFont (`.lft`) — parser y raster de glifos.
 //!
 //! El formato **no** está documentado en `docs/livenovel/` ni en pylivemaker.
-//! Layout inferido del `font0.lft` de testgame + uso de `FONTNAME` = nombre interno.
+//! Layout inferido de un `.lft` real + uso de `FONTNAME` = nombre interno (COMPATIBILITY H20).
 //! Campos no usados se marcan **no confirmado**.
 
 use crate::archive::GameData;
@@ -11,7 +11,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 const MAGIC: &[u8] = b"LivePixelFont\0";
-/// Tamaño del bloque de métricas tras el nombre (testgame: cabe exacto con dir+bitmaps).
+/// Tamaño del bloque de métricas tras el nombre (H20: cabe exacto con dir+bitmaps).
 const METRICS_LEN: usize = 232;
 const NAME_LEN: usize = 64;
 const GLYPH_RECORD_LEN: usize = 18;
@@ -115,7 +115,7 @@ impl LivePixelFont {
         }
         let version = read_u32(data, MAGIC.len())?;
         if version != 100 {
-            // testgame usa 100; otros valores no explorados.
+            // H20: solo visto 100; otros valores no explorados.
             log::warn!("LivePixelFont version {version} (only 100 verified; no confirmado)");
         }
         let dir_z_size = read_u32(data, MAGIC.len() + 4)? as usize;
@@ -164,7 +164,7 @@ impl LivePixelFont {
             let bearing_x = read_i16(rec, 6)?;
             let bearing_y = read_i16(rec, 8)?;
             let advance = read_u16(rec, 10)?;
-            let _unused = read_u16(rec, 12)?; // siempre 0 en testgame; no confirmado
+            let _unused = read_u16(rec, 12)?; // siempre 0 en lo visto (H20); no confirmado
             let offset = read_u32(rec, 14)?;
             let stride = row_stride(width as usize);
             let need = stride.saturating_mul(height as usize);
@@ -214,7 +214,7 @@ impl LivePixelFont {
         {
             return self.raster_info(*info, scale);
         }
-        // inventado en livenyan: U+0020 ausente en testgame → avance promedio de cabecera.
+        // inventado en livenyan: U+0020 ausente (H20) → avance promedio de cabecera.
         if ch == ' ' {
             return RasterGlyph {
                 advance: f32::from(self.ave_char_width) * scale,
@@ -440,14 +440,14 @@ mod tests {
     #[test]
     fn catalog_matches_normalized_family_name() {
         let cov = [255u8; 16];
-        let (name_bytes, _, _) = encoding_rs::SHIFT_JIS.encode("JKゴシックM");
+        let (name_bytes, _, _) = encoding_rs::SHIFT_JIS.encode("テストフォントM");
         let bytes = build_synthetic_lft(name_bytes.as_ref(), &[(0x41, 4, &cov)]);
         let font = Arc::new(LivePixelFont::parse(&bytes).unwrap());
         let mut cat = PixelFontCatalog::default();
         cat.by_name
             .insert(normalize_face_name(&font.name), font.clone());
-        assert!(cat.get("JKゴシックM").is_some());
-        assert!(cat.get(" jkゴシックm ").is_some());
+        assert!(cat.get("テストフォントM").is_some());
+        assert!(cat.get(" テストフォントm ").is_some());
         assert!(cat.get("other").is_none());
     }
 }

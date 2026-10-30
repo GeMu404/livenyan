@@ -133,13 +133,13 @@ impl Vm {
                     // `<PS>`/`{PAUSE}` en el mismo TextIns, solo Clear (coalesce).
                     //
                     // <PG> **sin** Glyph::Char (logo/título: CREATECG→WAITPLAY→CHANGECG→<PG>→MESEND):
-                    // solo Clear. **experimento** testgame `0000009C.lsb` cmd 63/43/12:
+                    // solo Clear. **experimento** (COMPATIBILITY H10):
                     // el clic de lectura sobra (WAITPLAY CLICK o el botón ya cubren input);
                     // forzar clic deja negro muerto tras el logo / tras Iniciar.
                     //
                     // Tras `{PAUSE}`+`TEXTCLEAR` el `cur` ya se flusheó en el Event: un
-                    // `<PG>` con `cur` vacío no debe pedir otro clic (**experimento**
-                    // test2 `0000007A`: el último `<PG>` tras STOPSND dejaba el cuadro
+                    // `<PG>` con `cur` vacío no debe pedir otro clic (**experimento** H10:
+                    // el último `<PG>` tras STOPSND dejaba el cuadro
                     // vacío esperando un clic fantasma).
                     brk::PAGE if !has_chars => {
                         flush(&mut plan, &mut cur);
@@ -1415,7 +1415,7 @@ mod tests {
         assert!(!vm.play_of("msg").is_some());
     }
 
-    /// test2 novel: `{PAUSE}` + `TEXTCLEAR` (ONNOTIFY, sin `\x01`) + `<PG>`, luego
+    /// Novela LiveNovel: `{PAUSE}` + `TEXTCLEAR` (ONNOTIFY, sin `\x01`) + `<PG>`, luego
     /// otro `<PG>` tras STOPSND. El segundo no debe dejar clic con el cuadro vacío.
     #[test]
     fn trailing_page_after_pause_does_not_phantom_click() {

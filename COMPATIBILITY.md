@@ -82,7 +82,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 8–10 | BoxNew / ImgNew / MesNew | `ok` | Crear componentes | `step_obj_new`. Imagen y tile: `PR_BRIGHTNESS` 0 igual, 255 blanco, -255 negro | `graphic.html` 明るさ |
 | 11 | Timer | `ok` | Temporizador | Timers + eventos | |
 | 12 | Movie | `ok` / `partial` | Vídeo | ffmpeg; decode **nativo** (I1) | Manual size; **interpretación** latencia |
-| 13 | Flip | `partial` | Placa + wipe | Con targets: fundido y `Delete` solo de esos nombres. FL_OUT sin Delete → `back`; **experimento** test2 MESOFF/FACE→再生中: `SetProp VISIBLE=1` desarchiva el objeto y su descendencia (sin Flip de entrada). Targets vacío: **interpretación** placa (I12), una pasada, sin framebuffer extra. NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6) | `graphic.html` / novel MESOFF |
+| 13 | Flip | `partial` | Placa + wipe | Con targets: fundido y `Delete` solo de esos nombres. FL_OUT sin Delete → `back`; **experimento** (H3) MESOFF/FACE→再生中: `SetProp VISIBLE=1` desarchiva el objeto y su descendencia (sin Flip de entrada). Targets vacío: **interpretación** placa (I12), una pasada, sin framebuffer extra. NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6) | `graphic.html` / novel MESOFF |
 | 14 | Calc | `ok` | Evaluar expresión | | |
 | 15–16 | VarNew / VarDel | `ok` | Vars + Scope | Scope 0\|3 → globals; 1\|2 locals | Reset conserva scope 3 |
 | 17–18 | GetProp / SetProp | `ok` | Props objeto | Missing SetProp = no-op LM | |
@@ -142,7 +142,7 @@ Dispatch: `system_text_event` en `src/vm/text_hist.rs`. Manual: `docs/livenovel/
 | QUAKE / STOPQUAKE | `ok` / `partial` | Temblor Q/W/B | Offset dibujo | Orden args **no confirmado**; Q = **I9** |
 | *(otros)* | `unimpl` | — | `unimpl:text sysevent` | Inventariar con `--trace` |
 
-`<PG>` / `<PS>`: glifos Return, no sysevent. Con diálogo (`Glyph::Char`): clic según `script.html`. Coalesce `<PS>`/`{PAUSE}`+`<PG>`: fusión **inventada**. `<PG>` con `cur` vacío (p. ej. tras `{PAUSE}`/`TEXTCLEAR` o STOPSND): solo Clear, sin clic — **experimento** test2 `0000007A`. Sin caracteres en todo el TextIns (logo `0000009C`): `<PG>` solo Clear — **experimento** (si no, negro + clic muerto tras logo/Iniciar).
+`<PG>` / `<PS>`: glifos Return, no sysevent. Con diálogo (`Glyph::Char`): clic según `script.html`. Coalesce `<PS>`/`{PAUSE}`+`<PG>`: fusión **inventada**. `<PG>` con `cur` vacío (p. ej. tras `{PAUSE}`/`TEXTCLEAR` o STOPSND): solo Clear, sin clic — **experimento** (H10). Sin caracteres en todo el TextIns (logo): `<PG>` solo Clear — **experimento** (si no, negro + clic muerto tras logo/Iniciar).
 
 ---
 
@@ -232,14 +232,14 @@ Cruce de este índice y de [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERF
 |----|----------|---------------|--------------------------------------------------|
 | H1 | `Call` publica `Param1..N` (**provisional**, W9) | Nombres que lee la página llamada | Otros nombres, o solo la pila: esos `ParamN` dejan de valer |
 | H2 | `Wait` 0 tiene un edge distinto (**no confirmado**) | `step_wait` | Cambia el frame de espera o el salto de la condición |
-| H3 | `SetProp VISIBLE=1` desarchiva el objeto y su descendencia, sin Flip de entrada. **Experimento** test2, MESOFF/FACE → 再生中 | Archivo en ese Flip | No copiarlo a otro objeto que escriba `VISIBLE` hasta repetir el caso |
+| H3 | `SetProp VISIBLE=1` desarchiva el objeto y su descendencia, sin Flip de entrada. **Experimento** en un juego LiveNovel, MESOFF/FACE → 再生中 | Archivo en ese Flip | No copiarlo a otro objeto que escriba `VISIBLE` hasta repetir el caso |
 | H4 | Cinema sin LCM usa milisegundos fijos (**temporal**, W3) | Duración del placeholder | Con LCM usable, el clip y el tiempo sustituyen el placeholder |
 | H5 | `GameSave` guarda globals + page/label, no la escena | Qué restaura `GameLoad` | Un snapshot devolvería los objetos |
 | H6 | `IFDEF` / `IFNDEF` / `ENDIF` en el LSB son no-op (**no confirmado**, W7) | Esas ramas se ejecutan | Si el runtime los honra, la rama cortada deja de correr |
 | H7 | `CREATECG` / `CHANGECG` / `DELETECG`: subset de args; el resto **sin verificar** | Color, alineación y lo no leído | Esos args pasarían a pintar o colocar el CG |
 | H8 | Orden de args de `TEXTSPD` **no confirmado** | Qué número es TIME y cuál ABSOLUTE | El ritmo cambia si el orden está cruzado. La curva 60 cps / ×3 es I8 y se queda |
 | H9 | Orden de args de `QUAKE` **no confirmado** | Qué valor es Q, W o B | El tipo de temblor se asigna a otro eje. El hash de Q es I9 y se queda |
-| H10 | `<PS>` / `{PAUSE}` + `<PG>` se funden (**inventado**). `<PG>` con `cur` vacío solo hace Clear (**experimento** test2 `0000007A`). TextIns sin caracteres: `<PG>` solo Clear (**experimento** `0000009C`) | Clic de página frente a Clear | Si el original pide clic, el logo o el mensaje esperan o avanzan solos |
+| H10 | `<PS>` / `{PAUSE}` + `<PG>` se funden (**inventado**). `<PG>` con `cur` vacío solo hace Clear (**experimento**, tras STOPSND). TextIns sin caracteres: `<PG>` solo Clear (**experimento**, logo y título) | Clic de página frente a Clear | Si el original pide clic, el logo o el mensaje esperan o avanzan solos |
 | H11 | `SYSMENU*` / `SAVELOAD*` solo lanzan ONNOTIFY (W16) | Permiso de menú y de save | Si además baja un flag, el menú seguiría abriéndose con solo el notify |
 | H12 | Orden de ids `WP_*` tomado de `graphic.html` (**no confirmado**, W17) | Qué wipe es WHITE, BLACK o FLASH | Un id mal leído cambia el overlay. El resto sigue en el fundido de I6 |
 | H13 | `TextIns` sin caja usa un stand-in (**inventado**, W8) | Dónde cae el texto | Si el novel system no crea caja, ese texto no debería pintarse |
@@ -249,7 +249,7 @@ Cruce de este índice y de [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERF
 | H17 | `LEFT` ausente centra el menú (**inventado**). Posición omitida: **no confirmado** | Dónde aparece el menú | Si la omisión es el origen del padre, el menú pasa a esa esquina |
 | H18 | Troceado, orientación y escala de `SCROLLSOURCE`: **no confirmado**. Hit-test de flecha, página y grip: sin hacer. `OT_HORIZONTAL` / `OT_VERTICAL` del Scrollbar no mandan el `SCROLLSOURCE` del menú | Clic en la barra y el eje del menú | Confirmar el troceado mueve el grip. Confirmar el eje tumba la barra de un menú horizontal |
 | H19 | Una lista Save/Load midió 140×20 y se partió en siete celdas de 20×20. Un solo asset | Solo esa imagen | Reusarlo en otro menú parte mal la tira |
-| H20 | Layout `.lft` leído en versión `100` de un testgame (**no confirmado** fuera). U+0020 ausente: el avance del espacio se sintetiza (**inventado**, W12) | Glifos y el ancho del espacio | Otra versión, o un espacio real en el `.lft`, cambian el avance |
+| H20 | Layout `.lft` leído en versión `100` de un solo juego (**no confirmado** fuera). U+0020 ausente: el avance del espacio se sintetiza (**inventado**, W12) | Glifos y el ancho del espacio | Otra versión, o un espacio real en el `.lft`, cambian el avance |
 | H21 | Los exports de `live.dll` son la superficie nativa de media. Mapearlos 1:1 a comandos LSB o a nombres de prop: **no confirmado** | Qué símbolo atendería un comando de media | Ese mapeo cambiaría el dispatch. Hoy no se hace |
 
 ## Mantenimiento

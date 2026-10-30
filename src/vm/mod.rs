@@ -3628,9 +3628,9 @@ mod tests {
             },
         )
         .unwrap();
-        // Tras ObjDel, GetProp(VISIBLE) es false → __vis oculta el 土台 hasta ONPLAYING.
+        // Tras ObjDel, GetProp(VISIBLE) es false → __vis oculta el objeto hasta ONPLAYING.
         assert_eq!(
-            vm.get_prop("メッセージボックス土台", Prop::VISIBLE),
+            vm.get_prop("deleted-object", Prop::VISIBLE),
             Value::Bool(false)
         );
         assert_eq!(
@@ -4306,7 +4306,7 @@ mod tests {
 
     #[test]
     fn timer_falls_back_to_onnotify_when_onplayend_is_absent() {
-        // LiveNovel (testgame): Timer solo define ONNOTIFY (男台詞/女台詞呼び出し).
+        // LiveNovel: un Timer puede definir solo ONNOTIFY.
         let path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
         let data = GameData::open(&path).unwrap();
@@ -4327,16 +4327,16 @@ mod tests {
         )
         .unwrap();
         vm.scene.create(
-            "男台詞呼び出し",
+            "tick-timer",
             Kind::Other(CmdType::Timer as u8),
             HashMap::from([
                 (Prop::DELAY, Value::Int(0)),
-                (Prop::ONNOTIFY, Value::Str("00000071.lsc:000002B3".into())),
+                (Prop::ONNOTIFY, Value::Str("00000001.lsc:00000010".into())),
             ]),
         );
         vm.now = 10.0;
         vm.timers.insert(
-            "男台詞呼び出し".into(),
+            "tick-timer".into(),
             TimerState {
                 due_at: 10.0,
                 paused_at: None,
@@ -4347,7 +4347,7 @@ mod tests {
 
         assert_eq!(vm.queue.len(), 1);
         assert_eq!(vm.queue[0].prop, Prop::ONNOTIFY);
-        assert_eq!(vm.queue[0].script, "00000071.lsc:000002B3");
+        assert_eq!(vm.queue[0].script, "00000001.lsc:00000010");
         assert!(vm.timers.is_empty());
     }
 

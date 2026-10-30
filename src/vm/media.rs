@@ -529,9 +529,9 @@ impl Vm {
 
     /// Timer: al vencer PR_DELAY (una vez salvo PR_REPEAT) dispara el callback.
     ///
-    /// LiveMaker clásico / fixtures usan `ONPLAYEND`; scripts LiveNovel del juego de
-    /// prueba cuelgan el tick en `ONNOTIFY` (p. ej. 男台詞呼び出し → TextIns). Si
-    /// ambos existen se prefiere `ONPLAYEND`.
+    /// LiveMaker clásico / fixtures usan `ONPLAYEND`; algunos scripts LiveNovel
+    /// cuelgan el tick en `ONNOTIFY` (que lanza un TextIns). Si ambos existen se
+    /// prefiere `ONPLAYEND`.
     pub(crate) fn update_timers(&mut self) {
         let names: Vec<String> = self.timers.keys().cloned().collect();
         let mut due = Vec::new();

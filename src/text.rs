@@ -101,9 +101,8 @@ pub(crate) fn outline_size_scale_for_fallback(_family: &str) -> f32 {
 /// Sustituto de contorno para un nombre del motor. `None` si no está en la lista
 /// (entonces puede usarse un `.lft` del juego, o Noto).
 ///
-/// Nombres vistos en los scripts: `ＭＳ ゴシック`, `ＭＳ Ｐゴシック` y, en testgame,
-/// `JKゴシックM` (`女台詞`, `00000071.lsb`). Ese último es el nombre interno de
-/// `font0.lft`. El formato no está en el manual y el raster no se usa.
+/// Nombres vistos en los scripts: `ＭＳ ゴシック`, `ＭＳ Ｐゴシック` y nombres internos
+/// de fuentes `.lft` (H20). El formato no está en el manual y el raster no se usa.
 /// Ume publica el mismo cuadratín que MS Gothic y trae latino (`U+0020–U+007E`
 /// y `U+00A0–U+017F`), no solo kana.
 fn outline_family_query(family: &str) -> Option<&'static str> {

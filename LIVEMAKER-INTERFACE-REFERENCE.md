@@ -66,8 +66,8 @@ Do not promote a single game’s script or layout into these slots.
 ## Tipografía embebida LivePixelFont (`.lft`)
 
 - Manual LiveNovel / pylivemaker: **sin especificación** del contenedor `.lft`.
-- testgame: entrada VF `font0.lft`, magic `LivePixelFont\0`, nombre interno CP932 `JKゴシックM`. `StatusFontName` del `.lpb` sigue siendo `ＭＳ ゴシック` (sistema); el `.lft` es recurso aparte y los scripts ponen `FONTNAME` = `JKゴシックM`. **experimento** (bytes + LSB).
-- Layout inferido (solo testgame; **no confirmado** fuera de version `100`, **H20**):
+- Un juego LiveNovel: entrada VF `*.lft`, magic `LivePixelFont\0`, nombre interno CP932. `StatusFontName` del `.lpb` sigue siendo `ＭＳ ゴシック` (sistema); el `.lft` es recurso aparte y los scripts ponen `FONTNAME` = su nombre interno. **experimento** (bytes + LSB).
+- Layout inferido (un solo juego; **no confirmado** fuera de version `100`, **H20**):
   - cabecera: magic + `u32` versión + tamaños zlib-dir / bitmaps + nombre[64] + métricas[232]
   - directorio zlib: registros de 18 B (`u16` código CP932 BE, `w/h`, `i16` bearings, `u16` advance, `u16` 0, `u32` offset)
   - bitmaps crudos 8 bpp, stride = `align4(w)`
@@ -78,7 +78,7 @@ Do not promote a single game’s script or layout into these slots.
 
 - Exported `liveOgg*` / `liveVideo*` / `liveWmp*` / `liveScreen*` symbols: **fuente primaria** for *native media DLL surface only* (see `docs/live-dll-strings.txt`).
 - Mapping those exports 1:1 onto LSB Media commands or script property names: **no confirmado** unless cited from `docs/livenovel/media.html` or experiment. **H21**
-- testgame and test2 `live.dll`: identical (`sha256` in the strings file).
+- Dos juegos distintos traen el mismo `live.dll` (mismo `sha256`).
 
 ## Maintenance
 
