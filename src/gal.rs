@@ -1707,12 +1707,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "necesita LIVENYAN_TEST_GAME_DIR (carpeta data de un juego LiveNovel)"]
     fn novel_btn_gal_colorkey_is_transparent() {
-        let Ok(data) =
-            std::fs::read("/home/gemu/Desktop/testgame/data/ノベルシステム/画像/btn.gal")
-        else {
-            return;
-        };
+        let dir = std::env::var("LIVENYAN_TEST_GAME_DIR").expect("LIVENYAN_TEST_GAME_DIR");
+        let data = std::fs::read(std::path::Path::new(&dir).join("ノベルシステム/画像/btn.gal"))
+            .expect("ノベルシステム/画像/btn.gal en LIVENYAN_TEST_GAME_DIR");
         let img = decode_any(&data).expect("btn.gal");
         let mut transparent = 0usize;
         let mut leftover_key = 0usize;

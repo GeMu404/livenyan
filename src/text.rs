@@ -649,7 +649,6 @@ mod tests {
     use crate::lft::{PixelFontCatalog, build_synthetic_lft};
     use crate::scene::TextItem;
     use std::collections::HashMap;
-    use std::path::Path;
 
     #[test]
     fn font_size_matches_requested_cell_height() {
@@ -687,12 +686,15 @@ mod tests {
         assert_eq!(outline_size_scale_for_fallback("Noto Sans CJK JP"), 1.0);
     }
 
+    fn test_font() -> std::path::PathBuf {
+        std::env::var_os("LIVENYAN_TEST_FONT").expect("LIVENYAN_TEST_FONT").into()
+    }
+
     #[test]
+    #[ignore = "necesita LIVENYAN_TEST_FONT (ume-tgo4.ttf de Ume Gothic)"]
     fn jk_gothic_skips_the_embedded_pixel_font() {
-        let path = Path::new("/home/gemu/.local/share/fonts/ume/ume-tgo4.ttf");
-        if !path.is_file() {
-            return;
-        }
+        let path = test_font();
+        let path = path.as_path();
         let (name, _, _) = encoding_rs::SHIFT_JIS.encode("JKゴシックM");
         let cov = [255u8; 16];
         let bytes = build_synthetic_lft(&name, &[(u16::from(b'A'), 4, &cov)]);
@@ -702,7 +704,8 @@ mod tests {
         catalog.insert_parsed(font);
         let mut renderer = TextRenderer::load_family("JKゴシックM", &catalog, None).expect("ume");
         assert!(!renderer.is_pixel_font());
-        assert!(renderer.face().contains("ume-tgo4"));
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        assert!(renderer.face().contains(stem));
         let latin = renderer.glyph('A', renderer.size_for_cell_height(16.0));
         let kana = renderer.glyph('あ', renderer.size_for_cell_height(16.0));
         assert!(latin.advance > 1.0);
@@ -710,11 +713,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "necesita LIVENYAN_TEST_FONT (ume-tgo4.ttf de Ume Gothic)"]
     fn ume_em_matches_the_script_height() {
-        let path = Path::new("/home/gemu/.local/share/fonts/ume/ume-tgo4.ttf");
-        if !path.is_file() {
-            return;
-        }
+        let path = test_font();
+        let path = path.as_path();
         let mut font = TextRenderer::load(path, 0).expect("ume");
         let height = 16.0;
         let glyph = font.glyph('大', font.size_for_cell_height(height));
@@ -722,11 +724,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "necesita LIVENYAN_TEST_FONT (ume-tgo4.ttf de Ume Gothic)"]
     fn pen_after_wraps_like_the_raster() {
-        let path = Path::new("/home/gemu/.local/share/fonts/ume/ume-tgo4.ttf");
-        if !path.is_file() {
-            return;
-        }
+        let path = test_font();
+        let path = path.as_path();
         let mut font = TextRenderer::load(path, 0).expect("ume");
         let px = 16.0;
         let advance = font.glyph('大', px).advance;

@@ -149,6 +149,14 @@ python3 tools/gen_fixtures.py tests/fixtures
 cargo test
 ```
 
+Algunos tests necesitan recursos que no se versionan y están marcados `#[ignore]`;
+se ejecutan con `cargo test -- --ignored` definiendo:
+
+| Variable | Contenido |
+|---|---|
+| `LIVENYAN_TEST_GAME_DIR` | carpeta `data` de un juego LiveNovel (lee `ノベルシステム/画像/btn.gal`) |
+| `LIVENYAN_TEST_FONT` | ruta a `ume-tgo4.ttf` (Ume Gothic) |
+
 ## Licencia
 
 GPL-3.0-or-later (derivado de pylivemaker, GPL-3.0). Ver `LICENSE`.
