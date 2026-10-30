@@ -872,6 +872,7 @@ fn apply_present_scale_hint(canvas: &Canvas<Window>, present_scale: ScaleFilter)
     } else {
         sdl3::sys::surface::SDL_SCALEMODE_LINEAR
     };
+    // SAFETY: canvas.raw() es el renderer vivo de `canvas`; la llamada no retiene el puntero.
     unsafe {
         let _ = sdl3::sys::render::SDL_SetDefaultTextureScaleMode(canvas.raw(), mode);
     }
@@ -1014,6 +1015,8 @@ pub fn run(
     if !cfg.window.renderer.is_empty() {
         // probar el driver antes: si no funciona en este sistema, avisar y usar el automático
         let name = std::ffi::CString::new(cfg.window.renderer.as_str()).unwrap_or_default();
+        // SAFETY: `window` sigue vivo y `name` es un CString válido durante la llamada; el
+        // renderer de prueba se destruye aquí mismo y no escapa del bloque.
         let ok = unsafe {
             let r = sdl3::sys::render::SDL_CreateRenderer(window.raw(), name.as_ptr());
             if r.is_null() {
@@ -1034,6 +1037,8 @@ pub fn run(
         }
     }
     let mut canvas: Canvas<Window> = window.into_canvas();
+    // SAFETY: el renderer de `canvas` está vivo; SDL devuelve una cadena estática terminada
+    // en NUL (o NULL, que se comprueba) y se copia antes de salir.
     let rname = unsafe {
         let p = sdl3::sys::render::SDL_GetRendererName(canvas.raw());
         if p.is_null() {
@@ -1057,6 +1062,7 @@ pub fn run(
             sdl3::sys::render::SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )
         .map_err(|e| e.to_string())?;
+    // SAFETY: canvas.raw() es el renderer vivo de `canvas`; no se retiene el puntero.
     let mut vsync_active = unsafe {
         sdl3::sys::render::SDL_SetRenderVSync(
             canvas.raw(),
@@ -1499,6 +1505,7 @@ pub fn run(
                                 }
                                 let requested_vsync = cfg.window.vsync
                                     || interpolation_mode != InterpolationMode::Off;
+                                // SAFETY: igual que el SDL_SetRenderVSync inicial.
                                 vsync_active = unsafe {
                                     sdl3::sys::render::SDL_SetRenderVSync(
                                         canvas.raw(),
