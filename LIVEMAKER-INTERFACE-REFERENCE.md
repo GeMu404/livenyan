@@ -1,67 +1,59 @@
-# LiveMaker interface reference
+# Referencia de interfaz LiveMaker
 
-Working reference for LiveMaker **interface** behavior (menu, LFT, media surface) in LiveNyan.
+Referencia de trabajo del comportamiento de **interfaz** de LiveMaker (menú, LFT, media) en livenyan.
 
-For the full command/tag/workaround inventory (what is implemented, how, expected vs actual, pending), see **[`COMPATIBILITY.md`](COMPATIBILITY.md)** first. Findings that can still move behavior are **H15–H21** in that file’s hallazgos table; cite the ID before copying a property onto another object.
+El inventario completo de comandos, tags y apaños (qué está hecho, cómo, esperado frente a real,
+pendiente) está en **[`COMPATIBILITY.md`](COMPATIBILITY.md)**. Lo que aún puede mover comportamiento
+son las entradas **H15–H24** de su tabla de hallazgos; cita el ID antes de copiar una propiedad a
+otro objeto.
 
-**Do not invent semantics.** Every claim below is tagged by source tier.
+**No inventar semántica.** Cada afirmación lleva su nivel de fuente; los niveles y cómo etiquetar
+están en [`COMPATIBILITY.md` → Cómo etiquetar un cambio](COMPATIBILITY.md#cómo-etiquetar-un-cambio).
 
-## Source tiers
+## Fuentes primarias (rutas)
 
-| Tier | Meaning | Use when implementing |
+| Fuente | Ruta / URL | Notas |
 |---|---|---|
-| **fuente primaria** | Documented in the LiveNovel manual (local mirror) and/or named in pylivemaker enums that match the manual. | May drive behavior and tests. |
-| **no confirmado** | Reasonable inference, single-game observation, or manual silence. | Must not become “how LiveMaker works” without a citation upgrade. |
-| **interpretación livenyan** | Deliberate modern/optimal divergence (latency, host fonts, SDL present, …). | Document *why*; not a fidelity bug. See `COMPATIBILITY.md`. |
-| **inventado en livenyan** | Gap-fill so scripts keep running (fade fallback, stub `true`, …). | Labeled debt or interim; do not back-port into the manual as LM semantics. |
-| **temporal** | Explicit stopgap with a replacement path. | Replace when the real path exists. |
+| Manual LiveNovel (local) | [`docs/livenovel/`](docs/livenovel/README.md) | Copia de `_static/LiveNovel/` de pylivemaker; empezar por `topics.html` / `interface.html`. |
+| Manual LiveNovel (upstream) | [pylivemaker `docs/_static/LiveNovel`](https://github.com/pmrowla/pylivemaker/tree/master/docs/_static/LiveNovel) | El mismo árbol; ReadTheDocs lo publica en `_static/LiveNovel/`. |
+| Enums de propiedades / comandos | [pylivemaker `lsb/core.py` `PropertyType`](https://github.com/pmrowla/pylivemaker/blob/ceeb12911c571fe6da77107bb0eaf7eb29594612/src/livemaker/lsb/core.py) | Ids numéricos LSB (`PR_ROWCOUNT`, …), no semántica. |
+| Exports / cadenas de `live.dll` | [`docs/live-dll-strings.txt`](docs/live-dll-strings.txt) | Solo API de media. Esta DLL **no** tiene GetProp/SetProp / `ROWCOUNT` / etc. |
 
-livenyan is **not** a 1:1 Windows LiveMaker clone; it aims at content compatibility with a modern runtime. Ambiguous *script* semantics still need **manual** / **strings** / **experiment**. Pipeline/UX choices use **interpretación livenyan**. See `.cursor/rules/livenyan.mdc` and `COMPATIBILITY.md`.
+## Menú — fuente primaria
 
-## Primary sources (paths)
+De `docs/livenovel/interface.html` (secciones Menu / Scrollbar):
 
-| Source | Path / URL | Notes |
-|---|---|---|
-| LiveNovel manual (local) | [`docs/livenovel/`](docs/livenovel/README.md) | Mirror of pylivemaker `_static/LiveNovel/`; start at `topics.html` / `interface.html`. |
-| LiveNovel manual (upstream) | [pylivemaker `docs/_static/LiveNovel`](https://github.com/pmrowla/pylivemaker/tree/master/docs/_static/LiveNovel) | Same tree; ReadTheDocs `_static/LiveNovel/` is the hosted view. |
-| Property / command enums | [pylivemaker `lsb/core.py` `PropertyType`](https://github.com/pmrowla/pylivemaker/blob/ceeb12911c571fe6da77107bb0eaf7eb29594612/src/livemaker/lsb/core.py) | Numeric LSB ids (`PR_ROWCOUNT`, …), not prose semantics. |
-| `live.dll` exports/strings | [`docs/live-dll-strings.txt`](docs/live-dll-strings.txt) | Media helper API only. **No** GetProp/SetProp / `ROWCOUNT` / etc. in this DLL. |
+- `ROWCOUNT`: filas visibles a la vez. **fuente primaria**
+- `TOPINDEX`: fila desde la que se empieza a mostrar. **fuente primaria** (origen del índice y fuera de rango: **no confirmado**, **H15**)
+- `SCROLLSOURCE`: imagen de la barra del menú; el manual lista las partes en orden: arriba, arriba pulsado, abajo, abajo pulsado, fondo, fondo pulsado, grip. **fuente primaria**
+- `X` / `Y` del menú: relativos al padre, no coordenadas absolutas de pantalla. **fuente primaria**
+- Alineación horizontal (`HA_CENTER`): alineación del texto dentro del menú, no «centrar el menú en pantalla». **fuente primaria**
 
-## Menu — fuente primaria
+## Menú — no confirmado (el manual calla o se queda corto)
 
-From `docs/livenovel/interface.html` (Menu / Scrollbar sections):
+- Ancho automático / significado de `WIDTH` ausente o cero. **H16**
+- Centrado automático cuando falta la posición. **H17**
+- Colocación, orientación y escala de las partes de `SCROLLSOURCE` (frente al componente Scrollbar). **H18**
+- Origen de `TOPINDEX` (0 o 1) y comportamiento fuera de rango. **H15**
+- Que las reglas `OT_HORIZONTAL` / `OT_VERTICAL` del Scrollbar manden en el `SCROLLSOURCE` del menú. **H18**
 
-- `ROWCOUNT` — number of rows visible at once. **fuente primaria**
-- `TOPINDEX` — which row to start displaying from. **fuente primaria** (index origin / OOR: **no confirmado**, **H15**)
-- `SCROLLSOURCE` — image for the menu scrollbar; manual lists parts in order: up, pressed up, down, pressed down, background, pressed background, grip. **fuente primaria**
-- Menu `X` / `Y` — offsets relative to the parent, not absolute screen coordinates. **fuente primaria**
-- Horizontal alignment (`HA_CENTER`) — text alignment inside the menu; not “center the menu widget on screen”. **fuente primaria**
+No subir a estas casillas el script o el layout de un solo juego.
 
-## Menu — no confirmado (manual silent or incomplete)
+## Menú — inventado en livenyan
 
-- Automatic menu width / meaning of missing or zero `WIDTH`. **H16**
-- Automatic centering when position is omitted. **H17**
-- Placement, orientation, and scaling of a Menu’s `SCROLLSOURCE` parts (vs the separate Scrollbar component). **H18**
-- `TOPINDEX` origin (0 vs 1) and out-of-range behavior. **H15**
-- That Scrollbar’s `OT_HORIZONTAL` / `OT_VERTICAL` rules control a Menu’s `SCROLLSOURCE`. **H18**
+- Índices de opción base 0; `TOPINDEX` acotado a las opciones disponibles (con tests). **H15**
+- Si el `WIDTH` del script no es positivo: medir el ancho intrínseco **antes** de `ONOPENING` con las etiquetas y la fuente elegida (márgenes, borde, barra del menú paginado) para que `GetProp(Sender, WIDTH)` en la apertura vea un valor. **H16**
+- Si la fuente no carga: ancho de reserva `native_menu_size` (~60 % del ancho lógico).
+- Sin `LEFT`: centrar el menú con el ancho medido o por defecto; un `LEFT` explícito es el borde izquierdo (relativo al padre). **H17**
+- Imagen de lista Save/Load de 140×20 vista en los logs de un juego → siete celdas de 20×20 solo para ese asset; no es universal. **H19**
+- Sustituto de fuente: Noto Sans Mono CJK JP cuando falta `ＭＳ ゴシック` (métricas casi monoespaciadas); sigue siendo una aproximación.
+- Barra de scroll: tira vertical a la derecha; tamaño del grip según la proporción de filas visibles; teclado y rueda hechos; clic en flecha, página y grip sin hacer. **H18**
+- Comparación del usuario: en el original la lista Save/Load sale centrada con la barra a la derecha; cuadra con lo anterior, no es una regla nueva del manual.
 
-Do not promote a single game’s script or layout into these slots.
+## Componente Scrollbar (distinto del SCROLLSOURCE del menú)
 
-## Menu — inventado en livenyan
-
-- Zero-based choice indices; clamp `TOPINDEX` to available choices (keep tested). **H15**
-- If script `WIDTH` is not positive: measure intrinsic width **before** `ONOPENING` from labels + selected font (margins, border, paged-menu scrollbar) so `GetProp(Sender, WIDTH)` in opening scripts sees a value. **H16**
-- Font load failure → fallback width `native_menu_size` (~60% of logical screen width).
-- Missing `LEFT` → center the measured/default-width menu; explicit `LEFT` stays left edge (parent-relative). **H17**
-- Save/Load list image observed 140×20 in one game’s debug logs → seven 20×20 cells for that asset only; not universal. **H19**
-- Font substitute: prefer Noto Sans Mono CJK JP when `ＭＳ ゴシック` is missing (monospace-ish metrics); still an approximation.
-- Scrollbar renderer: vertical strip on the right; grip size from visible-row ratio; keyboard + wheel implemented; arrow/page/grip mouse hit-testing not established. **H18**
-- User comparison: original Save/Load list centered with scrollbar on the right — consistent with scripts/centering choice above, not a new manual rule.
-
-## Scrollbar component (separate from Menu SCROLLSOURCE)
-
-- Manual: `OT_HORIZONTAL` / `OT_VERTICAL`; parent-relative `X` / `Y`. **fuente primaria**
-- Equating those rules with Menu `SCROLLSOURCE` layout: **no confirmado** / do not assume. **H18**
+- Manual: `OT_HORIZONTAL` / `OT_VERTICAL`; `X` / `Y` relativos al padre. **fuente primaria**
+- Equiparar esas reglas con el layout de `SCROLLSOURCE` del menú: **no confirmado**; no suponerlo. **H18**
 
 ## Tipografía embebida LivePixelFont (`.lft`)
 
@@ -76,14 +68,14 @@ Do not promote a single game’s script or layout into these slots.
 
 ## Media / `live.dll`
 
-- Exported `liveOgg*` / `liveVideo*` / `liveWmp*` / `liveScreen*` symbols: **fuente primaria** for *native media DLL surface only* (see `docs/live-dll-strings.txt`).
-- Mapping those exports 1:1 onto LSB Media commands or script property names: **no confirmado** unless cited from `docs/livenovel/media.html` or experiment. **H21**
+- Símbolos exportados `liveOgg*` / `liveVideo*` / `liveWmp*` / `liveScreen*`: **fuente primaria** solo de la *superficie nativa de la DLL de media* (ver `docs/live-dll-strings.txt`).
+- Mapear esos exports 1:1 a comandos Media del LSB o a nombres de propiedad: **no confirmado** salvo cita de `docs/livenovel/media.html` o experimento. **H21**
 - Dos juegos distintos traen el mismo `live.dll` (mismo `sha256`).
 
-## Maintenance
+## Mantenimiento
 
-Before changing menu geometry, scrollbar slicing, scrolling, or property defaults:
+Antes de cambiar geometría de menú, troceado de la barra, scroll o valores por defecto de propiedades:
 
-1. Check `docs/livenovel/` (relevant HTML) and this file.
-2. Tag the change as primaria / no confirmado / inventado. If it can still move behavior, add or cite an **H\*** in `COMPATIBILITY.md`.
-3. Prefer manual text or a controlled original-engine comparison; record uncertainty instead of inventing a spec.
+1. Mirar `docs/livenovel/` (el HTML que toque) y este archivo.
+2. Etiquetar el cambio (primaria / no confirmado / inventado). Si aún puede mover comportamiento, añadir o citar una **H\*** en `COMPATIBILITY.md`.
+3. Preferir el texto del manual o una comparación controlada con el motor original; anotar la duda en vez de inventar una especificación.
