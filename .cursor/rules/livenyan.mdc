@@ -30,6 +30,10 @@ Si hace falta verificar layout visual: wireframe. Si hace falta ver un asset gr�
 - Tras cambiar compatibilidad: actualizar `COMPATIBILITY.md`.
 - No desensamblar ni publicar binarios del juego; no copiar código de DLLs.
 
+## Commits y comentarios
+
+Seguir [`CONTRIBUTING.md`](CONTRIBUTING.md): commits en español, imperativo, `ámbito:` en minúsculas, ≤72 caracteres, un asunto por commit, cuerpo con el porqué y la cita H\*/I\*; sin trailers de coautoría. Sin comentarios genéricos ni banners; `// SAFETY:` en cada `unsafe`; `#[allow]` con motivo. Nunca subir contenido ni nombres de un juego concreto.
+
 ## Tokens y herramientas
 
 - Respuestas cortas; no rellenar con contexto obvio.
