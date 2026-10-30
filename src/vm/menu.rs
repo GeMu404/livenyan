@@ -237,6 +237,7 @@ impl Vm {
             log::warn!("PrevMenu {name}: {src:?} not found");
             return;
         };
+        let started = std::time::Instant::now();
         let parsed = data
             .read(&file)
             .map_err(|e| e.to_string())
@@ -248,6 +249,11 @@ impl Vm {
                 return;
             }
         };
+        log::info!(
+            "load prevmenu {file}: v{ver} {} buttons in {:.1} ms",
+            btns.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         let mut pm = PrevMenu::default();
         for (i, b) in btns.iter().enumerate() {
             let res = data.resolve_relative(&file, &b.src, IMAGE_EXTS);
@@ -433,7 +439,7 @@ mod tests {
 
         vm.choose(1);
 
-        assert!(matches!(vm.state, State::Running));
+        assert!(matches!(vm.state, State::Menu { .. }));
         assert_eq!(vm.lookup("selection"), Some(&Value::Str("second".into())));
         assert_eq!(vm.lookup("@SelStr"), Some(&Value::Str("second".into())));
         assert_eq!(

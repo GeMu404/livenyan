@@ -121,7 +121,7 @@ vertical), menús PrevMenu con miniaturas GAL animadas, botones GAL animados en 
 por defecto, clips WMV como componentes animados, sonido wav/ogg, decodificación en hilos con el primer fotograma listo antes de mostrar el clip
 y reproducción de pistas de imagen
 LiveCinema 108-112 (posición y opacidad animadas; clips de imagen sin rotación, escala ni recorte),
-conservación del último frame completo mientras se decodifican recursos de la escena siguiente,
+conservación del último frame hasta que decodifica la imagen de la escena siguiente (menús y overlays pueden entrar después),
 menús nativos básicos con posición, tipografía, colores y marcos definidos por las propiedades y
 manejadores del script; las funciones de estado de ítems aceptan índices numéricos y nombres,
 altura tipográfica de menús normalizada a las métricas de la fuente,

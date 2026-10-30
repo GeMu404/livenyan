@@ -8,7 +8,8 @@ use crate::lft::PixelFontCatalog;
 use crate::lsb::expr::{Env, Value, eval};
 use crate::lsb::names::Func;
 use crate::lsb::{CmdType, Command, LiveParser, Lsb, Param, Prop};
-use crate::scene::{Kind, Scene, TextItem, prop_of};
+pub use crate::scene::ROOT;
+use crate::scene::{Kind, Pending, Playback, Scene, TextItem, prop_of};
 use crate::text::TextRenderer;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -64,9 +65,6 @@ pub(crate) fn caption_char_width(c: char) -> f64 {
     if wide { 1.0 } else { 0.55 }
 }
 
-/// Nombre de la capa raíz (pantalla) en LiveMaker: el carácter 0x01. Siempre existe;
-/// sus hijos son de nivel superior.
-pub const ROOT: &str = "\u{1}";
 const VIDEO_EXTS: &[&str] = &[".wmv"];
 
 /// Eventos hacia el host (audio, vídeo…).
@@ -105,41 +103,6 @@ pub enum State {
         var: String,
     },
     Ended,
-}
-
-/// Elementos pendientes de la reproducción de texto de un objeto de mensaje.
-#[derive(Debug, Clone)]
-pub enum Pending {
-    Clear,
-    /// `already_read`: este TextIns ya se mostró (docs/livenovel/text.html, 再生開始).
-    Text {
-        items: Vec<TextItem>,
-        already_read: bool,
-    },
-    Click,
-    /// Evento en línea (TWdOpeEvent) -> ONNOTIFY.
-    Notify(String),
-}
-
-/// Reproducción de texto en curso de un objeto de mensaje (no bloquea al VM salvo Wait).
-#[derive(Debug, Clone, Default)]
-pub struct Playback {
-    plan: std::collections::VecDeque<Pending>,
-    cur: Vec<TextItem>,
-    pos: usize,
-    next: f64,
-    waiting_click: bool,
-    /// El TextIns ya se había mostrado (docs/livenovel/text.html, 再生開始:
-    /// `@ParamStr[0]` es 1 si está leído).
-    already_read: bool,
-    /// Efecto WAIT: el texto espera a que termine la animación/fundido de este objeto
-    /// (con plazo máximo de seguridad).
-    wait_for: Option<(String, f64)>,
-    /// `WAITPLAY … CLICK`: un clic corta la espera. Si el objetivo ya no se está
-    /// reproduciendo, no hay espera (evento.lsb no pide otro clic).
-    click_skips_wait: bool,
-    /// Última etiqueta/evento procesado (solo nombre, para depurar).
-    last_tag: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +180,16 @@ struct VideoFrame {
     pts_seconds: f64,
     duplicate: bool,
     sequence: u64,
+}
+
+/// Un reloj de medio por objeto. El placeholder, el LCM y el vídeo no conviven.
+enum Clock {
+    Video(VideoPlayback),
+    Cinema {
+        movie: Option<CinemaPlayback>,
+        /// Plazo de una pasada. `None` si repite, o si ese plazo ya disparó ONPLAYEND.
+        until: Option<f64>,
+    },
 }
 
 pub struct VideoFramePair<'a> {
@@ -306,6 +279,23 @@ pub struct Options {
     pub show_text: bool,
 }
 
+pub(crate) struct FlipPlan {
+    /// Se dejan de dibujar, pero el script sigue viéndolos.
+    park: Vec<String>,
+    /// Vuelven a la pasada de dibujo.
+    restore: Vec<String>,
+    /// Se borran al terminar la espera.
+    scrap: Vec<String>,
+    fade: Vec<String>,
+    /// Entra desde negro en la segunda mitad del tiempo.
+    fade_in: Vec<String>,
+    fade_out: bool,
+    /// La primera placa archivada es la base (el título) y se conserva.
+    remember_base: bool,
+    /// Frame de esa primera placa. Lo creado después se tira con `Delete`.
+    base_born: Option<u64>,
+}
+
 pub struct Vm {
     assets: Arc<Assets>,
     pub save_dir: PathBuf,
@@ -340,7 +330,6 @@ pub struct Vm {
     rng: u64,
     prefetched_upto: HashMap<String, usize>,
     pub skip: bool,
-    plays: HashMap<String, Playback>,
     pub queue: std::collections::VecDeque<ObjEvent>,
     yielded: bool,
     budget_location: Option<String>,
@@ -364,28 +353,19 @@ pub struct Vm {
     history_max: i64,
     history: VecDeque<HistoryEntry>,
     history_formats: HashMap<String, String>,
-    /// Propiedades de la capa raíz/pantalla ("\x01" en LiveMaker).
-    pub root_props: HashMap<u8, Value>,
     cabinets: HashMap<String, Vec<crate::scene::Obj>>,
     /// Temporizadores activos: objeto -> vencimiento y comienzo de pausa (ms).
     timers: HashMap<String, TimerState>,
-    /// Animaciones GAL: objeto -> (archivo, inicio ms o None si aún no cargó).
-    anims: HashMap<String, (String, Option<f64>)>,
     anim_clock: f64,
     /// Última caja que recibió TextIns (la "activa" para clics de pantalla).
     last_text_target: Option<String>,
-    /// Último estado (tipo y propiedades) de objetos borrados, por nombre.
-    graveyard: HashMap<String, (Kind, HashMap<u8, Value>)>,
     play_dbg: HashMap<String, f64>,
     /// Menús de previsualización (.lpm) por nombre de objeto.
     pub prevmenus: HashMap<String, PrevMenu>,
     /// LIVENYAN_CONDS=<parte del nombre de script>: condiciones a debug (también en GUI).
     cond_filter: Option<String>,
-    /// Cinema en reproducción (placeholder temporizado): objeto -> fin (ms).
-    cinemas: HashMap<String, f64>,
-    /// Películas LiveCinema 112 con pistas de imagen compatibles.
-    pub cinema_movies: HashMap<String, CinemaPlayback>,
-    videos: HashMap<String, VideoPlayback>,
+    /// Vídeo o cinema del objeto. Uno por nombre.
+    clocks: HashMap<String, Clock>,
     /// Estado de ítems de PrevMenu/menús, por índice o nombre.
     enabled: HashMap<(String, MenuItemKey), bool>,
     visible: HashMap<(String, MenuItemKey), bool>,
@@ -399,12 +379,17 @@ pub struct Vm {
     cond_seen: HashMap<(usize, usize, bool), u8>,
     /// Posiciones (script, pc) distintas ejecutadas: para detectar bucles sin progreso.
     pub visited: std::collections::HashSet<(usize, usize)>,
-    /// Objetos de mensaje creados implícitamente por TextIns: su texto espera al MesNew real.
-    placeholders: std::collections::HashSet<String>,
-    /// Objetos cuyo texto terminó sin manejador ONPLAYEND (se dispara si se asigna después).
-    ended_unnotified: std::collections::HashSet<String>,
-    /// Targets de Flip con Delete diferido hasta el fin de WaitUntil.
-    flip_pending_delete: Vec<String>,
+    /// Cambio de pantalla de un Flip, aplicado al terminar su espera.
+    flip_plan: Option<FlipPlan>,
+    /// Fundido de Flip: dos superficies, sin tocar ALPHA.
+    wipe_fade: Option<wipe::WipeFade>,
+    /// Placas archivadas (no hay un segundo framebuffer: una sola pasada).
+    plates: Vec<std::collections::HashSet<String>>,
+    /// Nombres de la primera placa. Al cubrir de nuevo no se archivan las sobras.
+    base_plate: Option<std::collections::HashSet<String>>,
+    /// Cohort de esa placa. Un `Delete` posterior borra lo nacido desde ahí.
+    base_born: Option<u64>,
+    frame_id: u64,
     /// `<TEXTSPD>` / `TXSP*`: ms/carácter y si es ABSOLUTE (script.html).
     /// Relativo: **interpretación** baseline [`TEXT_SPEED_BASELINE_CPS`].
     text_char_ms: HashMap<String, TextSpeedOverride>,
@@ -412,6 +397,22 @@ pub struct Vm {
     quake: Option<QuakeState>,
     /// Overlay Flip WHITE/BLACK/FLASH (**interpretación** I7).
     wipe_flash: Option<wipe::WipeFlash>,
+    /// Archivos virtuales `mem:` (calc.html). Se descartan al salir del proceso.
+    mem_files: HashMap<String, Vec<u8>>,
+    /// Última captura CPU (solo tras SaveScreen on-demand; no cada frame).
+    screen_rgba: Option<(u32, u32, Vec<u8>)>,
+    /// SaveScreen diferido hasta el próximo render de escena (evita readback continuo).
+    pub pending_savescreen: Option<SaveScreenRequest>,
+    /// Imágenes decodificadas desde mem:/save: (caché de draw; RefCell → draw con `&Vm`).
+    vfs_image_cache: std::cell::RefCell<HashMap<String, std::sync::Arc<crate::gal::Image>>>,
+}
+
+/// Pedido de captura calc.html SaveScreen (path + resample opcional).
+#[derive(Debug, Clone)]
+pub struct SaveScreenRequest {
+    pub path: String,
+    pub resample_w: u32,
+    pub resample_h: u32,
 }
 
 /// Override de velocidad de texto desde tags LiveNovel.
@@ -484,6 +485,158 @@ fn sample_animation_frames(
 }
 
 impl Vm {
+    fn play_of(&self, name: &str) -> Option<&Playback> {
+        self.scene.get(name)?.play.as_ref()
+    }
+
+    fn play_mut(&mut self, name: &str) -> Option<&mut Playback> {
+        self.scene.get_mut(name)?.play.as_mut()
+    }
+
+    fn ensure_play(&mut self, name: &str) -> Option<&mut Playback> {
+        let object = self.scene.get_mut(name)?;
+        if object.play.is_none() {
+            object.play = Some(Playback::default());
+        }
+        object.play.as_mut()
+    }
+
+    fn clear_play(&mut self, name: &str) {
+        if let Some(object) = self.scene.get_mut(name) {
+            object.play = None;
+        }
+    }
+
+    fn play_names(&self) -> Vec<String> {
+        self.scene
+            .live()
+            .filter(|object| object.play.is_some())
+            .map(|object| object.name.clone())
+            .collect()
+    }
+
+    fn anim_names(&self) -> Vec<String> {
+        self.scene
+            .live()
+            .filter(|object| object.anim.is_some())
+            .map(|object| object.name.clone())
+            .collect()
+    }
+
+    fn video_of(&self, name: &str) -> Option<&VideoPlayback> {
+        match self.clocks.get(name) {
+            Some(Clock::Video(video)) => Some(video),
+            _ => None,
+        }
+    }
+
+    fn video_mut(&mut self, name: &str) -> Option<&mut VideoPlayback> {
+        match self.clocks.get_mut(name) {
+            Some(Clock::Video(video)) => Some(video),
+            _ => None,
+        }
+    }
+
+    fn video_names(&self) -> Vec<String> {
+        self.clocks
+            .iter()
+            .filter_map(|(name, clock)| match clock {
+                Clock::Video(_) => Some(name.clone()),
+                Clock::Cinema { .. } => None,
+            })
+            .collect()
+    }
+
+    pub fn cinema(&self, name: &str) -> Option<&CinemaPlayback> {
+        match self.clocks.get(name) {
+            Some(Clock::Cinema {
+                movie: Some(movie), ..
+            }) => Some(movie),
+            _ => None,
+        }
+    }
+
+    fn cinema_mut(&mut self, name: &str) -> Option<&mut CinemaPlayback> {
+        match self.clocks.get_mut(name) {
+            Some(Clock::Cinema {
+                movie: Some(movie), ..
+            }) => Some(movie),
+            _ => None,
+        }
+    }
+
+    pub fn cinema_named(&self) -> impl Iterator<Item = (&str, &CinemaPlayback)> {
+        self.clocks.iter().filter_map(|(name, clock)| match clock {
+            Clock::Cinema {
+                movie: Some(movie), ..
+            } => Some((name.as_str(), movie)),
+            _ => None,
+        })
+    }
+
+    pub fn cinema_playbacks(&self) -> impl Iterator<Item = &CinemaPlayback> {
+        self.clocks.values().filter_map(|clock| match clock {
+            Clock::Cinema {
+                movie: Some(movie), ..
+            } => Some(movie),
+            _ => None,
+        })
+    }
+
+    fn cinema_names(&self) -> Vec<String> {
+        self.clocks
+            .iter()
+            .filter_map(|(name, clock)| match clock {
+                Clock::Cinema { movie: Some(_), .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn has_cinema_deadline(&self, name: &str) -> bool {
+        matches!(
+            self.clocks.get(name),
+            Some(Clock::Cinema { until: Some(_), .. })
+        )
+    }
+
+    fn one_shot_cinemas(&self) -> Vec<String> {
+        self.clocks
+            .iter()
+            .filter_map(|(name, clock)| match clock {
+                Clock::Cinema { until: Some(_), .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn clear_clock(&mut self, name: &str) {
+        self.clocks.remove(name);
+    }
+
+    /// Placeholder sin LCM, o plazo de una pasada sobre un cinema ya puesto.
+    fn set_cinema_deadline(&mut self, name: &str, until: f64) {
+        match self.clocks.get_mut(name) {
+            Some(Clock::Cinema { until: slot, .. }) => *slot = Some(until),
+            _ => {
+                self.clocks.insert(
+                    name.to_string(),
+                    Clock::Cinema {
+                        movie: None,
+                        until: Some(until),
+                    },
+                );
+            }
+        }
+    }
+
+    fn menu_still_modal(&self, name: &str) -> bool {
+        self.scene
+            .get(name)
+            .is_some_and(|object| object.kind == Kind::Menu && self.scene.effective_visible(object))
+    }
+
     pub fn new(assets: Arc<Assets>, entry: &str, opts: Options) -> Result<Self, String> {
         let script = assets
             .script(entry)
@@ -519,7 +672,6 @@ impl Vm {
             rng: 0x9E37_79B9_7F4A_7C15,
             prefetched_upto: HashMap::new(),
             skip: false,
-            plays: HashMap::new(),
             queue: Default::default(),
             yielded: false,
             budget_location: None,
@@ -539,21 +691,16 @@ impl Vm {
             history_max: 0,
             history: VecDeque::new(),
             history_formats: HashMap::new(),
-            root_props: HashMap::new(),
             cabinets: HashMap::new(),
             timers: HashMap::new(),
-            anims: HashMap::new(),
             anim_clock: 0.0,
             last_text_target: None,
-            graveyard: HashMap::new(),
             play_dbg: HashMap::new(),
             prevmenus: HashMap::new(),
             cond_filter: std::env::var("LIVENYAN_CONDS")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            cinemas: HashMap::new(),
-            cinema_movies: HashMap::new(),
-            videos: HashMap::new(),
+            clocks: HashMap::new(),
             enabled: HashMap::new(),
             visible: HashMap::new(),
             selected: HashMap::new(),
@@ -562,12 +709,19 @@ impl Vm {
             edges: HashMap::new(),
             cond_seen: HashMap::new(),
             visited: Default::default(),
-            placeholders: Default::default(),
-            ended_unnotified: Default::default(),
-            flip_pending_delete: Vec::new(),
+            flip_plan: None,
+            wipe_fade: None,
+            plates: Vec::new(),
+            base_plate: None,
+            base_born: None,
+            frame_id: 0,
             text_char_ms: HashMap::new(),
             quake: None,
             wipe_flash: None,
+            mem_files: HashMap::new(),
+            screen_rgba: None,
+            pending_savescreen: None,
+            vfs_image_cache: std::cell::RefCell::new(HashMap::new()),
         };
         vm.prefetch_from(&script, 0);
         vm.frames.push(Frame {
@@ -739,9 +893,11 @@ impl Vm {
     pub fn click(&mut self) {
         // 1) texto apareciendo -> mostrarlo entero
         let mut revealed = false;
-        let names: Vec<String> = self.plays.keys().cloned().collect();
+        let names = self.play_names();
         for n in &names {
-            let p = self.plays.get_mut(n).unwrap();
+            let Some(p) = self.play_mut(n) else {
+                continue;
+            };
             if p.pos < p.cur.len() {
                 let rest: Vec<TextItem> = p.cur[p.pos..].to_vec();
                 p.pos = p.cur.len();
@@ -769,11 +925,14 @@ impl Vm {
         // 2) esperando clic dentro del texto -> continuar
         let mut released = false;
         let mut released_names = Vec::new();
-        for (name, p) in self.plays.iter_mut() {
+        for name in self.play_names() {
+            let Some(p) = self.play_mut(&name) else {
+                continue;
+            };
             if p.waiting_click {
                 p.waiting_click = false;
                 released = true;
-                released_names.push(name.clone());
+                released_names.push(name);
             }
         }
         for name in &released_names {
@@ -785,7 +944,10 @@ impl Vm {
             return;
         }
         let mut skipped_wait = false;
-        for playback in self.plays.values_mut() {
+        for name in self.play_names() {
+            let Some(playback) = self.play_mut(&name) else {
+                continue;
+            };
             if playback.click_skips_wait && playback.wait_for.take().is_some() {
                 playback.click_skips_wait = false;
                 skipped_wait = true;
@@ -794,15 +956,15 @@ impl Vm {
         if skipped_wait {
             return;
         }
-        if !self.cinemas.is_empty() {
+        let one_shots = self.one_shot_cinemas();
+        if !one_shots.is_empty() {
             // clic salta los cinemas de una sola pasada; los que repiten (HUD) siguen
-            let names: Vec<String> = self.cinemas.keys().cloned().collect();
-            for name in names {
-                if let Some(end) = self.cinemas.get_mut(&name) {
-                    *end = self.now;
-                }
-                if let Some(movie) = self.cinema_movies.get_mut(&name) {
-                    movie.started_at = self.now - movie.duration_ms;
+            for name in one_shots {
+                if let Some(Clock::Cinema { movie, until }) = self.clocks.get_mut(&name) {
+                    *until = Some(self.now);
+                    if let Some(movie) = movie {
+                        movie.started_at = self.now - movie.duration_ms;
+                    }
                 }
             }
             return;
@@ -961,7 +1123,10 @@ impl Vm {
     /// Elección de menú (índice).
     pub fn choose(&mut self, i: usize) {
         let State::Menu {
-            name, values, var, ..
+            name,
+            choices: _,
+            values,
+            var,
         } = &self.state
         else {
             return;
@@ -986,22 +1151,29 @@ impl Vm {
             menu.props.insert(Prop::INDEX, Value::Int(i as i64));
             menu.props.insert(Prop::VALUE, Value::Int(i as i64));
         }
-        self.state = State::Running;
+        // El menú sigue en `State::Menu`. ONSELECT se despacha igual; al volver
+        // se restaura solo si el menú sigue en pantalla.
         let has_handler = self.fire(
             &name,
             Prop::ONSELECT,
             vec![Value::Str(value), Value::Int(i as i64)],
         );
-        if !has_handler && self.component_auto_scrap(&name) {
-            self.scrap_component(&name);
+        if !has_handler {
+            self.state = State::Running;
+            if self.component_auto_scrap(&name) {
+                self.scrap_component(&name);
+            }
         }
     }
 
     /// ¿Hay texto esperando un clic del usuario?
     pub fn wants_click(&self) -> bool {
-        self.plays
-            .values()
-            .any(|p| p.waiting_click || p.pos < p.cur.len())
+        self.scene.live().any(|object| {
+            object
+                .play
+                .as_ref()
+                .is_some_and(|p| p.waiting_click || p.pos < p.cur.len())
+        })
     }
 
     /// ONIDLE de cajas de mensaje (アイドル時.lsb): avance, menú de controles, etc.
@@ -1024,8 +1196,7 @@ impl Vm {
             .collect();
         for name in names {
             let typing = self
-                .plays
-                .get(&name)
+                .play_of(&name)
                 .is_some_and(|p| p.pos < p.cur.len() && !p.waiting_click);
             if typing {
                 continue;
@@ -1090,12 +1261,12 @@ impl Vm {
     }
 
     fn dispatch_events_with_nesting(&mut self, allow_nested: bool) {
-        let opening_menu = self
+        let menu_event = self
             .queue
             .front()
-            .is_some_and(|ev| ev.prop == Prop::ONOPENING);
+            .is_some_and(|ev| matches!(ev.prop, Prop::ONOPENING | Prop::ONSELECT));
         if matches!(self.state, State::Ended)
-            || (matches!(self.state, State::Menu { .. }) && !opening_menu)
+            || (matches!(self.state, State::Menu { .. }) && !menu_event)
             || self.frames.len() > 200
         {
             return;
@@ -1154,6 +1325,8 @@ impl Vm {
     /// cooperativa (un While/Wait 0 cede el resto del frame).
     pub fn update(&mut self, now: f64, budget: usize) -> usize {
         self.now = now;
+        self.frame_id = self.frame_id.saturating_add(1);
+        self.scene.set_cohort(self.frame_id);
         self.scene.update(now);
         if self
             .quake
@@ -1312,10 +1485,9 @@ impl Vm {
     }
 
     pub fn animation_frame_blend(&self, name: &str, delays: &[u32]) -> Option<(usize, usize, f64)> {
-        let (_, start) = self.anims.get(name)?;
         let object = self.scene.get(name)?;
         let repeat = object.get(Prop::REPEAT).is_some_and(Value::truthy);
-        let start = (*start)?;
+        let start = object.anim.as_ref()?.started?;
         let total = delays
             .iter()
             .map(|delay| *delay as f64)
@@ -1386,8 +1558,9 @@ impl Vm {
                 }
             }
         }
+        // Cada Call/Jump. El bucle del cuadro de mensaje lo repite en cada tick.
         log::debug!(
-            "enter {}:{label}{} ({})",
+            "enter script {}:{label}{} ({})",
             script.name,
             named
                 .as_ref()
@@ -1709,6 +1882,9 @@ impl Vm {
             return;
         }
         if let Some(f) = f {
+            let onselect = f.event_prop == Some(Prop::ONSELECT);
+            let idle = f.event_prop == Some(Prop::ONIDLE);
+            let sender = f.sender.clone();
             if f.event_prop == Some(Prop::ONCLOSING)
                 && let Some(name) = f.sender.as_deref()
             {
@@ -1728,9 +1904,25 @@ impl Vm {
                 self.assign(&f.result_var, ret);
             }
             if let Some(st) = f.saved_state {
-                // vuelta de un manejador de evento: restaurar lo que hacía el script
-                self.state = st;
-                self.yielded = true;
+                // vuelta de un manejador de evento: restaurar lo que hacía el script.
+                // ONSELECT deja el menú modal solo si sigue en pantalla.
+                // Ceder el frame: si el script de abajo sigue en el mismo turno,
+                // pisa la animación que el evento acaba de arrancar.
+                // ONIDLE no: el cuadro lo dispara cada tick y, al volver al instante,
+                // se comería el turno de 終了待ち antes de ver __メッセージ終了.
+                self.state = match st {
+                    State::Menu { ref name, .. }
+                        if onselect
+                            && (sender.as_deref() != Some(name.as_str())
+                                || !self.menu_still_modal(name)) =>
+                    {
+                        State::Running
+                    }
+                    other => other,
+                };
+                if !idle {
+                    self.yielded = true;
+                }
             }
         }
     }
@@ -1742,16 +1934,17 @@ impl Vm {
     }
 
     fn scrap_component(&mut self, name: &str) {
-        for o in self.scene.delete_names(name) {
-            self.plays.remove(&o.name);
-            self.placeholders.remove(&o.name);
-            self.anims.remove(&o.name);
+        let gone = self.scene.delete_names(name);
+        self.retire_objects(gone);
+    }
+
+    fn retire_objects(&mut self, objects: Vec<crate::scene::Obj>) {
+        for o in objects {
+            self.clocks.remove(&o.name);
+            self.timers.remove(&o.name);
             self.prevmenus.remove(&o.name);
-            self.videos.remove(&o.name);
-            self.cinema_movies.remove(&o.name);
-            self.cinemas.remove(&o.name);
             self.forget_deleted_component(&o.name);
-            self.graveyard.insert(o.name.clone(), (o.kind, o.props));
+            self.scene.retain_deleted(o);
         }
     }
 
@@ -1766,7 +1959,64 @@ impl Vm {
             self.active_component.clear();
         }
     }
+}
 
+struct HitSpot {
+    name: String,
+    kind: Kind,
+    mouse: i64,
+    ignores: bool,
+    handler: bool,
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Image => "Image",
+        Kind::Message => "Message",
+        Kind::Box => "Box",
+        Kind::Tile => "Tile",
+        Kind::Button => "Button",
+        Kind::Slider => "Slider",
+        Kind::Edit => "Edit",
+        Kind::Caption => "Caption",
+        Kind::Menu => "Menu",
+        Kind::Movie => "Movie",
+        Kind::Other(_) => "Other",
+    }
+}
+
+/// Primer botón bajo el punto que no es `except`.
+fn buried_button(spots: &[HitSpot], except: &str) -> String {
+    let Some(spot) = spots
+        .iter()
+        .find(|spot| spot.kind == Kind::Button && spot.name != except)
+    else {
+        return String::new();
+    };
+    let mut note = format!("under={}/Button", spot.name);
+    if spot.ignores {
+        note.push_str(&format!(" mouse={}", spot.mouse));
+    } else if !spot.handler {
+        note.push_str(" no-handler");
+    }
+    note
+}
+
+fn pointer_box(assets: &crate::assets::Assets, object: &crate::scene::Obj) -> (f64, f64) {
+    let intrinsic = match object.kind {
+        Kind::Image | Kind::Button | Kind::Tile => {
+            slider::source_pixel_size(assets, &object.str(Prop::SOURCE))
+        }
+        _ => None,
+    };
+    crate::scene::pointer_box(
+        object.int(Prop::WIDTH, 0),
+        object.int(Prop::HEIGHT, 0),
+        intrinsic,
+    )
+}
+
+impl Vm {
     /// Movimiento del ratón: hover de PrevMenu (ONMAPIN/ONMAPOUT con @ParamStr = [nombre, índice]).
     pub fn mouse_move(&mut self, x: f64, y: f64) {
         self.mouse = (x, y);
@@ -1796,6 +2046,7 @@ impl Vm {
                 self.fire(&n, Prop::ONMAPIN, p);
             }
         }
+        let assets = Arc::clone(&self.assets);
         let hovered = self
             .scene
             .draw_order()
@@ -1815,11 +2066,8 @@ impl Vm {
                 let (left, top, width, height) = if object.kind == Kind::Slider {
                     self.slider_bounds(object)
                 } else {
-                    self.scene.placed_rect(
-                        object,
-                        object.int(Prop::WIDTH, 0) as f64,
-                        object.int(Prop::HEIGHT, 0) as f64,
-                    )
+                    let (width, height) = pointer_box(&assets, object);
+                    self.scene.placed_rect(object, width, height)
                 };
                 width > 0.0
                     && height > 0.0
@@ -1843,8 +2091,222 @@ impl Vm {
         }
     }
 
+    /// Script de escena: el marco más cercano que no es el bucle del cuadro de mensaje.
+    fn click_scene(&self) -> &str {
+        self.frames
+            .iter()
+            .rev()
+            .find(|frame| !frame.script.name.contains("メッセージボックス"))
+            .or_else(|| self.frames.last())
+            .map(|frame| frame.script.name.as_str())
+            .unwrap_or("<none>")
+    }
+
+    /// Qué haría `click()` con el texto o la espera, sin ejecutarlo.
+    fn click_advance(&self) -> &'static str {
+        if self.scene.live().any(|object| {
+            object
+                .play
+                .as_ref()
+                .is_some_and(|play| play.pos < play.cur.len())
+        }) {
+            return "reveal";
+        }
+        if self
+            .scene
+            .live()
+            .any(|object| object.play.as_ref().is_some_and(|play| play.waiting_click))
+        {
+            return "page";
+        }
+        if self.scene.live().any(|object| {
+            object
+                .play
+                .as_ref()
+                .is_some_and(|play| play.click_skips_wait && play.wait_for.is_some())
+        }) {
+            return "skip-wait";
+        }
+        if !self.one_shot_cinemas().is_empty() {
+            return "cinema";
+        }
+        if matches!(self.state, State::WaitUntil { skippable: true, .. }) {
+            return "skip-wait";
+        }
+        "none"
+    }
+
+    /// Comando del script de escena (no el bucle del cuadro de mensaje) y si el menú de elección existe.
+    fn stuck_choice(&self) -> String {
+        let frame = self
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| !frame.script.name.contains("メッセージボックス"))
+            .or_else(|| self.frames.last());
+        let cmd = match frame {
+            Some(frame) => match frame.script.commands.get(frame.pc) {
+                Some(command) => format!(
+                    "cmd={} L{} {} #{}",
+                    frame.script.name,
+                    command.line_no,
+                    command.name(),
+                    frame.pc
+                ),
+                None => format!("cmd={} #{}", frame.script.name, frame.pc),
+            },
+            None => "cmd=<none>".to_string(),
+        };
+        let menu = if self.scene.get("選択メニュー").is_some() {
+            "yes"
+        } else {
+            "no"
+        };
+        let top = match self.frames.last() {
+            Some(frame) => match frame.script.commands.get(frame.pc) {
+                Some(command) => format!(
+                    "{} L{} {} #{}",
+                    frame.script.name,
+                    command.line_no,
+                    command.name(),
+                    frame.pc
+                ),
+                None => format!("{} #{}", frame.script.name, frame.pc),
+            },
+            None => "<none>".to_string(),
+        };
+        let flag = self
+            .lookup("__メッセージ終了")
+            .map(|value| format!("{value:?}"))
+            .unwrap_or_else(|| "<unset>".to_string());
+        format!(
+            "{cmd} 選択メニュー={menu} top={top} state={:?} flag={flag} depth={}",
+            self.state,
+            self.frames.len()
+        )
+    }
+
+    fn object_kind_name(&self, name: &str) -> &'static str {
+        self.scene
+            .get(name)
+            .map(|object| kind_name(object.kind))
+            .unwrap_or("-")
+    }
+
+    fn objects_under_pointer(
+        &self,
+        assets: &Assets,
+        x: f64,
+        y: f64,
+        hit: crate::scene::MouseHit,
+        props: &[u8],
+    ) -> Vec<HitSpot> {
+        self.scene
+            .draw_order()
+            .into_iter()
+            .rev()
+            .filter_map(|object| {
+                if !self.scene.effective_visible(object) {
+                    return None;
+                }
+                let (width, height) = pointer_box(assets, object);
+                let (left, top, width, height) = self.scene.placed_rect(object, width, height);
+                if !(width > 0.0
+                    && height > 0.0
+                    && x >= left
+                    && y >= top
+                    && x < left + width
+                    && y < top + height)
+                {
+                    return None;
+                }
+                let handler = props.iter().any(|prop| {
+                    object
+                        .get(*prop)
+                        .is_some_and(|value| !value.as_str().trim().is_empty())
+                });
+                Some(HitSpot {
+                    name: object.name.clone(),
+                    kind: object.kind,
+                    mouse: object.int(Prop::IGNOREMOUSE, 0),
+                    ignores: object.ignores_mouse(hit),
+                    handler,
+                })
+            })
+            .collect()
+    }
+
+    fn log_click(
+        &self,
+        x: f64,
+        y: f64,
+        right: bool,
+        object: &str,
+        kind: &str,
+        result: &str,
+        delivers_click: bool,
+        extra: &str,
+    ) {
+        let effect = self.click_advance();
+        let advance = if delivers_click {
+            format!(" advance={effect}")
+        } else if effect == "none" {
+            String::new()
+        } else {
+            format!(" advance=held:{effect}")
+        };
+        let side = if right { " right" } else { "" };
+        let extra = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" {extra}")
+        };
+        let stall = if delivers_click && effect == "none" {
+            format!(" {}", self.stuck_choice())
+        } else {
+            String::new()
+        };
+        log::info!(
+            "click ({x:.0},{y:.0}){side} scene={} object={object} kind={kind} result={result}{advance}{extra}{stall}",
+            self.click_scene()
+        );
+    }
+
+    fn log_unhandled_click(&self, x: f64, y: f64, right: bool, spots: &[HitSpot]) {
+        let delivers = !right;
+        let Some(top) = spots.first() else {
+            let result = if delivers && self.click_advance() != "none" {
+                "advance"
+            } else {
+                "noop"
+            };
+            self.log_click(x, y, right, "(none)", "-", result, delivers, "");
+            return;
+        };
+        let result = if top.ignores { "ignored" } else { "no-handler" };
+        let mut extra = Vec::new();
+        if top.ignores {
+            extra.push(format!("mouse={}", top.mouse));
+        }
+        let buried = buried_button(spots, &top.name);
+        if !buried.is_empty() {
+            extra.push(buried);
+        }
+        self.log_click(
+            x,
+            y,
+            right,
+            &top.name,
+            kind_name(top.kind),
+            result,
+            delivers,
+            &extra.join(" "),
+        );
+    }
+
     /// Clic (izquierdo o derecho) en coordenadas lógicas: manejadores de objeto o avance.
     pub fn click_at(&mut self, x: f64, y: f64, right: bool) {
+        let assets = Arc::clone(&self.assets);
         if right {
             let modal_menu = match &self.state {
                 State::Menu { name, .. } => Some(name.clone()),
@@ -1862,11 +2324,8 @@ impl Vm {
                         {
                             return false;
                         }
-                        let (left, top, width, height) = self.scene.placed_rect(
-                            o,
-                            o.int(Prop::WIDTH, 0) as f64,
-                            o.int(Prop::HEIGHT, 0) as f64,
-                        );
+                        let (width, height) = pointer_box(&assets, o);
+                        let (left, top, width, height) = self.scene.placed_rect(o, width, height);
                         x >= left && y >= top && x < left + width && y < top + height
                     })
                     .filter(|o| o.get(Prop::RCLICKSCRAP).is_some_and(Value::truthy))
@@ -1881,13 +2340,40 @@ impl Vm {
                 if matches!(&self.state, State::Menu { name: active, .. } if active == &name) {
                     self.state = State::Running;
                 }
-                if !self.fire(&name, Prop::ONRBTNUP, vec![]) {
+                let next = self
+                    .scene
+                    .get(&name)
+                    .map(|object| object.str(Prop::ONRBTNUP))
+                    .unwrap_or_default();
+                let kind = self.object_kind_name(&name);
+                if next.trim().is_empty() {
+                    self.log_click(x, y, true, &name, kind, "scrap", false, "");
+                    self.scrap_component(&name);
+                } else if self.fire(&name, Prop::ONRBTNUP, vec![]) {
+                    self.log_click(
+                        x,
+                        y,
+                        true,
+                        &name,
+                        kind,
+                        "ONRBTNUP",
+                        false,
+                        &format!("script={next}"),
+                    );
+                } else {
+                    self.log_click(x, y, true, &name, kind, "scrap", false, "");
                     self.scrap_component(&name);
                 }
                 return;
             }
         } else {
             if self.begin_slider_drag(x, y) {
+                let name = self
+                    .slider_focus
+                    .clone()
+                    .unwrap_or_else(|| "slider".into());
+                let kind = self.object_kind_name(&name);
+                self.log_click(x, y, false, &name, kind, "drag", false, "");
                 return;
             }
             self.focus_edit_at(x, y);
@@ -1908,18 +2394,14 @@ impl Vm {
                 .get(name)
                 .map(|o| (o.int(Prop::PRIORITY, 0), o.seq))
         });
+        let mouse_hit = if right {
+            crate::scene::MouseHit::Right
+        } else {
+            crate::scene::MouseHit::Left
+        };
         let object_hit = self
             .scene
-            .hit_handler(
-                x,
-                y,
-                props,
-                if right {
-                    crate::scene::MouseHit::Right
-                } else {
-                    crate::scene::MouseHit::Left
-                },
-            )
+            .hit_handler_with(x, y, props, mouse_hit, |object| pointer_box(&assets, object))
             .map(|o| (o.name.clone(), (o.int(Prop::PRIORITY, 0), o.seq)));
 
         if let Some((n, i)) = menu_hit
@@ -1962,12 +2444,41 @@ impl Vm {
             self.selected
                 .insert((n.clone(), MenuItemKey::Name(bname.clone())), selected);
             self.assign("@SelStr", Value::Str(bname.clone()));
-            let p = vec![Value::Str(bname), Value::Int(i as i64)];
+            let p = vec![Value::Str(bname.clone()), Value::Int(i as i64)];
+            let on_select = self
+                .scene
+                .get(&n)
+                .map(|object| object.str(Prop::ONSELECT))
+                .unwrap_or_default();
+            let on_play_end = self
+                .scene
+                .get(&n)
+                .map(|object| object.str(Prop::ONPLAYEND))
+                .unwrap_or_default();
+            let kind = self.object_kind_name(&n);
+            let mut extra = format!("item={bname}");
+            if !on_select.trim().is_empty() {
+                extra.push_str(&format!(" script={on_select}"));
+            }
+            if !on_play_end.trim().is_empty() {
+                extra.push_str(&format!(" then={on_play_end}"));
+            }
+            self.log_click(x, y, false, &n, kind, "ONSELECT", false, &extra);
             self.fire(&n, Prop::ONSELECT, p.clone());
             self.fire(&n, Prop::ONPLAYEND, p);
             return;
         }
         if let Some((name, _)) = object_hit {
+            let spots = self.objects_under_pointer(&assets, x, y, mouse_hit, props);
+            let buried = if self
+                .scene
+                .get(&name)
+                .is_some_and(|object| object.kind == Kind::Button)
+            {
+                String::new()
+            } else {
+                buried_button(&spots, &name)
+            };
             // Clic en message box con texto pendiente: avanzar reproducción, no disparar
             // ONNOTIFY vacío (la caja declara ONNOTIFY para tags del texto, no para el ratón).
             if !right
@@ -1980,9 +2491,12 @@ impl Vm {
                 // El avance lo hace el clic del motor. Si también queda @LClick,
                 // el ONIDLE del cuadro (アイドル時) vuelve a avanzar la misma página.
                 self.mouse_left_click = false;
+                let kind = self.object_kind_name(&name);
+                self.log_click(x, y, false, &name, kind, "advance", true, &buried);
                 self.click();
                 return;
             }
+            let mut fired = false;
             for &p in props {
                 if !right
                     && p == Prop::ONNOTIFY
@@ -1993,16 +2507,86 @@ impl Vm {
                 {
                     continue;
                 }
+                // Menu nativo: ONSELECT lleva índice vía `choose` / State::Menu, no un
+                // fire vacío sobre el rectángulo entero (reabría el diálogo de guardado).
+                if !right
+                    && p == Prop::ONSELECT
+                    && self.scene.get(&name).is_some_and(|o| o.kind == Kind::Menu)
+                {
+                    continue;
+                }
                 if self.fire(&name, p, vec![]) {
+                    let script = self
+                        .scene
+                        .get(&name)
+                        .map(|object| object.str(p))
+                        .unwrap_or_default();
+                    let kind = self.object_kind_name(&name);
+                    let mut extra = Vec::new();
+                    if !script.trim().is_empty() {
+                        extra.push(format!("script={script}"));
+                    }
+                    if !buried.is_empty() {
+                        extra.push(buried.clone());
+                    }
+                    self.log_click(
+                        x,
+                        y,
+                        right,
+                        &name,
+                        kind,
+                        crate::lsb::prop_name(p),
+                        false,
+                        &extra.join(" "),
+                    );
+                    fired = true;
                     break;
                 }
             }
+            if !fired {
+                let kind = self.object_kind_name(&name);
+                let skipped = self
+                    .scene
+                    .get(&name)
+                    .map(|object| {
+                        props
+                            .iter()
+                            .filter(|prop| {
+                                object
+                                    .get(**prop)
+                                    .is_some_and(|value| !value.as_str().trim().is_empty())
+                            })
+                            .map(|prop| crate::lsb::prop_name(*prop))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let mut extra = Vec::new();
+                if !skipped.is_empty() {
+                    extra.push(format!("skipped={skipped}"));
+                }
+                if !buried.is_empty() {
+                    extra.push(buried);
+                }
+                self.log_click(
+                    x,
+                    y,
+                    right,
+                    &name,
+                    kind,
+                    "no-handler",
+                    false,
+                    &extra.join(" "),
+                );
+            }
             return;
         }
+        if !right && self.wants_click() {
+            self.mouse_left_click = false;
+        }
+        let spots = self.objects_under_pointer(&assets, x, y, mouse_hit, props);
+        self.log_unhandled_click(x, y, right, &spots);
         if !right {
-            if self.wants_click() {
-                self.mouse_left_click = false;
-            }
             self.click();
         }
     }
@@ -2010,11 +2594,21 @@ impl Vm {
     /// Un objeto pasa a existir de verdad / recibe ONPLAYEND: libera el texto retenido
     /// y notifica un fin de reproducción que ocurrió sin manejador.
     fn object_defined(&mut self, name: &str) {
-        if self.placeholders.remove(name) {
+        if self
+            .scene
+            .get_mut(name)
+            .is_some_and(|object| std::mem::replace(&mut object.placeholder, false))
+        {
             log::debug!("message object {name} defined; releasing held text");
         }
-        if self.ended_unnotified.contains(name) && self.fire(name, Prop::ONPLAYEND, vec![]) {
-            self.ended_unnotified.remove(name);
+        if self
+            .scene
+            .get(name)
+            .is_some_and(|object| object.ended_unnotified)
+            && self.fire(name, Prop::ONPLAYEND, vec![])
+            && let Some(object) = self.scene.get_mut(name)
+        {
+            object.ended_unnotified = false;
         }
     }
 
@@ -2037,7 +2631,12 @@ impl Vm {
         }
 
         let (exists, v) = if obj == ROOT {
-            (true, self.root_props.get(&p).cloned())
+            (
+                true,
+                self.scene
+                    .get(ROOT)
+                    .and_then(|object| object.get(p).cloned()),
+            )
         } else {
             match self.scene.get(obj) {
                 Some(o) => (
@@ -2202,8 +2801,16 @@ impl Vm {
     /// 2) si no había nada que avanzar, dispara ONLBTNUP/ONLBTNDOWN de la caja activa
     ///    o, si no tiene, su ONPLAYEND. Cada candidato descartado se explica en debug.
     pub fn click_message(&mut self) -> Option<String> {
-        let held: Vec<String> = self.placeholders.drain().collect();
+        let held: Vec<String> = self
+            .scene
+            .live()
+            .filter(|object| object.placeholder)
+            .map(|object| object.name.clone())
+            .collect();
         for h in &held {
+            if let Some(object) = self.scene.get_mut(h) {
+                object.placeholder = false;
+            }
             log::debug!("screen click: releasing held text of {h}");
         }
         if self.wants_click() || !held.is_empty() {
@@ -2234,7 +2841,7 @@ impl Vm {
                 log::debug!("screen click: skip {n}: object does not exist");
                 continue;
             }
-            if self.plays.contains_key(&n) {
+            if self.play_of(&n).is_some() {
                 log::debug!("screen click: skip {n}: text still playing");
                 continue;
             }
@@ -2325,7 +2932,7 @@ impl Vm {
             .into_iter()
             .filter(|o| {
                 o.kind != Kind::Menu
-                    && !self.plays.contains_key(&o.name)
+                    && o.play.is_none()
                     && self.scene.effective_visible(o)
                     && props
                         .iter()
@@ -2398,9 +3005,11 @@ impl Env for Vm {
             Func::SETPROP => {
                 let p = prop_of(a.get(1)?)?;
                 if s(0) == ROOT {
-                    self.root_props
-                        .insert(p, a.get(2).cloned().unwrap_or_default());
-                    return Some(Value::Bool(true));
+                    return Some(Value::Bool(self.scene.set(
+                        ROOT,
+                        p,
+                        a.get(2).cloned().unwrap_or_default(),
+                    )));
                 }
                 Value::Bool(
                     self.scene
@@ -2558,17 +3167,24 @@ impl Env for Vm {
                 };
                 let path = a.get(1).map(Value::as_str).unwrap_or_default();
                 let data = self.assets.data().clone();
-                let Some(text) = data
-                    .resolve(&path, &[".txt"])
-                    .and_then(|name| data.read(&name).ok())
-                    .map(|bytes| crate::util::cp932(&bytes))
-                else {
+                let Some(name) = data.resolve(&path, &[".txt"]) else {
                     return Some(Value::Bool(false));
                 };
-                let lines = text
+                let started = std::time::Instant::now();
+                let Some(bytes) = data.read(&name).ok() else {
+                    return Some(Value::Bool(false));
+                };
+                let text = crate::util::cp932(&bytes);
+                let lines: Vec<Value> = text
                     .lines()
                     .map(|line| Value::Str(line.to_string()))
                     .collect();
+                log::info!(
+                    "load text {name}: {} bytes, {} lines in {:.1} ms",
+                    bytes.len(),
+                    lines.len(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
                 self.assign(&var, Value::Array(lines));
                 Value::Bool(true)
             }
@@ -2578,9 +3194,15 @@ impl Env for Vm {
             | Func::DBGETTABLE => {
                 let d = self.assets.data().clone();
                 let load = move |f: &str| {
-                    d.resolve(f, &[".tsv", ".txt"])
-                        .and_then(|n| d.read(&n).ok())
-                        .map(|b| crate::util::cp932(&b))
+                    let name = d.resolve(f, &[".tsv", ".txt"])?;
+                    let started = std::time::Instant::now();
+                    let bytes = d.read(&name).ok()?;
+                    log::info!(
+                        "load table {name}: {} bytes in {:.1} ms",
+                        bytes.len(),
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                    Some(crate::util::cp932(&bytes))
                 };
                 return self.db.call(f, a, &load);
             }
@@ -2604,20 +3226,13 @@ impl Env for Vm {
                 );
                 Value::Bool(false)
             }
-            // calc.html SaveScreen: .GAL / Mem: / Save:. Sin encoder GAL → FALSE.
-            Func::SAVESCREEN => {
-                self.warn_once(
-                    "savescreen:unsupported",
-                    "SaveScreen: GAL capture not implemented (returns false)",
-                );
-                Value::Bool(false)
-            }
-            // calc.html CopyFile: copia mem/save/archivos. Rutas host reales sí;
-            // prefijos Mem:/Save: aún no (**temporal** hasta VFS).
+            // calc.html SaveScreen: captura pantalla → .gal / mem: / save:.
+            Func::SAVESCREEN => Value::Bool(self.save_screen(a)),
+            // calc.html CopyFile: mem:/save:/host; sobrescribe destino.
             Func::COPYFILE => {
                 let src = a.first().map(Value::as_str).unwrap_or_default();
                 let dst = a.get(1).map(Value::as_str).unwrap_or_default();
-                Value::Bool(copy_host_file(self, &src, &dst))
+                Value::Bool(copy_file(self, &src, &dst))
             }
             _ => return None,
         })
@@ -2640,9 +3255,157 @@ impl Env for Vm {
 }
 
 impl Vm {
+    /// Imagen desde `mem:` / `save:` si el SOURCE no está en el archivo del juego.
+    pub fn vfs_image(&self, src: &str) -> Option<std::sync::Arc<crate::gal::Image>> {
+        if strip_vfs_prefix(src, "mem:").is_none() && strip_vfs_prefix(src, "save:").is_none() {
+            return None;
+        }
+        if let Some(img) = self.vfs_image_cache.borrow().get(src) {
+            return Some(img.clone());
+        }
+        let bytes = read_vfs_bytes(self, src)?;
+        let img = std::sync::Arc::new(crate::gal::decode_any(&bytes).ok()?);
+        self.vfs_image_cache
+            .borrow_mut()
+            .insert(src.to_string(), img.clone());
+        Some(img)
+    }
+
+    /// ¿Hay un SaveScreen esperando readback de la escena?
+    pub fn take_pending_savescreen(&mut self) -> Option<SaveScreenRequest> {
+        self.pending_savescreen.take()
+    }
+
+    /// Completa un SaveScreen diferido con RGBA recién leído del target de escena.
+    pub fn complete_savescreen(
+        &mut self,
+        req: &SaveScreenRequest,
+        w: u32,
+        h: u32,
+        rgba: Vec<u8>,
+    ) -> bool {
+        if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+            return false;
+        }
+        self.screen_rgba = Some((w, h, rgba));
+        self.apply_savescreen(req)
+    }
+
+    /// Solo tests / inyección: deja un frame en CPU sin pasar por SDL.
+    #[cfg(test)]
+    pub fn set_screen_rgba(&mut self, w: u32, h: u32, rgba: Vec<u8>) {
+        if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+            return;
+        }
+        self.screen_rgba = Some((w, h, rgba));
+    }
+
+    /// calc.html SaveScreen. Si ya hay captura CPU, escribe ya; si no, encola readback
+    /// una sola vez tras el render (**interpretación**: TRUE = se cumplirá este frame).
+    fn save_screen(&mut self, a: &[Value]) -> bool {
+        let path = a.first().map(Value::as_str).unwrap_or_default();
+        if path.is_empty() {
+            return false;
+        }
+        let rw = a.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as u32;
+        let rh = a.get(2).map(|v| v.as_int()).unwrap_or(0).max(0) as u32;
+        // ④ back buffer / ⑤ delete: un solo buffer lógico (**no confirmado** / omitido).
+        let req = SaveScreenRequest {
+            path,
+            resample_w: rw,
+            resample_h: rh,
+        };
+        if self.screen_rgba.is_some() {
+            return self.apply_savescreen(&req);
+        }
+        self.pending_savescreen = Some(req);
+        true
+    }
+
+    fn apply_savescreen(&mut self, req: &SaveScreenRequest) -> bool {
+        let Some((sw, sh, rgba)) = self.screen_rgba.as_ref() else {
+            return false;
+        };
+        let (w, h, pixels) = if req.resample_w > 0 && req.resample_h > 0 {
+            (
+                req.resample_w,
+                req.resample_h,
+                resample_nearest(rgba, *sw, *sh, req.resample_w, req.resample_h),
+            )
+        } else {
+            (*sw, *sh, rgba.clone())
+        };
+        // Encode zlib es barato frente al readback; se puede mover a worker después.
+        let gal = match crate::gal::encode_galex_rgba(w, h, &pixels) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("SaveScreen encode: {e}");
+                return false;
+            }
+        };
+        let ok = write_vfs_bytes(self, &req.path, &gal);
+        if ok {
+            self.vfs_image_cache.borrow_mut().remove(&req.path);
+        }
+        ok
+    }
+
+    fn wipe_set_has(scene: &Scene, set: &HashSet<String>, name: &str) -> bool {
+        let mut current = name.to_string();
+        for _ in 0..64 {
+            if set.contains(&current) {
+                return true;
+            }
+            let Some(parent) = scene
+                .get(&current)
+                .map(|object| object.str(Prop::PARENT))
+                .filter(|parent| !parent.is_empty())
+            else {
+                return false;
+            };
+            current = parent;
+        }
+        false
+    }
+
     /// RGBA del overlay Flip WHITE/BLACK/FLASH, si activo.
     pub fn wipe_flash_rgba(&self) -> Option<(u8, u8, u8, u8)> {
         self.wipe_flash.as_ref().and_then(|f| f.rgba(self.now))
+    }
+
+    /// Factor 0–1 de la superficie de este objeto durante un Flip, si le toca.
+    pub fn wipe_alpha_factor(&self, name: &str) -> Option<f64> {
+        let fade = self.wipe_fade.as_ref()?;
+        let progress = fade.progress(self.now);
+        if Self::wipe_set_has(&self.scene, &fade.out, name) {
+            Some(1.0 - progress)
+        } else if Self::wipe_set_has(&self.scene, &fade.inn, name) {
+            Some(progress)
+        } else {
+            None
+        }
+    }
+
+    /// Objetos de la superficie nueva que el orden normal no dibuja (están archivados).
+    pub fn append_wipe_incoming(&self, ordered: &mut Vec<crate::scene::Obj>) {
+        let Some(fade) = &self.wipe_fade else {
+            return;
+        };
+        if fade.inn.is_empty() {
+            return;
+        }
+        let have: HashSet<String> = ordered.iter().map(|object| object.name.clone()).collect();
+        let mut extra: Vec<_> = self
+            .scene
+            .live()
+            .filter(|object| {
+                !have.contains(&object.name)
+                    && Self::wipe_set_has(&self.scene, &fade.inn, &object.name)
+            })
+            .cloned()
+            .collect();
+        extra.sort_by_key(|object| (object.int(Prop::PRIORITY, 0), object.seq));
+        ordered.extend(extra);
     }
 
     /// Offset de dibujo por `<QUAKE>` (0,0 si no aplica).
@@ -2669,7 +3432,9 @@ impl Vm {
         let cycle = q.cycle_ms.max(1.0);
         let phase = if q.random_phase {
             // desfase estable por nombre
-            let h = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            let h = name
+                .bytes()
+                .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
             t + f64::from(h % 1000)
         } else {
             t
@@ -2696,39 +3461,106 @@ impl Vm {
     }
 }
 
-/// CopyFile para rutas de host (sin `mem:` / `save:`). calc.html.
-fn copy_host_file(vm: &mut Vm, src: &str, dst: &str) -> bool {
-    let special = |p: &str| {
-        let l = p.to_ascii_lowercase();
-        l.starts_with("mem:") || l.starts_with("save:")
-    };
-    if src.is_empty() || dst.is_empty() || special(src) || special(dst) {
-        vm.warn(
-            "copyfile:vfs",
-            "CopyFile: Mem:/Save: virtual files not implemented (returns false)",
-        );
-        return false;
+/// Prefijo `mem:` / `save:` sin distinguir mayúsculas (calc.html).
+fn strip_vfs_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if path.len() >= prefix.len()
+        && path.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    {
+        Some(&path[prefix.len()..])
+    } else {
+        None
     }
-    let src_path = if PathBuf::from(src).is_absolute() {
-        PathBuf::from(src)
+}
+
+fn read_vfs_bytes(vm: &Vm, path: &str) -> Option<Vec<u8>> {
+    if let Some(name) = strip_vfs_prefix(path, "mem:") {
+        return vm
+            .mem_files
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone());
+    }
+    if let Some(name) = strip_vfs_prefix(path, "save:") {
+        return crate::save::read_save_blob(&vm.save_dir, name);
+    }
+    let src_path = if PathBuf::from(path).is_absolute() {
+        PathBuf::from(path)
     } else {
-        vm.save_dir.join(src.replace('\\', "/"))
+        vm.save_dir.join(path.replace('\\', "/"))
     };
-    let dst_path = if PathBuf::from(dst).is_absolute() {
-        PathBuf::from(dst)
+    std::fs::read(&src_path).ok()
+}
+
+fn resample_nearest(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return out;
+    }
+    for y in 0..dh as usize {
+        let sy = y * sh as usize / dh as usize;
+        for x in 0..dw as usize {
+            let sx = x * sw as usize / dw as usize;
+            let si = (sy * sw as usize + sx) * 4;
+            let di = (y * dw as usize + x) * 4;
+            if si + 4 <= rgba.len() {
+                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            }
+        }
+    }
+    out
+}
+
+fn write_vfs_bytes(vm: &mut Vm, path: &str, data: &[u8]) -> bool {
+    if let Some(name) = strip_vfs_prefix(path, "mem:") {
+        if name.is_empty() {
+            return false;
+        }
+        vm.mem_files.retain(|k, _| !k.eq_ignore_ascii_case(name));
+        vm.mem_files.insert(name.to_string(), data.to_vec());
+        vm.vfs_image_cache
+            .borrow_mut()
+            .retain(|k, _| strip_vfs_prefix(k, "mem:") != Some(name));
+        return true;
+    }
+    if let Some(name) = strip_vfs_prefix(path, "save:") {
+        if name.is_empty() {
+            return false;
+        }
+        let ok = crate::save::write_save_blob(&vm.save_dir, name, data).is_ok();
+        if ok {
+            vm.vfs_image_cache
+                .borrow_mut()
+                .retain(|k, _| strip_vfs_prefix(k, "save:") != Some(name));
+        }
+        return ok;
+    }
+    let dst_path = if PathBuf::from(path).is_absolute() {
+        PathBuf::from(path)
     } else {
-        vm.save_dir.join(dst.replace('\\', "/"))
+        vm.save_dir.join(path.replace('\\', "/"))
     };
     if let Some(parent) = dst_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::copy(&src_path, &dst_path) {
-        Ok(_) => true,
+    match std::fs::write(&dst_path, data) {
+        Ok(()) => true,
         Err(e) => {
-            log::warn!("CopyFile {src_path:?} -> {dst_path:?}: {e}");
+            log::warn!("CopyFile write {dst_path:?}: {e}");
             false
         }
     }
+}
+
+/// CopyFile (calc.html): copia mem/save/archivos de host; sobrescribe destino.
+fn copy_file(vm: &mut Vm, src: &str, dst: &str) -> bool {
+    if src.is_empty() || dst.is_empty() {
+        return false;
+    }
+    let Some(data) = read_vfs_bytes(vm, src) else {
+        log::warn!("CopyFile: source not found {src:?}");
+        return false;
+    };
+    write_vfs_bytes(vm, dst, &data)
 }
 
 /// Abre una URL con el manejador del sistema. **fuente primaria** script.html OPENURL.
@@ -2855,15 +3687,52 @@ mod tests {
             ),
             Some(Value::Bool(true))
         );
+        // Sin captura aún → TRUE diferido (pedido encolado para el próximo render).
         assert_eq!(
             vm.call_engine(
                 Func::SAVESCREEN,
                 &[Value::Str("mem:__workscr.gal".into())],
                 &[]
             ),
-            Some(Value::Bool(false)),
-            "SaveScreen without GAL encoder returns false (honest)"
+            Some(Value::Bool(true)),
+            "SaveScreen queues capture when no CPU frame yet"
         );
+        assert!(vm.pending_savescreen.is_some());
+        let _ = vm.take_pending_savescreen();
+        let tmp = std::env::temp_dir().join("livenyan_copyfile_vfs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        vm.save_dir = tmp.clone();
+        // 2x2 rojo opaco → escribe en el acto
+        vm.set_screen_rgba(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        );
+        assert_eq!(
+            vm.call_engine(
+                Func::SAVESCREEN,
+                &[Value::Str("mem:__savescr.gal".into())],
+                &[]
+            ),
+            Some(Value::Bool(true))
+        );
+        assert!(vm.mem_files.contains_key("__savescr.gal"));
+        assert_eq!(
+            vm.call_engine(
+                Func::COPYFILE,
+                &[
+                    Value::Str("mem:__savescr.gal".into()),
+                    Value::Str("save:__savescr3.gal".into()),
+                ],
+                &[]
+            ),
+            Some(Value::Bool(true))
+        );
+        assert!(crate::save::read_save_blob(&tmp, "__savescr3.gal").is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             vm.call_engine(Func::SETWALLPAPER, &[Value::Str("x.gal".into())], &[]),
             Some(Value::Bool(false))
@@ -2886,6 +3755,223 @@ mod tests {
         let flash = wipe::WipeFlash::flash(0.0, 1000.0);
         assert_eq!(flash.rgba(0.0).map(|c| c.3), Some(255));
         assert!(flash.rgba(500.0).map(|c| c.3).unwrap() < 255);
+    }
+
+    fn literal(value: Param) -> LiveParser {
+        LiveParser {
+            entries: vec![crate::lsb::OpeData {
+                op: crate::lsb::op::TO,
+                name: String::new(),
+                func: None,
+                operands: vec![value],
+            }],
+        }
+    }
+
+    fn flip_command(act: i32, time: i32, delete: bool, wipe: i32, targets: &[&str]) -> Command {
+        Command {
+            kind: CmdType::Flip as u8,
+            indent: 0,
+            mute: false,
+            not_update: false,
+            line_no: 0,
+            fields: vec![
+                ("Act", crate::lsb::Field::Expr(literal(Param::Int(act)))),
+                ("Time", crate::lsb::Field::Expr(literal(Param::Int(time)))),
+                (
+                    "Delete",
+                    crate::lsb::Field::Expr(literal(Param::Int(i32::from(delete)))),
+                ),
+                ("Wipe", crate::lsb::Field::Expr(literal(Param::Int(wipe)))),
+                (
+                    "Targets",
+                    crate::lsb::Field::Exprs(
+                        targets
+                            .iter()
+                            .map(|name| literal(Param::Str((*name).into())))
+                            .collect(),
+                    ),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn click_uses_the_image_file_when_width_and_height_are_unset() {
+        let mut vm = fixture_vm();
+        let mut props = HashMap::new();
+        props.insert(Prop::SOURCE, Value::Str("bg.gal".into()));
+        props.insert(Prop::LEFT, Value::Int(0));
+        props.insert(Prop::TOP, Value::Int(0));
+        props.insert(Prop::ONLBTNDOWN, Value::Str("pick".into()));
+        vm.scene.create("thumb", Kind::Image, props);
+        vm.click_at(1.0, 1.0, false);
+        assert!(vm.queue.iter().any(|event| event.obj == "thumb"));
+
+        vm.scene.set("thumb", Prop::IGNOREMOUSE, Value::Int(1));
+        let queued = vm.queue.len();
+        vm.click_at(1.0, 1.0, false);
+        assert_eq!(vm.queue.len(), queued);
+    }
+
+    #[test]
+    fn empty_stay_parks_the_old_plate_and_keeps_this_frame() {
+        let mut vm = fixture_vm();
+        vm.scene.set_cohort(1);
+        vm.scene.create("title", Kind::Image, HashMap::new());
+        vm.scene.create("box", Kind::Message, HashMap::new());
+        vm.scene.set_cohort(2);
+        vm.scene.create("gallery", Kind::Image, HashMap::new());
+        vm.scene.set_cohort(2);
+        vm.step_flip(&flip_command(1, 0, true, 0, &[]));
+        assert!(vm.scene.get("title").is_some());
+        assert!(!vm.scene.names().iter().any(|name| name == "title"));
+        assert!(vm.scene.names().iter().any(|name| name == "gallery"));
+        assert!(vm.scene.names().iter().any(|name| name == "box"));
+
+        vm.scene.set_cohort(3);
+        vm.scene.create("thumb", Kind::Image, HashMap::new());
+        vm.scene.set_cohort(4);
+        vm.step_flip(&flip_command(1, 0, true, 0, &[]));
+        assert!(vm.scene.names().iter().any(|name| name == "title"));
+        assert!(vm.scene.get("gallery").is_none());
+        assert!(vm.scene.get("thumb").is_none());
+        assert!(vm.scene.get("box").is_some());
+
+        vm.scene.set_cohort(5);
+        vm.scene.create("gallery", Kind::Image, HashMap::new());
+        vm.scene.set_cohort(5);
+        vm.step_flip(&flip_command(1, 0, true, 0, &[]));
+        assert!(vm.scene.get("thumb").is_none());
+        assert!(vm.scene.names().iter().any(|name| name == "gallery"));
+        assert!(!vm.scene.names().iter().any(|name| name == "title"));
+    }
+
+    #[test]
+    fn enter_fade_lasts_the_whole_flip_time() {
+        let mut vm = fixture_vm();
+        vm.now = 1000.0;
+        vm.scene.set_cohort(1);
+        vm.scene.create("title", Kind::Image, HashMap::new());
+        vm.scene.set_cohort(2);
+        vm.scene.create("gallery", Kind::Image, HashMap::new());
+        vm.scene.set_cohort(2);
+        vm.step_flip(&flip_command(1, 500, true, 1, &[]));
+        let fade = vm.wipe_fade.as_ref().unwrap();
+        assert_eq!(fade.dur_ms, 500.0);
+        assert!(fade.out.contains("title"));
+        assert!(fade.inn.contains("gallery"));
+        assert!(vm.scene.motions.is_empty());
+        assert_eq!(vm.scene.get("gallery").unwrap().int(Prop::ALPHA, 255), 255);
+        assert_eq!(vm.scene.get("title").unwrap().int(Prop::ALPHA, 255), 255);
+    }
+
+    #[test]
+    fn named_flip_only_fades_or_deletes_its_targets() {
+        let mut vm = fixture_vm();
+        vm.scene.create("actor", Kind::Image, HashMap::new());
+        let mut child = HashMap::new();
+        child.insert(Prop::PARENT, Value::Str("actor".into()));
+        vm.scene.create("face", Kind::Image, child);
+        vm.scene.create("bg", Kind::Image, HashMap::new());
+        vm.step_flip(&flip_command(0, 0, true, 0, &["actor"]));
+        assert!(vm.scene.get("actor").is_none());
+        assert!(vm.scene.get("face").is_none());
+        assert!(vm.scene.names().iter().any(|name| name == "bg"));
+
+        vm.scene.create("actor", Kind::Image, HashMap::new());
+        vm.step_flip(&flip_command(0, 0, false, 0, &["actor"]));
+        assert!(vm.scene.get("actor").is_some());
+        assert!(!vm.scene.names().iter().any(|name| name == "actor"));
+        assert_eq!(vm.scene.get("actor").unwrap().int(Prop::ALPHA, 255), 255);
+    }
+
+    /// MESOFF: Flip FL_OUT con targets → `back`. 再生中 solo SetProp VISIBLE=1
+    /// (sin Flip de entrada); debe desarchivar para que el cuadro vuelva a dibujarse.
+    #[test]
+    fn setprop_visible_true_unmarks_flip_back_surface() {
+        let mut vm = fixture_vm();
+        vm.scene.create("土台", Kind::Image, HashMap::new());
+        vm.step_flip(&flip_command(0, 0, false, 0, &["土台"]));
+        assert!(!vm.scene.names().iter().any(|name| name == "土台"));
+        let cmd = Command {
+            kind: CmdType::SetProp as u8,
+            indent: 0,
+            mute: false,
+            not_update: false,
+            line_no: 0,
+            fields: vec![
+                (
+                    "ObjName",
+                    crate::lsb::Field::Expr(literal(Param::Str("土台".into()))),
+                ),
+                ("ObjProp", crate::lsb::Field::Expr(literal(Param::Int(47)))),
+                ("Value", crate::lsb::Field::Expr(literal(Param::Int(1)))),
+            ],
+        };
+        let script = Lsb {
+            name: "setprop.lsb".into(),
+            version: 117,
+            flags: 0,
+            command_params: vec![],
+            commands: vec![],
+        };
+        vm.step_set_prop(&script, 0, &cmd);
+        assert!(vm.scene.names().iter().any(|name| name == "土台"));
+    }
+
+    /// FACE Flip archiva 土台 y メッセージボックス; 再生中 solo VISIBLE en el 土台.
+    #[test]
+    fn setprop_visible_unmarks_back_descendants() {
+        let mut vm = fixture_vm();
+        vm.scene.create("土台", Kind::Box, HashMap::new());
+        let mut child = HashMap::new();
+        child.insert(Prop::PARENT, Value::Str("土台".into()));
+        vm.scene.create("メッセージボックス", Kind::Message, child);
+        vm.step_flip(&flip_command(
+            0,
+            0,
+            false,
+            0,
+            &["土台", "メッセージボックス"],
+        ));
+        assert!(!vm.scene.names().iter().any(|name| name == "土台"));
+        assert!(
+            !vm.scene
+                .names()
+                .iter()
+                .any(|name| name == "メッセージボックス")
+        );
+        let cmd = Command {
+            kind: CmdType::SetProp as u8,
+            indent: 0,
+            mute: false,
+            not_update: false,
+            line_no: 0,
+            fields: vec![
+                (
+                    "ObjName",
+                    crate::lsb::Field::Expr(literal(Param::Str("土台".into()))),
+                ),
+                ("ObjProp", crate::lsb::Field::Expr(literal(Param::Int(47)))),
+                ("Value", crate::lsb::Field::Expr(literal(Param::Int(1)))),
+            ],
+        };
+        let script = Lsb {
+            name: "setprop.lsb".into(),
+            version: 117,
+            flags: 0,
+            command_params: vec![],
+            commands: vec![],
+        };
+        vm.step_set_prop(&script, 0, &cmd);
+        assert!(vm.scene.names().iter().any(|name| name == "土台"));
+        assert!(
+            vm.scene
+                .names()
+                .iter()
+                .any(|name| name == "メッセージボックス")
+        );
     }
 
     #[test]
@@ -3662,8 +4748,57 @@ mod tests {
         vm.do_return(Value::Empty);
 
         assert!(vm.scene.get("menu").is_none());
-        assert!(vm.graveyard.contains_key("menu"));
+        assert!(vm.scene.was_deleted("menu"));
         assert!(matches!(vm.state, State::Running));
+    }
+
+    #[test]
+    fn stay_open_menu_restores_modal_after_onselect() {
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([(Prop::ONSELECT, Value::Str("ゲームメイン.lsb".into()))]),
+        );
+        vm.state = State::Menu {
+            name: "menu".into(),
+            choices: vec!["a".into(), "b".into()],
+            values: vec!["a".into(), "b".into()],
+            var: "sel".into(),
+        };
+
+        vm.choose(1);
+        assert!(matches!(vm.state, State::Menu { .. }));
+        vm.dispatch_events();
+        assert!(matches!(vm.state, State::Running));
+        vm.do_return(Value::Empty);
+
+        assert!(matches!(
+            vm.state,
+            State::Menu {
+                name,
+                ..
+            } if name == "menu"
+        ));
+        assert!(vm.scene.get("menu").is_some());
     }
 
     #[test]
@@ -4053,6 +5188,32 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn only_idle_handlers_return_without_yielding_the_frame() {
+        let mut vm = fixture_vm();
+        let script = vm.frames[0].script.clone();
+        for (prop, expect_yield) in [(Prop::ONNOTIFY, true), (Prop::ONIDLE, false)] {
+            vm.yielded = false;
+            vm.frames.push(Frame {
+                script: script.clone(),
+                pc: 0,
+                locals: HashMap::new(),
+                result_var: String::new(),
+                params: vec![],
+                saved_state: Some(State::Running),
+                sender: None,
+                event_prop: Some(prop),
+                auto_scrap_sender: false,
+            });
+            vm.do_return(Value::Empty);
+            assert_eq!(
+                vm.yielded, expect_yield,
+                "{}",
+                crate::lsb::prop_name(prop)
+            );
+        }
     }
 
     fn int_expr(value: i32) -> LiveParser {

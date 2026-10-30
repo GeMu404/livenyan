@@ -326,7 +326,9 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
                 let next = (r.offset..bytes.len())
                     .find(|at| common_header(bytes, *at, index + 1, version, &clips))
                     .ok_or_else(|| {
-                        format!("could not locate next LCM clip after opaque clip {index} (kind {kind})")
+                        format!(
+                            "could not locate next LCM clip after opaque clip {index} (kind {kind})"
+                        )
                     })?;
                 r.offset = next;
             } else {

@@ -2,6 +2,7 @@
 
 use super::names::Func;
 use super::{LiveParser, Param, op};
+use crate::util::{cp932, to_cp932};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -263,6 +264,62 @@ fn chars(s: &str) -> Vec<char> {
     s.chars().collect()
 }
 
+/// Lead byte CP932 / Shift_JIS (pares de 2 bytes). **fuente primaria** calc.html FixStr/Copy.
+fn is_sjis_lead(b: u8) -> bool {
+    (0x81..=0x9f).contains(&b) || (0xe0..=0xfc).contains(&b)
+}
+
+/// Quita un lead byte final incompleto tras un Copy por bytes (calc.html FixStr).
+/// En livenyan las cadenas son Unicode: un corte SJIS a mitad de carácter suele
+/// decodificar como `U+FFFD` al final — se elimina (**interpretación** del mismo caso).
+fn fix_str_sjis(s: &str) -> String {
+    // Primero el síntoma Unicode del corte a mitad de carácter.
+    let mut trimmed = s.to_string();
+    while trimmed.ends_with('\u{FFFD}') {
+        trimmed.pop();
+    }
+    // Luego lead SJIS huérfano si aún quedara tras re-encode.
+    let mut bytes = to_cp932(&trimmed);
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if is_sjis_lead(bytes[i]) {
+            if i + 1 >= bytes.len() {
+                bytes.pop();
+                break;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    cp932(&bytes)
+}
+
+/// `Copy` por bytes CP932, índice 1-based; `count == None` → hasta el final.
+fn sjis_copy(s: &str, start_1based: i64, count: Option<i64>) -> String {
+    let bytes = to_cp932(s);
+    let start = (start_1based - 1).max(0) as usize;
+    if start >= bytes.len() {
+        return String::new();
+    }
+    let end = match count {
+        Some(n) => (start + n.max(0) as usize).min(bytes.len()),
+        None => bytes.len(),
+    };
+    cp932(&bytes[start..end])
+}
+
+fn sjis_delete(s: &str, start_1based: i64, count: Option<i64>) -> String {
+    let mut bytes = to_cp932(s);
+    let start = ((start_1based - 1).max(0) as usize).min(bytes.len());
+    let end = match count {
+        Some(n) => (start + n.max(0) as usize).min(bytes.len()),
+        None => bytes.len(),
+    };
+    bytes.drain(start..end);
+    cp932(&bytes)
+}
+
 fn eval_calc_assignment(source: &str, env: &mut dyn Env) -> Option<Value> {
     let (target, expression) = source.split_once('=')?;
     let target = target.trim();
@@ -322,20 +379,41 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             Value::Array(v) => v.len() as i64,
             _ => 0,
         }),
-        // Copy(s, index(1-based), count)
-        Func::COPY | Func::JCOPY => {
+        // Copy: índices en **bytes** CP932 (calc.html). JCopy: caracteres Unicode.
+        Func::COPY => Value::Str(sjis_copy(&s(0), n(1), a.get(2).map(|v| v.as_int()))),
+        Func::JCOPY => {
             let c = chars(&s(0));
             let st = (n(1) - 1).max(0) as usize;
-            let cnt = n(2).max(0) as usize;
+            let cnt = match a.get(2) {
+                Some(v) => v.as_int().max(0) as usize,
+                None => c.len().saturating_sub(st),
+            };
             Value::Str(c.iter().skip(st).take(cnt).collect())
         }
-        Func::DELETE | Func::JDELETE => {
+        // Delete: bytes CP932; muta la variable (calc.html「なし」). JDelete: chars.
+        Func::DELETE => {
+            let out = Value::Str(sjis_delete(&s(0), n(1), a.get(2).map(|v| v.as_int())));
+            if let Some(name) = var_name(raw, 0) {
+                env.set_var(name, out.clone());
+            }
+            out
+        }
+        Func::JDELETE => {
             let mut c = chars(&s(0));
             let st = ((n(1) - 1).max(0) as usize).min(c.len());
-            let end = (st + n(2).max(0) as usize).min(c.len());
+            let end = match a.get(2) {
+                Some(v) => (st + v.as_int().max(0) as usize).min(c.len()),
+                None => c.len(),
+            };
             c.drain(st..end);
-            Value::Str(c.into_iter().collect())
+            let out = Value::Str(c.into_iter().collect());
+            if let Some(name) = var_name(raw, 0) {
+                env.set_var(name, out.clone());
+            }
+            out
         }
+        // FixStr: si el final es lead byte SJIS huérfano, lo quita (calc.html).
+        Func::FIXSTR => Value::Str(fix_str_sjis(&s(0))),
         Func::INSERT | Func::JINSERT => {
             let mut c = chars(&s(1));
             let at = ((n(2) - 1).max(0) as usize).min(c.len());
@@ -621,6 +699,7 @@ mod tests {
             ],
         };
         assert_eq!(eval(&lp, &mut e), Value::Int(2));
+        // calc.html: Copy es por bytes CP932 — Copy("あいうえお", 3, 2) == "い"
         let lp = LiveParser {
             entries: vec![od(
                 op::FUNC,
@@ -628,12 +707,46 @@ mod tests {
                 Some(Func::COPY),
                 vec![
                     Param::Str("あいうえお".into()),
-                    Param::Int(2),
+                    Param::Int(3),
                     Param::Int(2),
                 ],
             )],
         };
-        assert_eq!(eval(&lp, &mut e), Value::Str("いう".into()));
+        assert_eq!(eval(&lp, &mut e), Value::Str("い".into()));
+
+        // JCopy: por caracteres — JCopy("あいうえお", 3, 2) == "うえ"
+        let lp = LiveParser {
+            entries: vec![od(
+                op::FUNC,
+                "____arg",
+                Some(Func::JCOPY),
+                vec![
+                    Param::Str("あいうえお".into()),
+                    Param::Int(3),
+                    Param::Int(2),
+                ],
+            )],
+        };
+        assert_eq!(eval(&lp, &mut e), Value::Str("うえ".into()));
+
+        // FixStr(Copy("あい", 1, 3)) == "あ" (calc.html)
+        let lp = LiveParser {
+            entries: vec![
+                od(
+                    op::FUNC,
+                    "____c",
+                    Some(Func::COPY),
+                    vec![Param::Str("あい".into()), Param::Int(1), Param::Int(3)],
+                ),
+                od(
+                    op::FUNC,
+                    "____arg",
+                    Some(Func::FIXSTR),
+                    vec![Param::Var("____c".into())],
+                ),
+            ],
+        };
+        assert_eq!(eval(&lp, &mut e), Value::Str("あ".into()));
 
         // Test array element assignment through DIMTO and TO (e.g. @Result[i] = S)
         e.0.insert("@Result".into(), Value::Array(vec![Value::Empty; 3]));
@@ -763,5 +876,17 @@ mod tests {
             eval(&zero_is_not_different_from_empty_string, &mut env),
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn fix_str_strips_orphan_after_byte_copy() {
+        let broken = sjis_copy("あい", 1, Some(3));
+        let codes: Vec<u32> = broken.chars().map(|c| c as u32).collect();
+        assert!(
+            codes.contains(&0xfffd) || codes == [0x3042],
+            "unexpected copy codes {codes:?} for {broken:?}"
+        );
+        let fixed = fix_str_sjis(&broken);
+        assert_eq!(fixed, "あ", "broken={broken:?} codes={codes:?}");
     }
 }

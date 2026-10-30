@@ -1,11 +1,11 @@
 use super::{
-    CinemaPlayback, Pending, State, TimerState, VIDEO_EXTS, VideoFrame, VideoFramePair,
+    CinemaPlayback, Clock, Pending, State, TimerState, VIDEO_EXTS, VideoFrame, VideoFramePair,
     VideoPlayback, Vm, video_pair_progress,
 };
 use crate::assets::{Asset, IMAGE_EXTS};
 use crate::lsb::expr::Value;
 use crate::lsb::names::Prop;
-use crate::scene::{Kind, TextItem};
+use crate::scene::{Anim, Kind, TextItem};
 use std::collections::{HashMap, VecDeque};
 
 /// GetProp(..., TEXT) lo usan 終了.lsb / PAUSE; debe reflejar el buffer de reproducción.
@@ -123,7 +123,7 @@ impl Vm {
     }
 
     pub fn video_frame(&self, name: &str) -> Option<(u64, u64, &[u8], u32, u32)> {
-        let playback = self.videos.get(name)?;
+        let playback = self.video_of(name)?;
         let frame = playback.frames.back()?;
         Some((
             playback.generation,
@@ -135,7 +135,7 @@ impl Vm {
     }
 
     pub fn video_frame_pair(&self, name: &str, now_ms: f64) -> Option<VideoFramePair<'_>> {
-        let playback = self.videos.get(name)?;
+        let playback = self.video_of(name)?;
         let first = playback.frames.front()?;
         let playback_now_ms = playback.paused_at_ms.unwrap_or(now_ms);
         let playhead = playback
@@ -188,10 +188,13 @@ impl Vm {
         })
     }
     pub(crate) fn start_play(&mut self, target: &str, plan: Vec<Pending>) {
-        let p = self.plays.entry(target.to_string()).or_default();
+        let now = self.now;
+        let Some(p) = self.ensure_play(target) else {
+            return;
+        };
         p.plan.extend(plan);
-        if p.next < self.now {
-            p.next = self.now;
+        if p.next < now {
+            p.next = now;
         }
         if let Some(o) = self.scene.get_mut(target) {
             o.props.insert(Prop::PLAYING, Value::Bool(true));
@@ -212,6 +215,7 @@ impl Vm {
             .data()
             .resolve(&source, VIDEO_EXTS)
             .ok_or_else(|| format!("video asset not found: {source:?}"))?;
+        let started = std::time::Instant::now();
         let data = self
             .assets
             .data()
@@ -223,12 +227,15 @@ impl Vm {
             (w, h) if w > 0 && h > 0 => crate::video::OutputSize::KnownNative(w as u32, h as u32),
             _ => crate::video::OutputSize::Source,
         };
-        let (decoder, native_w, native_h) =
-            crate::video::Decoder::start(&data, size, repeat)?;
+        let (decoder, native_w, native_h) = crate::video::Decoder::start(&data, size, repeat)?;
+        log::info!(
+            "load video {file}: {native_w}x{native_h} in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         self.video_generation = self.video_generation.wrapping_add(1);
-        self.videos.insert(
+        self.clocks.insert(
             name.to_string(),
-            VideoPlayback {
+            Clock::Video(VideoPlayback {
                 decoder: Some(decoder),
                 frames: VecDeque::with_capacity(2),
                 frame_seq: 0,
@@ -238,7 +245,7 @@ impl Vm {
                 started_at_ms: self.now,
                 first_pts_seconds: None,
                 paused_at_ms: None,
-            },
+            }),
         );
         if let Some(obj) = self.scene.get_mut(name) {
             obj.props
@@ -246,15 +253,14 @@ impl Vm {
             obj.props
                 .insert(Prop::ORIGHEIGHT, Value::Int(native_h as i64));
             obj.props.insert(Prop::WIDTH, Value::Int(native_w as i64));
-            obj.props
-                .insert(Prop::HEIGHT, Value::Int(native_h as i64));
+            obj.props.insert(Prop::HEIGHT, Value::Int(native_h as i64));
             obj.props.insert(Prop::PLAYING, Value::Bool(true));
         }
         Ok(())
     }
 
     pub(crate) fn stop_video(&mut self, name: &str) {
-        if let Some(playback) = self.videos.get_mut(name) {
+        if let Some(playback) = self.video_mut(name) {
             playback.decoder = None;
         }
         if let Some(obj) = self.scene.get_mut(name) {
@@ -269,16 +275,14 @@ impl Vm {
             return false;
         };
         let repeat = object.get(Prop::REPEAT).is_some_and(|value| value.truthy());
-        (!repeat && self.anims.contains_key(name))
+        (!repeat && object.anim.is_some())
             || self.scene.motions.iter().any(|motion| motion.obj == name)
             || self
-                .cinema_movies
-                .get(name)
+                .cinema(name)
                 .is_some_and(|movie| self.now < movie.started_at + movie.duration_ms)
             || (!repeat
                 && self
-                    .videos
-                    .get(name)
+                    .video_of(name)
                     .is_some_and(|video| video.decoder.is_some()))
     }
 
@@ -318,15 +322,15 @@ impl Vm {
                 None => vm.opts.text_cps as f64,
             }
         };
-        let names: Vec<String> = self.plays.keys().cloned().collect();
+        let names = self.play_names();
         for n in names {
-            if self.placeholders.contains(&n) {
+            if self.scene.get(&n).is_some_and(|object| object.placeholder) {
                 continue; // aún no existe el objeto real
             }
             let mut finished = false;
             let mut notifies = vec![];
             // efecto WAIT pendiente: animación o fundido del objeto aún en curso
-            let waiting_obj = self.plays.get(&n).and_then(|p| p.wait_for.clone());
+            let waiting_obj = self.play_of(&n).and_then(|p| p.wait_for.clone());
             if let Some((o, deadline)) = waiting_obj {
                 let busy = self.effect_busy(&o);
                 if busy && self.now < deadline && !self.skip {
@@ -337,12 +341,12 @@ impl Vm {
                     "text on {n}: WAIT on {o:?} done{}",
                     if busy { " (deadline/skip)" } else { "" }
                 );
-                if let Some(p) = self.plays.get_mut(&n) {
+                if let Some(p) = self.play_mut(&n) {
                     p.wait_for = None;
                     p.click_skips_wait = false;
                 }
             }
-            if let Some(p) = self.plays.get(&n) {
+            if let Some(p) = self.play_of(&n) {
                 let st = if p.waiting_click {
                     "waiting-for-click".to_string()
                 } else if p.next > self.now + 1.0 {
@@ -363,6 +367,10 @@ impl Vm {
                 };
                 self.play_debug(&n, &st);
             }
+            let Some(mut playback) = self.scene.get_mut(&n).and_then(|object| object.play.take())
+            else {
+                continue;
+            };
             loop {
                 let (shown, instant, parent) = match self.scene.get(&n) {
                     Some(object) => (
@@ -378,9 +386,7 @@ impl Vm {
                 // MESOFF + WAITPLAY/CLICK antes de MESEND avanzaba la escena sola.
                 let shown = shown && parent_chain_visible(&self.scene, &parent);
                 let cps = cps_of(self, &n);
-                let Some(p) = self.plays.get_mut(&n) else {
-                    break;
-                };
+                let p = &mut playback;
                 if p.next > self.now + 1.0 && p.pos >= p.cur.len() {
                     break; // espera temporizada (WAIT de efecto con tiempo)
                 }
@@ -463,9 +469,12 @@ impl Vm {
                 if started_read {
                     // docs/livenovel/text.html: 再生開始, al empezar a mostrar texto.
                     // 既読なら @ParamStr[0] = 1. 再生開始.lsb usa eso para TEXTDELAY.
-                    let read = self.plays.get(&n).is_some_and(|play| play.already_read);
+                    let read = p.already_read;
                     self.fire(&n, Prop::ONPLAYSTART, vec![Value::Int(i64::from(read))]);
                 }
+            }
+            if let Some(object) = self.scene.get_mut(&n) {
+                object.play = Some(playback);
             }
             for raw in notifies {
                 // <EVENT VALUE="a\nb"> -> ONNOTIFY de la caja con @ParamStr = [a, b] (manual de
@@ -495,14 +504,16 @@ impl Vm {
                 }
             }
             if finished {
-                self.plays.remove(&n);
+                self.clear_play(&n);
                 log::debug!("playback end on {n}");
                 if let Some(o) = self.scene.get_mut(&n) {
                     o.props.insert(Prop::PLAYING, Value::Bool(false));
                     o.props.insert(Prop::TEXTPAUSED, Value::Bool(false));
                 }
                 if !self.fire(&n, Prop::ONPLAYEND, vec![]) {
-                    self.ended_unnotified.insert(n.clone());
+                    if let Some(object) = self.scene.get_mut(&n) {
+                        object.ended_unnotified = true;
+                    }
                 }
                 if matches!(&self.state, State::WaitText { target } if *target == n) {
                     self.state = State::Running;
@@ -510,7 +521,7 @@ impl Vm {
             }
         }
         if let State::WaitText { target } = &self.state {
-            if !self.plays.contains_key(target) {
+            if self.play_of(target).is_none() {
                 self.state = State::Running;
             }
         }
@@ -573,13 +584,16 @@ impl Vm {
 
     /// Registra un objeto de imagen para animar si su GAL tiene varios frames.
     pub(crate) fn watch_anim(&mut self, obj: &str, src: &str) {
-        match self.assets.data().resolve(src, IMAGE_EXTS) {
-            Some(n) => {
-                self.anims.insert(obj.to_string(), (n, None));
-            }
-            None => {
-                self.anims.remove(obj);
-            }
+        let anim = self
+            .assets
+            .data()
+            .resolve(src, IMAGE_EXTS)
+            .map(|source| Anim {
+                source,
+                started: None,
+            });
+        if let Some(object) = self.scene.get_mut(obj) {
+            object.anim = anim;
         }
     }
 
@@ -589,22 +603,26 @@ impl Vm {
     pub(crate) fn update_anims(&mut self) {
         let dt = (self.now - self.anim_clock).max(0.0);
         self.anim_clock = self.now;
-        let names: Vec<String> = self.anims.keys().cloned().collect();
+        let names = self.anim_names();
         for n in names {
             let Some(o) = self.scene.get(&n) else {
-                self.anims.remove(&n);
                 continue;
             };
             let paused = o.get(Prop::PAUSED).is_some_and(|v| v.truthy());
             let repeat = o.get(Prop::REPEAT).is_some_and(|v| v.truthy());
-            let (file, start) = self.anims[&n].clone();
+            let Some(anim) = o.anim.clone() else {
+                continue;
+            };
+            let (file, start) = (anim.source, anim.started);
             let delays = match self.assets.try_get(&file) {
                 Some(crate::assets::Asset::Image(img)) => img.delays.clone(),
                 Some(_) => vec![],
                 None => continue, // aún cargando
             };
             if delays.len() < 2 {
-                self.anims.remove(&n);
+                if let Some(object) = self.scene.get_mut(&n) {
+                    object.anim = None;
+                }
                 continue;
             }
             let total: f64 = delays.iter().map(|d| *d as f64).sum::<f64>().max(1.0);
@@ -642,25 +660,44 @@ impl Vm {
             if let Some(o) = self.scene.get_mut(&n) {
                 o.frame = idx;
                 o.props.insert(Prop::PLAYING, Value::Bool(!done));
+                if done {
+                    o.anim = None;
+                } else if let Some(anim) = o.anim.as_mut() {
+                    anim.source = file;
+                    anim.started = Some(start);
+                }
             }
             if done {
-                self.anims.remove(&n);
                 self.fire(&n, Prop::ONPLAYEND, vec![]);
-            } else {
-                self.anims.insert(n, (file, Some(start)));
             }
         }
     }
 
     pub(crate) fn update_cinemas(&mut self) {
-        let done: Vec<String> = self
-            .cinemas
-            .iter()
-            .filter(|(_, t)| **t <= self.now || self.skip)
-            .map(|(n, _)| n.clone())
-            .collect();
+        let done = self
+            .one_shot_cinemas()
+            .into_iter()
+            .filter(|name| {
+                matches!(
+                    self.clocks.get(name),
+                    Some(Clock::Cinema {
+                        until: Some(until),
+                        ..
+                    }) if *until <= self.now || self.skip
+                )
+            })
+            .collect::<Vec<_>>();
         for n in done {
-            self.cinemas.remove(&n);
+            let drop_clock = match self.clocks.get_mut(&n) {
+                Some(Clock::Cinema { movie, until }) => {
+                    *until = None;
+                    movie.is_none()
+                }
+                _ => false,
+            };
+            if drop_clock {
+                self.clocks.remove(&n);
+            }
             if let Some(o) = self.scene.get_mut(&n) {
                 o.props.insert(Prop::PLAYING, Value::Bool(false));
             }
@@ -669,21 +706,22 @@ impl Vm {
     }
 
     pub(crate) fn update_videos(&mut self) {
-        let names: Vec<String> = self.videos.keys().cloned().collect();
+        let names = self.video_names();
         for name in names {
             let paused = self
                 .scene
                 .get(&name)
                 .is_some_and(|o| o.get(Prop::PAUSED).is_some_and(Value::truthy));
-            let Some(playback) = self.videos.get_mut(&name) else {
+            let now = self.now;
+            let Some(Clock::Video(playback)) = self.clocks.get_mut(&name) else {
                 continue;
             };
             if paused {
-                playback.paused_at_ms.get_or_insert(self.now);
+                playback.paused_at_ms.get_or_insert(now);
                 continue;
             }
             if let Some(paused_at_ms) = playback.paused_at_ms.take() {
-                playback.started_at_ms += (self.now - paused_at_ms).max(0.0);
+                playback.started_at_ms += (now - paused_at_ms).max(0.0);
             }
             let started_at_ms = playback.started_at_ms;
             let mut finished = None;
@@ -717,10 +755,10 @@ impl Vm {
                     }
                 }
             }
-            if let Some(playback) = self.videos.get_mut(&name)
+            if let Some(Clock::Video(playback)) = self.clocks.get_mut(&name)
                 && let Some(first_pts) = playback.first_pts_seconds
             {
-                let playhead = first_pts + ((self.now - started_at_ms).max(0.0) / 1000.0);
+                let playhead = first_pts + ((now - started_at_ms).max(0.0) / 1000.0);
                 while playback.frames.len() > 2
                     && playback
                         .frames
@@ -734,7 +772,7 @@ impl Vm {
                 if let Err(e) = result {
                     log::error!("Movie {name:?}: {e}");
                 }
-                if let Some(playback) = self.videos.get_mut(&name) {
+                if let Some(Clock::Video(playback)) = self.clocks.get_mut(&name) {
                     playback.decoder = None;
                 }
                 if let Some(o) = self.scene.get_mut(&name) {
@@ -768,12 +806,19 @@ impl Vm {
         }) else {
             return Ok(None);
         };
+        let started = std::time::Instant::now();
         let bytes = self
             .assets
             .data()
             .read(&name)
             .map_err(|e| format!("{name}: {e}"))?;
         let mut movie = crate::lcm::parse(&bytes).map_err(|e| format!("{name}: {e}"))?;
+        log::info!(
+            "load lcm {name}: {} bytes, {} clips in {:.1} ms",
+            bytes.len(),
+            movie.clips.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         for (clip_index, clip) in movie.clips.iter_mut().enumerate() {
             if let crate::lcm::TrackContent::Text { value, .. } = &mut clip.content
                 && let Some(translated) =
@@ -810,20 +855,17 @@ impl Vm {
             .is_some_and(|o| o.get(Prop::REPEAT).is_some_and(Value::truthy));
         // REPEAT no entra en el mapa de “una pasada”: no bloquea el clic ni dispara
         // ONPLAYEND al terminar cada vuelta. El playhead hace rollover al muestrear.
-        if repeat {
-            self.cinemas.remove(object);
-        } else {
-            self.cinemas
-                .insert(object.to_string(), self.now + duration_ms);
-        }
         let (mw, mh) = (movie.width, movie.height);
-        self.cinema_movies.insert(
+        self.clocks.insert(
             object.to_string(),
-            CinemaPlayback {
-                movie,
-                started_at: self.now,
-                duration_ms,
-                repeat,
+            Clock::Cinema {
+                until: (!repeat).then_some(self.now + duration_ms),
+                movie: Some(CinemaPlayback {
+                    movie,
+                    started_at: self.now,
+                    duration_ms,
+                    repeat,
+                }),
             },
         );
         if let Some(o) = self.scene.get_mut(object) {
@@ -948,7 +990,7 @@ mod tests {
         );
         vm.now = 1_000.0;
         vm.start_lcm_movie("count", digit_movie());
-        assert!(!vm.cinemas.contains_key("count"));
+        assert!(!vm.has_cinema_deadline("count"));
         assert!(
             vm.scene
                 .get("count")
@@ -961,10 +1003,16 @@ mod tests {
         vm.now = 1_000.0 + duration * 2.0;
         vm.update_cinemas();
         assert!(vm.queue.is_empty());
-        assert_eq!(vm.cinema_movies["count"].texts_at(vm.now)[0].value, "10:87");
+        assert_eq!(
+            vm.cinema("count").unwrap().texts_at(vm.now)[0].value,
+            "10:87"
+        );
 
         vm.now = 1_000.0 + duration - frame * 0.5;
-        assert_eq!(vm.cinema_movies["count"].texts_at(vm.now)[0].value, "10:42");
+        assert_eq!(
+            vm.cinema("count").unwrap().texts_at(vm.now)[0].value,
+            "10:42"
+        );
 
         vm.scene.create(
             "once",
@@ -976,10 +1024,10 @@ mod tests {
         );
         vm.now = 5_000.0;
         vm.start_lcm_movie("once", digit_movie());
-        assert!(vm.cinemas.contains_key("once"));
+        assert!(vm.has_cinema_deadline("once"));
         vm.now = 5_000.0 + duration + frame;
         vm.update_cinemas();
-        assert!(!vm.cinemas.contains_key("once"));
+        assert!(!vm.has_cinema_deadline("once"));
         assert!(
             !vm.scene
                 .get("once")
@@ -990,6 +1038,9 @@ mod tests {
         );
         assert_eq!(vm.queue.len(), 1);
         assert_eq!(vm.queue[0].script, "ended.lsb");
-        assert_eq!(vm.cinema_movies["once"].texts_at(vm.now)[0].value, "10:42");
+        assert_eq!(
+            vm.cinema("once").unwrap().texts_at(vm.now)[0].value,
+            "10:42"
+        );
     }
 }

@@ -102,7 +102,16 @@ impl Game {
             .names()
             .iter()
             .find(|n| n.to_lowercase().ends_with(".lpb"))
-            .and_then(|n| data.read(n).ok())
+            .and_then(|n| {
+                let started = std::time::Instant::now();
+                let bytes = data.read(n).ok()?;
+                log::info!(
+                    "load project {n}: {} bytes in {:.1} ms",
+                    bytes.len(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                Some(bytes)
+            })
             .and_then(|d| parse_lpb(&d).map_err(|e| log::warn!("lpb: {e}")).ok());
         let stem = path
             .file_stem()

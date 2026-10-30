@@ -65,7 +65,6 @@ struct TextureMemoryStats {
     ui_count: usize,
 }
 
-
 struct MenuCache {
     name: String,
     choices: Vec<String>,
@@ -86,14 +85,22 @@ enum ToolbarAction {
     ExportTexts,
 }
 
+/// Edge strip that reveals the toolbar; keep small so it does not steal play space.
+const TOOLBAR_REVEAL_HEIGHT: f32 = 6.0;
+/// Drawn bar height. Open chrome stays hit-testable while hovered.
+const TOOLBAR_BAR_HEIGHT: f32 = 48.0;
+const OPTIONS_PANEL_WIDTH: f32 = 336.0;
+const OPTIONS_PANEL_HEIGHT: f32 = 252.0;
+const OPTIONS_PANEL_MARGIN: f32 = 14.0;
+
 fn toolbar_button_rects(width: u32) -> [(ToolbarAction, FRect); 3] {
-    let y = 3.0;
-    let h = 24.0;
-    let gap = 5.0;
-    let right = width as f32 - 6.0;
-    let options = FRect::new(right - 76.0, y, 76.0, h);
-    let fullscreen = FRect::new(options.x - gap - 104.0, y, 104.0, h);
-    let quit = FRect::new(fullscreen.x - gap - 54.0, y, 54.0, h);
+    let h = 30.0;
+    let y = (TOOLBAR_BAR_HEIGHT - h) * 0.5;
+    let gap = 8.0;
+    let right = width as f32 - OPTIONS_PANEL_MARGIN;
+    let options = FRect::new(right - 104.0, y, 104.0, h);
+    let fullscreen = FRect::new(options.x - gap - 116.0, y, 116.0, h);
+    let quit = FRect::new(fullscreen.x - gap - 76.0, y, 76.0, h);
     [
         (ToolbarAction::Quit, quit),
         (ToolbarAction::Fullscreen, fullscreen),
@@ -101,26 +108,43 @@ fn toolbar_button_rects(width: u32) -> [(ToolbarAction, FRect); 3] {
     ]
 }
 
+fn options_panel_rect(width: u32) -> FRect {
+    FRect::new(
+        width as f32 - OPTIONS_PANEL_MARGIN - OPTIONS_PANEL_WIDTH,
+        TOOLBAR_BAR_HEIGHT,
+        OPTIONS_PANEL_WIDTH,
+        OPTIONS_PANEL_HEIGHT,
+    )
+}
+
 fn fps_meter_option_rect(width: u32) -> FRect {
-    FRect::new(width as f32 - 124.0, 148.0, 112.0, 26.0)
+    let panel = options_panel_rect(width);
+    FRect::new(
+        panel.x + panel.w - 12.0 - 112.0,
+        panel.y + 136.0,
+        112.0,
+        28.0,
+    )
 }
 
 fn export_texts_option_rect(width: u32) -> FRect {
-    FRect::new(width as f32 - 328.0, 204.0, 310.0, 26.0)
+    let panel = options_panel_rect(width);
+    FRect::new(panel.x + 12.0, panel.y + 196.0, panel.w - 24.0, 28.0)
 }
 
 fn scale_filter_option_rects(width: u32) -> Vec<(ScaleFilter, FRect)> {
-    let y = 118.0;
+    let panel = options_panel_rect(width);
+    let y = panel.y + 96.0;
     let modes = [
         ScaleFilter::Linear,
         ScaleFilter::Nearest,
         ScaleFilter::Sharp,
     ];
-    let w = 84.0;
-    let h = 26.0;
-    let gap = 6.0;
+    let w = 96.0;
+    let h = 28.0;
+    let gap = 8.0;
     let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
-    let x = width as f32 - 6.0 - total_width;
+    let x = panel.x + panel.w - 12.0 - total_width;
     modes
         .into_iter()
         .enumerate()
@@ -240,7 +264,6 @@ fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> TextureMemorySta
             bytes.saturating_add(estimated_texture_bytes(query.width, query.height))
         });
 
-
     stats
 }
 
@@ -281,17 +304,16 @@ fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<Toolbar
     None
 }
 
-/// Edge strip that reveals the toolbar; keep small so it does not steal play space.
-const TOOLBAR_REVEAL_HEIGHT: f32 = 6.0;
-/// Drawn bar height in `draw_toolbar` (fill). Open chrome stays hit-testable while hovered.
-const TOOLBAR_BAR_HEIGHT: f32 = 46.0;
-
 fn toolbar_contains(width: u32, x: f32, y: f32, options_open: bool) -> bool {
-    (y >= 0.0 && y < TOOLBAR_BAR_HEIGHT && x >= 0.0 && x < width as f32)
-        || (options_open
-            && x >= width as f32 - 340.0
-            && x < width as f32 - 6.0
-            && (32.0..270.0).contains(&y))
+    let in_bar = y >= 0.0 && y < TOOLBAR_BAR_HEIGHT && x >= 0.0 && x < width as f32;
+    if in_bar {
+        return true;
+    }
+    if !options_open {
+        return false;
+    }
+    let panel = options_panel_rect(width);
+    x >= panel.x && x < panel.x + panel.w && y >= panel.y && y < panel.y + panel.h
 }
 
 fn toolbar_in_reveal_strip(mouse_y: f32) -> bool {
@@ -334,13 +356,14 @@ fn point_in_logical_render(point: (f32, f32), logical: (u32, u32)) -> bool {
 }
 
 fn interpolation_option_rects(width: u32) -> Vec<(InterpolationMode, FRect)> {
-    let y = 77.0;
+    let panel = options_panel_rect(width);
+    let y = panel.y + 38.0;
     let modes = [InterpolationMode::Off, InterpolationMode::Crossfade];
-    let w = 96.0;
-    let h = 27.0;
+    let w = 108.0;
+    let h = 28.0;
     let gap = 8.0;
     let total_width = modes.len() as f32 * w + (modes.len() - 1) as f32 * gap;
-    let x = width as f32 - 6.0 - total_width;
+    let x = panel.x + panel.w - 12.0 - total_width;
     modes
         .into_iter()
         .enumerate()
@@ -360,7 +383,6 @@ fn frame_is_opaque(image: &crate::gal::Image, frame: usize) -> bool {
     gal_frame_pixels(image, frame)
         .is_some_and(|pixels| pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX))
 }
-
 
 fn can_crossfade_frames(
     image: &crate::gal::Image,
@@ -615,12 +637,39 @@ fn draw_toolbar_text(
     width: u32,
     height: u32,
 ) {
+    draw_toolbar_text_styled(
+        canvas,
+        tc,
+        gfx,
+        font,
+        text,
+        x,
+        y,
+        width,
+        height,
+        [245, 245, 250, 255],
+        0,
+    );
+}
+
+fn draw_toolbar_text_styled(
+    canvas: &mut Canvas<Window>,
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    font: Option<&mut TextRenderer>,
+    text: &str,
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    align: u8,
+) {
     let Some(font) = font else {
         return;
     };
-    let color = [245, 245, 250, 255];
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (text, width, height, 16_u32).hash(&mut hasher);
+    (text, width, height, 16_u32, color, align).hash(&mut hasher);
     let style = hasher.finish() as usize;
     let stale = gfx
         .toolbar_texts
@@ -631,7 +680,7 @@ fn draw_toolbar_text(
             .chars()
             .map(|character| TextItem::Char(character.to_string()))
             .collect::<Vec<_>>();
-        let image = font.render(&items, width, height, 16.0, color, false);
+        let image = font.render_aligned(&items, width, height, 16.0, color, false, align);
         if let Some(texture) = upload(tc, image.w, image.h, &image.rgba, ScaleMode::Linear) {
             gfx.toolbar_texts.insert(text.to_string(), (style, texture));
         }
@@ -649,6 +698,31 @@ fn draw_toolbar_text(
             ),
         );
     }
+}
+
+fn draw_toolbar_chip_label(
+    canvas: &mut Canvas<Window>,
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    font: Option<&mut TextRenderer>,
+    rect: FRect,
+    text: &str,
+    color: [u8; 4],
+) {
+    let text_h = 22.0;
+    draw_toolbar_text_styled(
+        canvas,
+        tc,
+        gfx,
+        font,
+        text,
+        rect.x,
+        rect.y + (rect.h - text_h) / 2.0,
+        rect.w.max(1.0) as u32,
+        text_h as u32,
+        color,
+        1,
+    );
 }
 
 fn language_picker_rects(
@@ -889,7 +963,6 @@ fn upload_with_error(
     t.set_scale_mode(filter);
     Ok(t)
 }
-
 
 /// Estado de dibujo de un objeto (para el registro de depuración).
 struct Drawn {
@@ -1672,11 +1745,15 @@ pub fn run(
             break;
         }
 
-        // Keep the last complete scene visible while newly referenced images decode.
+        // Keep the last complete scene until the picture layer of the next one is decoded.
         let scene_render_started = Instant::now();
         let mut drawn = Vec::new();
-        let ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
+        let mut ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
+        vm.append_wipe_incoming(&mut ordered_objects);
+        let savescreen_req = vm.take_pending_savescreen();
         if scene_images_ready(&assets, &vm, &ordered_objects) {
+            let mut captured_rgba: Option<Vec<u8>> = None;
+            let need_capture = savescreen_req.is_some();
             canvas
                 .with_texture_canvas(&mut scene_frame, |scene_canvas| {
                     scene_canvas.set_draw_color(Color::RGB(0, 0, 0));
@@ -1700,6 +1777,7 @@ pub fn run(
                             scene_canvas,
                             &tc,
                             &assets,
+                            &vm,
                             &mut gfx,
                             font.as_mut(),
                             choices,
@@ -1712,9 +1790,36 @@ pub fn run(
                     } else {
                         gfx.menu = None;
                     }
+                    // SaveScreen: un solo readback GPU→CPU cuando hay pedido (no cada frame).
+                    if need_capture
+                        && let Ok(shot) = scene_canvas.read_pixels(None)
+                        && let Ok(shot) = shot.convert_format(PixelFormat::RGBA32)
+                    {
+                        let (w, h, pitch) = (shot.width(), shot.height(), shot.pitch() as usize);
+                        if w == lw && h == lh {
+                            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                            shot.with_lock(|px: &[u8]| {
+                                for y in 0..h as usize {
+                                    rgba.extend_from_slice(
+                                        &px[y * pitch..y * pitch + w as usize * 4],
+                                    );
+                                }
+                            });
+                            captured_rgba = Some(rgba);
+                        }
+                    }
                 })
                 .map_err(|e| format!("cannot render scene frame: {e}"))?;
+            if let (Some(req), Some(rgba)) = (savescreen_req, captured_rgba) {
+                let path = req.path.clone();
+                if !vm.complete_savescreen(&req, lw, lh, rgba) {
+                    log::warn!("SaveScreen: failed to write {path:?}");
+                }
+            }
             scene_frame_ready = true;
+        } else if let Some(req) = savescreen_req {
+            // Escena aún sin texturas: reencolar para el próximo frame listo.
+            vm.pending_savescreen = Some(req);
         }
         let scene_render_ms = scene_render_started.elapsed().as_secs_f64() * 1000.0;
         let toolbar_visible = snapshot.is_none()
@@ -1984,7 +2089,7 @@ pub fn run(
             vm_steps_sum = 0;
             fps_epoch = Instant::now();
         }
-        if !first_scene_logged && !vm.scene.objs.is_empty() {
+        if !first_scene_logged && !vm.scene.is_empty() {
             first_scene_logged = true;
             log::info!(
                 "first scene frame after {:.1} ms",
@@ -2002,6 +2107,7 @@ pub fn run(
         } else if !cfg.window.vsync {
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
+        crate::log_dedup::poll();
     }
     if vm.unimpl.is_empty() {
         log::warn!("# unimplemented: none");
@@ -2012,6 +2118,106 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+fn corner_inset(distance: f32, radius: f32) -> f32 {
+    if radius <= 0.5 || distance >= radius {
+        return 0.0;
+    }
+    let opposite = radius - distance;
+    radius - (radius * radius - opposite * opposite).max(0.0).sqrt()
+}
+
+/// `radii` is top-left, top-right, bottom-right, bottom-left.
+fn fill_round_rect(canvas: &mut Canvas<Window>, rect: FRect, radii: [f32; 4], color: Color) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let max_radius = (rect.w * 0.5).min(rect.h * 0.5);
+    let radii = radii.map(|radius| radius.clamp(0.0, max_radius));
+    canvas.set_draw_color(color);
+    let rows = rect.h.ceil() as i32;
+    for row in 0..rows {
+        let y = (row as f32 + 0.5).min(rect.h);
+        let left = if y < radii[0] {
+            corner_inset(y, radii[0])
+        } else {
+            corner_inset(rect.h - y, radii[3])
+        };
+        let right = if y < radii[1] {
+            corner_inset(y, radii[1])
+        } else {
+            corner_inset(rect.h - y, radii[2])
+        };
+        let width = rect.w - left - right;
+        if width <= 0.0 {
+            continue;
+        }
+        let _ = canvas.fill_rect(FRect::new(rect.x + left, rect.y + row as f32, width, 1.0));
+    }
+}
+
+fn fill_round_chip(canvas: &mut Canvas<Window>, rect: FRect, fill: Color, rim: Color) {
+    let radius = rect.h * 0.5;
+    fill_round_rect(canvas, rect, [radius; 4], rim);
+    let inner_radius = (radius - 1.0).max(0.0);
+    fill_round_rect(
+        canvas,
+        FRect::new(
+            rect.x + 1.0,
+            rect.y + 1.0,
+            (rect.w - 2.0).max(1.0),
+            (rect.h - 2.0).max(1.0),
+        ),
+        [inner_radius; 4],
+        fill,
+    );
+}
+
+fn fill_vertical_fade(canvas: &mut Canvas<Window>, rect: FRect, top: [u8; 4], bottom: [u8; 4]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let rows = rect.h.ceil() as i32;
+    let denom = (rows - 1).max(1) as f32;
+    for row in 0..rows {
+        let t = row as f32 / denom;
+        let sample = |index: usize| {
+            (top[index] as f32 + (bottom[index] as f32 - top[index] as f32) * t).round() as u8
+        };
+        canvas.set_draw_color(Color::RGBA(sample(0), sample(1), sample(2), sample(3)));
+        let _ = canvas.fill_rect(FRect::new(rect.x, rect.y + row as f32, rect.w, 1.0));
+    }
+}
+
+fn rect_contains(rect: FRect, x: f32, y: f32) -> bool {
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
+enum ChromeChip {
+    Idle,
+    Hover,
+    On,
+}
+
+fn chrome_chip_colors(kind: ChromeChip) -> (Color, Color, [u8; 4]) {
+    match kind {
+        ChromeChip::On => (
+            Color::RGBA(196, 148, 78, 242),
+            Color::RGBA(236, 208, 156, 255),
+            [42, 30, 18, 255],
+        ),
+        ChromeChip::Hover => (
+            Color::RGBA(214, 176, 112, 70),
+            Color::RGBA(222, 186, 128, 190),
+            [248, 242, 230, 255],
+        ),
+        ChromeChip::Idle => (
+            Color::RGBA(255, 246, 232, 22),
+            Color::RGBA(255, 246, 232, 52),
+            [244, 238, 228, 255],
+        ),
+    }
 }
 
 fn draw_toolbar(
@@ -2030,23 +2236,50 @@ fn draw_toolbar(
 ) {
     let mut font = font;
     canvas.set_blend_mode(BlendMode::Blend);
-    canvas.set_draw_color(Color::RGBA(16, 18, 26, 238));
-    let _ = canvas.fill_rect(FRect::new(0.0, 0.0, width as f32, 46.0));
+    fill_vertical_fade(
+        canvas,
+        FRect::new(0.0, 0.0, width as f32, TOOLBAR_BAR_HEIGHT),
+        [28, 22, 34, 244],
+        [12, 10, 16, 230],
+    );
+    fill_vertical_fade(
+        canvas,
+        FRect::new(0.0, TOOLBAR_BAR_HEIGHT, width as f32, 8.0),
+        [8, 6, 12, 72],
+        [8, 6, 12, 0],
+    );
+    canvas.set_draw_color(Color::RGBA(214, 170, 104, 96));
+    let _ = canvas.fill_rect(FRect::new(0.0, TOOLBAR_BAR_HEIGHT - 1.0, width as f32, 1.0));
+    fill_round_rect(
+        canvas,
+        FRect::new(16.0, (TOOLBAR_BAR_HEIGHT - 8.0) * 0.5, 8.0, 8.0),
+        [2.0; 4],
+        Color::RGBA(214, 170, 104, 235),
+    );
+    draw_toolbar_text_styled(
+        canvas,
+        tc,
+        gfx,
+        font.as_deref_mut(),
+        "livenyan",
+        30.0,
+        (TOOLBAR_BAR_HEIGHT - 22.0) * 0.5,
+        140,
+        22,
+        [222, 190, 138, 255],
+        0,
+    );
     for (action, rect) in toolbar_button_rects(width) {
-        let hovered = mouse.0 >= rect.x
-            && mouse.0 < rect.x + rect.w
-            && mouse.1 >= rect.y
-            && mouse.1 < rect.y + rect.h;
+        let hovered = rect_contains(rect, mouse.0, mouse.1);
         let active = matches!(action, ToolbarAction::Options) && options_open;
-        let color = if hovered || active {
-            Color::RGBA(73, 99, 145, 255)
+        let (fill, rim, text_color) = chrome_chip_colors(if active {
+            ChromeChip::On
+        } else if hovered {
+            ChromeChip::Hover
         } else {
-            Color::RGBA(43, 47, 61, 255)
-        };
-        canvas.set_draw_color(color);
-        let _ = canvas.fill_rect(rect);
-        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-        let _ = canvas.draw_rect(rect);
+            ChromeChip::Idle
+        });
+        fill_round_chip(canvas, rect, fill, rim);
         let label = match action {
             ToolbarAction::Quit => "Salir",
             ToolbarAction::Fullscreen => "Pantalla",
@@ -2056,188 +2289,197 @@ fn draw_toolbar(
             | ToolbarAction::ToggleFpsMeter
             | ToolbarAction::ExportTexts => continue,
         };
-        let label_width = rect.w as u32 - 16;
-        draw_toolbar_text(
+        draw_toolbar_chip_label(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
+            rect,
             label,
-            rect.x + 8.0,
-            rect.y,
-            label_width,
-            rect.h as u32,
+            text_color,
         );
     }
     if options_open {
-        let panel = FRect::new(width as f32 - 340.0, 32.0, 334.0, 238.0);
-        canvas.set_draw_color(Color::RGBA(16, 18, 26, 248));
-        let _ = canvas.fill_rect(panel);
-        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-        let _ = canvas.draw_rect(panel);
-        let interpolation_label = "Fundido de GAL opacos grandes";
-        draw_toolbar_text(
+        let panel = options_panel_rect(width);
+        let radius = 12.0;
+        let label_w = (panel.w as u32).saturating_sub(32);
+        let muted = [176, 164, 146, 255];
+        fill_round_rect(
+            canvas,
+            FRect::new(panel.x + 3.0, panel.y + 6.0, panel.w, panel.h),
+            [0.0, 0.0, radius, radius],
+            Color::RGBA(0, 0, 0, 80),
+        );
+        fill_round_rect(
+            canvas,
+            panel,
+            [0.0, 0.0, radius, radius],
+            Color::RGBA(232, 206, 160, 88),
+        );
+        fill_round_rect(
+            canvas,
+            FRect::new(panel.x + 1.0, panel.y, panel.w - 2.0, panel.h - 1.0),
+            [0.0, 0.0, (radius - 1.0).max(0.0), (radius - 1.0).max(0.0)],
+            Color::RGBA(18, 15, 22, 248),
+        );
+        draw_toolbar_text_styled(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
-            interpolation_label,
-            panel.x + 12.0,
-            42.0,
-            310,
-            24,
+            "Fundido de GAL opacos grandes",
+            panel.x + 16.0,
+            panel.y + 12.0,
+            label_w,
+            22,
+            muted,
+            0,
         );
         for (mode, rect) in interpolation_option_rects(width) {
             let selected = mode == interpolation_mode;
-            let hovered = mouse.0 >= rect.x
-                && mouse.0 < rect.x + rect.w
-                && mouse.1 >= rect.y
-                && mouse.1 < rect.y + rect.h;
-            canvas.set_draw_color(if selected {
-                Color::RGBA(55, 112, 84, 255)
-            } else if hovered {
-                Color::RGBA(73, 99, 145, 255)
+            let (fill, rim, text_color) = chrome_chip_colors(if selected {
+                ChromeChip::On
+            } else if rect_contains(rect, mouse.0, mouse.1) {
+                ChromeChip::Hover
             } else {
-                Color::RGBA(43, 47, 61, 255)
+                ChromeChip::Idle
             });
-            let _ = canvas.fill_rect(rect);
-            canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-            let _ = canvas.draw_rect(rect);
+            fill_round_chip(canvas, rect, fill, rim);
             let label = match mode {
                 InterpolationMode::Off => "Off",
                 InterpolationMode::Crossfade => "Fundido",
             };
-            draw_toolbar_text(
+            draw_toolbar_chip_label(
                 canvas,
                 tc,
                 gfx,
                 font.as_deref_mut(),
+                rect,
                 label,
-                rect.x + 5.0,
-                rect.y,
-                rect.w as u32 - 10,
-                rect.h as u32,
+                text_color,
             );
         }
-        draw_toolbar_text(
+        draw_toolbar_text_styled(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
             "Escalado present",
-            panel.x + 12.0,
-            108.0,
-            310,
+            panel.x + 16.0,
+            panel.y + 74.0,
+            label_w,
             20,
+            muted,
+            0,
         );
         for (mode, rect) in scale_filter_option_rects(width) {
             let selected = mode == present_scale;
-            let hovered = mouse.0 >= rect.x
-                && mouse.0 < rect.x + rect.w
-                && mouse.1 >= rect.y
-                && mouse.1 < rect.y + rect.h;
-            canvas.set_draw_color(if selected {
-                Color::RGBA(55, 112, 84, 255)
-            } else if hovered {
-                Color::RGBA(73, 99, 145, 255)
+            let (fill, rim, text_color) = chrome_chip_colors(if selected {
+                ChromeChip::On
+            } else if rect_contains(rect, mouse.0, mouse.1) {
+                ChromeChip::Hover
             } else {
-                Color::RGBA(43, 47, 61, 255)
+                ChromeChip::Idle
             });
-            let _ = canvas.fill_rect(rect);
-            canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-            let _ = canvas.draw_rect(rect);
+            fill_round_chip(canvas, rect, fill, rim);
             let label = match mode {
                 ScaleFilter::Linear => "Linear",
                 ScaleFilter::Nearest => "Nearest",
                 ScaleFilter::Sharp => "Sharp",
             };
-            draw_toolbar_text(
+            draw_toolbar_chip_label(
                 canvas,
                 tc,
                 gfx,
                 font.as_deref_mut(),
+                rect,
                 label,
-                rect.x + 5.0,
-                rect.y,
-                rect.w as u32 - 10,
-                rect.h as u32,
+                text_color,
             );
         }
         let fps_rect = fps_meter_option_rect(width);
-        canvas.set_draw_color(if fps_meter_enabled {
-            Color::RGBA(55, 112, 84, 255)
+        let (fill, rim, text_color) = chrome_chip_colors(if fps_meter_enabled {
+            ChromeChip::On
+        } else if rect_contains(fps_rect, mouse.0, mouse.1) {
+            ChromeChip::Hover
         } else {
-            Color::RGBA(43, 47, 61, 255)
+            ChromeChip::Idle
         });
-        let _ = canvas.fill_rect(fps_rect);
-        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-        let _ = canvas.draw_rect(fps_rect);
-        draw_toolbar_text(
+        fill_round_chip(canvas, fps_rect, fill, rim);
+        draw_toolbar_text_styled(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
+            "Medidor",
+            panel.x + 16.0,
+            fps_rect.y + (fps_rect.h - 22.0) / 2.0,
+            140,
+            22,
+            muted,
+            0,
+        );
+        draw_toolbar_chip_label(
+            canvas,
+            tc,
+            gfx,
+            font.as_deref_mut(),
+            fps_rect,
             if fps_meter_enabled {
                 "FPS: On"
             } else {
                 "FPS: Off"
             },
-            fps_rect.x + 6.0,
-            fps_rect.y,
-            fps_rect.w as u32 - 12,
-            fps_rect.h as u32,
+            text_color,
         );
         let detail = if vsync_active {
             "Solo GAL opacos grandes · refresco del monitor"
         } else {
             "Solo GAL opacos grandes · VSync no disponible"
         };
-        draw_toolbar_text(
+        draw_toolbar_text_styled(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
             detail,
             panel.x + 16.0,
-            178.0,
-            310,
+            panel.y + 168.0,
+            label_w,
             20,
+            muted,
+            0,
         );
         let export_rect = export_texts_option_rect(width);
-        let hovered = mouse.0 >= export_rect.x
-            && mouse.0 < export_rect.x + export_rect.w
-            && mouse.1 >= export_rect.y
-            && mouse.1 < export_rect.y + export_rect.h;
-        canvas.set_draw_color(if hovered {
-            Color::RGBA(73, 99, 145, 255)
-        } else {
-            Color::RGBA(43, 47, 61, 255)
-        });
-        let _ = canvas.fill_rect(export_rect);
-        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-        let _ = canvas.draw_rect(export_rect);
-        draw_toolbar_text(
+        let (fill, rim, text_color) =
+            chrome_chip_colors(if rect_contains(export_rect, mouse.0, mouse.1) {
+                ChromeChip::Hover
+            } else {
+                ChromeChip::Idle
+            });
+        fill_round_chip(canvas, export_rect, fill, rim);
+        draw_toolbar_chip_label(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
+            export_rect,
             "Exportar textos…",
-            export_rect.x + 8.0,
-            export_rect.y,
-            export_rect.w as u32 - 16,
-            export_rect.h as u32,
+            text_color,
         );
         if let Some(status) = export_status {
-            draw_toolbar_text(
+            draw_toolbar_text_styled(
                 canvas,
                 tc,
                 gfx,
                 font.as_deref_mut(),
                 status,
-                panel.x + 12.0,
-                236.0,
-                310,
+                panel.x + 16.0,
+                panel.y + 228.0,
+                label_w,
                 20,
+                [222, 190, 138, 255],
+                0,
             );
         }
     }
@@ -2675,6 +2917,7 @@ fn draw_menu(
     canvas: &mut Canvas<Window>,
     tc: &TextureCreator<WindowContext>,
     assets: &Assets,
+    vm: &Vm,
     gfx: &mut Gfx,
     mut font: Option<&mut TextRenderer>,
     choices: &[String],
@@ -2697,11 +2940,11 @@ fn draw_menu(
         .filter(|index| *index < visible_choices.len())
         .unwrap_or(usize::MAX);
     let (left_inset, right_inset, top_inset, bottom_inset) =
-        menu_border_insets(tc, assets, gfx, menu, filter);
+        menu_border_insets(tc, assets, vm, gfx, menu, filter);
     let scrollbar_key = if visible_choices.len() < choices.len() {
         menu.map(|object| object.str(Prop::SCROLLSOURCE))
             .filter(|source| !source.is_empty())
-            .and_then(|source| image_for(tc, assets, gfx, &source, filter))
+            .and_then(|source| image_for(tc, assets, vm, gfx, &source, filter))
     } else {
         None
     };
@@ -2868,7 +3111,7 @@ fn draw_menu(
         canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
         let _ = canvas.fill_rect(frame);
     }
-    draw_menu_border(canvas, tc, assets, gfx, menu, frame, alpha, filter);
+    draw_menu_border(canvas, tc, assets, vm, gfx, menu, frame, alpha, filter);
     if hover_bg >= 0
         && let Some(row) = content_rows.get(visible_sel)
     {
@@ -3011,6 +3254,7 @@ fn render_menu_textures(
 fn menu_border_insets(
     tc: &TextureCreator<WindowContext>,
     assets: &Assets,
+    vm: &Vm,
     gfx: &mut Gfx,
     menu: Option<&Obj>,
     filter: ScaleMode,
@@ -3034,7 +3278,7 @@ fn menu_border_insets(
         .map(|prop| {
             let src = menu.str(*prop);
             (!src.is_empty())
-                .then(|| image_for(tc, assets, gfx, &src, filter))
+                .then(|| image_for(tc, assets, vm, gfx, &src, filter))
                 .flatten()
         })
         .collect();
@@ -3057,6 +3301,7 @@ fn draw_menu_border(
     canvas: &mut Canvas<Window>,
     tc: &TextureCreator<WindowContext>,
     assets: &Assets,
+    vm: &Vm,
     gfx: &mut Gfx,
     menu: Option<&Obj>,
     frame: FRect,
@@ -3081,7 +3326,7 @@ fn draw_menu_border(
         keys.push(if src.is_empty() {
             None
         } else {
-            image_for(tc, assets, gfx, &src, filter)
+            image_for(tc, assets, vm, gfx, &src, filter)
         });
     }
     let size = |i: usize| {
@@ -3131,10 +3376,20 @@ fn draw_menu_border(
 fn image_for(
     tc: &TextureCreator<WindowContext>,
     assets: &Assets,
+    vm: &Vm,
     gfx: &mut Gfx,
     src: &str,
     filter: ScaleMode,
 ) -> Option<String> {
+    // mem:/save: (SaveScreen / CopyFile) — fuera del archivo del juego.
+    if let Some(img) = vm.vfs_image(src) {
+        let name = src.to_string();
+        if gfx.images.contains_key(&name) {
+            touch_image_texture_source(gfx, &name);
+            return Some(name);
+        }
+        return upload_decoded_image(tc, gfx, &name, &img, filter);
+    }
     let name = assets.data().resolve(src, IMAGE_EXTS)?;
     if gfx.images.contains_key(&name) {
         touch_image_texture_source(gfx, &name);
@@ -3144,13 +3399,23 @@ fn image_for(
     let Some(Asset::Image(img)) = assets.try_get(&name) else {
         return None;
     };
+    upload_decoded_image(tc, gfx, &name, &img, filter)
+}
+
+fn upload_decoded_image(
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    name: &str,
+    img: &crate::gal::Image,
+    filter: ScaleMode,
+) -> Option<String> {
+    let key = name.to_string();
     let pixels_per_frame = (img.w as usize)
         .saturating_mul(img.h as usize)
         .saturating_mul(4);
     let estimated_bytes = pixels_per_frame.saturating_mul(img.frames.len().saturating_add(1));
-    make_image_texture_cache_room(gfx, estimated_bytes, &name);
-    gfx.animation_delays
-        .insert(name.clone(), img.delays.clone());
+    make_image_texture_cache_room(gfx, estimated_bytes, &key);
+    gfx.animation_delays.insert(key.clone(), img.delays.clone());
     if log::log_enabled!(log::Level::Debug) {
         let n = (img.w * img.h).max(1) as u64;
         let asum: u64 = img.rgba.chunks_exact(4).map(|p| p[3] as u64).sum();
@@ -3160,7 +3425,7 @@ fn image_for(
             .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
             .sum();
         log::debug!(
-            "texture {name}: {}x{} avg alpha {} avg rgb {} first px {:?}",
+            "texture {key}: {}x{} avg alpha {} avg rgb {} first px {:?}",
             img.w,
             img.h,
             asum / n,
@@ -3170,44 +3435,56 @@ fn image_for(
     }
     let t = upload(tc, img.w, img.h, &img.rgba, filter)?;
     let mut uploaded_bytes = pixels_per_frame;
-    gfx.images.insert(name.clone(), (t, img.w, img.h));
+    gfx.images.insert(key.clone(), (t, img.w, img.h));
     for (i, frame) in img.frames.iter().enumerate() {
         match upload_with_error(tc, img.w, img.h, frame, filter) {
             Ok(texture) => {
                 gfx.images
-                    .insert(format!("{name}#{}", i + 1), (texture, img.w, img.h));
+                    .insert(format!("{key}#{}", i + 1), (texture, img.w, img.h));
                 uploaded_bytes = uploaded_bytes.saturating_add(pixels_per_frame);
             }
             Err(error) => {
-                log::warn!("cannot cache GAL texture {name} frame {}: {error}", i + 1);
+                log::warn!("cannot cache GAL texture {key} frame {}: {error}", i + 1);
             }
         }
     }
     gfx.image_texture_cache_clock = gfx.image_texture_cache_clock.saturating_add(1);
     let last_used = gfx.image_texture_cache_clock;
     gfx.image_texture_cache.insert(
-        name.clone(),
+        key.clone(),
         ImageTextureCacheEntry {
             bytes: uploaded_bytes,
             last_used,
         },
     );
-    gfx.image_texture_used_this_frame.insert(name.clone());
+    gfx.image_texture_used_this_frame.insert(key.clone());
     if uploaded_bytes > IMAGE_TEXTURE_CACHE_LIMIT_BYTES {
         log::warn!(
-            "image texture set {name} uses {} MiB, exceeding the {} MiB GPU cache budget",
+            "image texture set {key} uses {} MiB, exceeding the {} MiB GPU cache budget",
             uploaded_bytes / (1024 * 1024),
             IMAGE_TEXTURE_CACHE_LIMIT_BYTES / (1024 * 1024)
         );
     }
     if !img.frames.is_empty() {
         log::debug!(
-            "texture {name}: {} animation frames, delays {:?}",
+            "texture {key}: {} animation frames, delays {:?}",
             img.frames.len() + 1,
             img.delays
         );
     }
-    Some(name)
+    Some(key)
+}
+
+/// Prioridades por encima de la imagen de fondo (y lo pegado a ella) no frenan el present.
+/// 32 cubre fondo y clip (p. ej. 95 y 100) y deja fuera overlays y el mapa (500+).
+const PICTURE_PRESENT_BAND: i64 = 32;
+
+fn picture_present_floor(priorities: impl IntoIterator<Item = i64>) -> Option<i64> {
+    priorities.into_iter().min()
+}
+
+fn waits_for_picture(priority: i64, floor: i64) -> bool {
+    priority <= floor.saturating_add(PICTURE_PRESENT_BAND)
 }
 
 fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool {
@@ -3217,16 +3494,39 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
             .resolve(name, IMAGE_EXTS)
             .is_none_or(|resolved| assets.try_get(&resolved).is_some())
     };
+    let picture_floor = picture_present_floor(ordered_objects.iter().filter_map(|object| {
+        if !vm.scene.effective_visible(object)
+            || !matches!(
+                object.kind,
+                Kind::Image | Kind::Button | Kind::Tile | Kind::Slider
+            )
+        {
+            return None;
+        }
+        let sourced = !object.str(Prop::SOURCE).is_empty()
+            || !object.str(Prop::THUMBSOURCE).is_empty()
+            || !object.str(Prop::BUTTONSOURCE).is_empty()
+            || !object.str(Prop::HOVERSOURCE).is_empty()
+            || !object.str(Prop::PRESSEDSOURCE).is_empty();
+        sourced.then_some(object.int(Prop::PRIORITY, 0))
+    }));
+    let in_picture = |priority: i64| match picture_floor {
+        Some(floor) => waits_for_picture(priority, floor),
+        None => true,
+    };
     for object in ordered_objects {
         if !vm.scene.effective_visible(object) {
             continue;
         }
-        for source in object.text.iter().filter_map(|item| match item {
-            TextItem::Image { source, .. } => Some(source.as_str()),
-            _ => None,
-        }) {
-            if !image_ready(source) {
-                return false;
+        // Con una imagen de escena, el texto inline y el mapa no retienen el cuadro anterior.
+        if picture_floor.is_none() {
+            for source in object.text.iter().filter_map(|item| match item {
+                TextItem::Image { source, .. } => Some(source.as_str()),
+                _ => None,
+            }) {
+                if !image_ready(source) {
+                    return false;
+                }
             }
         }
         if object.kind == Kind::Movie
@@ -3238,7 +3538,8 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
         if matches!(
             object.kind,
             Kind::Image | Kind::Button | Kind::Tile | Kind::Slider
-        ) {
+        ) && in_picture(object.int(Prop::PRIORITY, 0))
+        {
             let mut sources = vec![object.str(Prop::SOURCE)];
             if object.kind == Kind::Slider {
                 sources.extend([
@@ -3257,7 +3558,8 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
                 }
             }
         }
-        if object.kind == Kind::Menu
+        if picture_floor.is_none()
+            && object.kind == Kind::Menu
             && let Some(menu) = vm.prevmenus.get(&object.name)
         {
             for (index, button) in menu.buttons.iter().enumerate() {
@@ -3276,30 +3578,32 @@ fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool
             }
         }
     }
-    for movie in vm.cinema_movies.values() {
-        for sprite in movie.sprites_at(vm.now) {
-            if !image_ready(&sprite.media) {
-                return false;
+    if picture_floor.is_none() {
+        for movie in vm.cinema_playbacks() {
+            for sprite in movie.sprites_at(vm.now) {
+                if !image_ready(&sprite.media) {
+                    return false;
+                }
             }
         }
-    }
-    if let State::Menu { name, .. } = &vm.state
-        && let Some(menu) = vm.scene.get(name)
-    {
-        for prop in [
-            Prop::BORDERSOURCETL,
-            Prop::BORDERSOURCETC,
-            Prop::BORDERSOURCETR,
-            Prop::BORDERSOURCECL,
-            Prop::BORDERSOURCECC,
-            Prop::BORDERSOURCECR,
-            Prop::BORDERSOURCEBL,
-            Prop::BORDERSOURCEBC,
-            Prop::BORDERSOURCEBR,
-        ] {
-            let source = menu.str(prop);
-            if !source.is_empty() && !image_ready(&source) {
-                return false;
+        if let State::Menu { name, .. } = &vm.state
+            && let Some(menu) = vm.scene.get(name)
+        {
+            for prop in [
+                Prop::BORDERSOURCETL,
+                Prop::BORDERSOURCETC,
+                Prop::BORDERSOURCETR,
+                Prop::BORDERSOURCECL,
+                Prop::BORDERSOURCECC,
+                Prop::BORDERSOURCECR,
+                Prop::BORDERSOURCEBL,
+                Prop::BORDERSOURCEBC,
+                Prop::BORDERSOURCEBR,
+            ] {
+                let source = menu.str(prop);
+                if !source.is_empty() && !image_ready(&source) {
+                    return false;
+                }
             }
         }
     }
@@ -3558,6 +3862,7 @@ fn draw_message_text(
     (lw, lh): (u32, u32),
     cfg: &Config,
     filter: ScaleMode,
+    debug_layout: bool,
 ) -> &'static str {
     let Some(font) = font else {
         return "font not loaded yet";
@@ -3589,7 +3894,7 @@ fn draw_message_text(
         .map(|v| v.as_f64() as f32)
         .filter(|v| *v > 4.0)
         .unwrap_or(cfg.text.size);
-    let color = o
+    let mut color = o
         .get(Prop::FONTCOLOR)
         .map(|v| tcolor(v.as_int(), 255))
         .unwrap_or(cfg.text.color);
@@ -3597,15 +3902,24 @@ fn draw_message_text(
         .get(Prop::FONTSHADOW)
         .map(Value::truthy)
         .unwrap_or(cfg.text.shadow);
-    let shadow_color = o
+    let mut shadow_color = o
         .get(Prop::FONTSHADOWCOLOR)
         .map(|v| tcolor(v.as_int(), 255))
         .unwrap_or([0, 0, 0, color[3] / 2 + 64]);
     let border = o.get(Prop::FONTBORDER).is_some_and(Value::truthy);
-    let border_color = o
+    let mut border_color = o
         .get(Prop::FONTBORDERCOLOR)
         .map(|v| tcolor(v.as_int(), 255))
         .unwrap_or([0, 0, 0, 255]);
+    // --debug-layout: fondo negro; FONTCOLOR=0 del novel system queda invisible.
+    if debug_layout {
+        let lum = (u16::from(color[0]) + u16::from(color[1]) + u16::from(color[2])) / 3;
+        if lum < 40 {
+            color = [180, 255, 180, 255];
+            shadow_color = [0, 0, 0, 180];
+            border_color = [40, 80, 40, 255];
+        }
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (
         family.as_str(),
@@ -3702,7 +4016,10 @@ fn draw_scene(
         // NAME vacío en QUAKE = todos los objetos (script.html).
         let (qx, qy) = vm.quake_draw_offset(&o.name);
         let (x, y) = (x0 + qx, y0 + qy);
-        let alpha = o.int(Prop::ALPHA, 255).clamp(0, 255) as u8;
+        let mut alpha = o.int(Prop::ALPHA, 255).clamp(0, 255) as u8;
+        if let Some(factor) = vm.wipe_alpha_factor(&o.name) {
+            alpha = (f64::from(alpha) * factor).round().clamp(0.0, 255.0) as u8;
+        }
         let (ow, oh) = (o.int(Prop::WIDTH, 0), o.int(Prop::HEIGHT, 0));
         drawn.push(Drawn {
             name: o.name.clone(),
@@ -3774,7 +4091,7 @@ fn draw_scene(
             ) {
                 let src = o.str(Prop::SOURCE);
                 if !src.is_empty()
-                    && let Some(key) = image_for(tc, assets, gfx, &src, filter)
+                    && let Some(key) = image_for(tc, assets, vm, gfx, &src, filter)
                     && let Some((_, iw, ih)) = gfx.images.get(&key)
                 {
                     if w <= 0 {
@@ -3793,7 +4110,7 @@ fn draw_scene(
                     h = lh.saturating_sub(y.max(0.0) as u32) as i64;
                 }
             }
-            if let Some(movie) = vm.cinema_movies.get(&o.name) {
+            if let Some(movie) = vm.cinema(&o.name) {
                 if w <= 0 {
                     w = movie.movie.width as i64;
                 }
@@ -3832,6 +4149,7 @@ fn draw_scene(
                         (lw, lh),
                         cfg,
                         filter,
+                        true,
                     );
                 }
                 if (ow <= 0 || oh <= 0)
@@ -3846,10 +4164,17 @@ fn draw_scene(
             drawn[di].status = "debug layout";
             continue;
         }
-        if let Some(playback) = vm.cinema_movies.get(&o.name) {
+        if let Some((sprites, texts, movie_w, movie_h)) = vm.cinema(&o.name).map(|playback| {
+            (
+                playback.sprites_at(vm.now),
+                playback.texts_at(vm.now),
+                playback.movie.width,
+                playback.movie.height,
+            )
+        }) {
             let mut rendered = 0;
-            for sprite in playback.sprites_at(vm.now) {
-                let Some(key) = image_for(tc, assets, gfx, &sprite.media, filter) else {
+            for sprite in sprites {
+                let Some(key) = image_for(tc, assets, vm, gfx, &sprite.media, filter) else {
                     continue;
                 };
                 let Some((texture, iw, ih)) = gfx.images.get_mut(&key) else {
@@ -3869,15 +4194,15 @@ fn draw_scene(
                 }
             }
             let mut rendered_text = 0;
-            for (index, text) in playback.texts_at(vm.now).into_iter().enumerate() {
+            for (index, text) in texts.into_iter().enumerate() {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 (
                     text.value.as_str(),
                     text.font_height,
                     text.font_style,
                     text.color,
-                    playback.movie.width,
-                    playback.movie.height,
+                    movie_w,
+                    movie_h,
                 )
                     .hash(&mut hasher);
                 let style = hasher.finish() as usize;
@@ -3887,10 +4212,8 @@ fn draw_scene(
                     .get(&key)
                     .is_none_or(|(revision, old_style, _)| *revision != 0 || *old_style != style);
                 if stale {
-                    let width = (playback.movie.width as f32 - text.x.max(0.0))
-                        .ceil()
-                        .max(1.0) as u32;
-                    let height = (playback.movie.height as f32 - text.y.max(0.0))
+                    let width = (movie_w as f32 - text.x.max(0.0)).ceil().max(1.0) as u32;
+                    let height = (movie_h as f32 - text.y.max(0.0))
                         .ceil()
                         .max(text.font_height as f32) as u32;
                     let rendered = font.as_deref_mut().map(|renderer| {
@@ -3958,7 +4281,7 @@ fn draw_scene(
                     st!() = "missing: source not in archive";
                     continue;
                 }
-                let Some(key) = image_for(tc, assets, gfx, &src, filter) else {
+                let Some(key) = image_for(tc, assets, vm, gfx, &src, filter) else {
                     st!() = "loading (texture not ready)";
                     continue;
                 };
@@ -4037,7 +4360,10 @@ fn draw_scene(
                 if crossfade_active {
                     active_crossfade_pairs.insert(crossfade_key.clone());
                 }
+                let (brightness_rgb, brightness_white) =
+                    crate::scene::brightness_draw(o.int(Prop::BRIGHTNESS, 0));
                 if let Some((texture, _, _)) = gfx.images.get_mut(&current_key) {
+                    texture.set_color_mod(brightness_rgb, brightness_rgb, brightness_rgb);
                     if crossfade_safe {
                         texture.set_blend_mode(BlendMode::None);
                         texture.set_alpha_mod(u8::MAX);
@@ -4064,6 +4390,7 @@ fn draw_scene(
                     } else {
                         let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
                     }
+                    texture.set_color_mod(255, 255, 255);
                     if crossfade_safe {
                         texture.set_blend_mode(BlendMode::Blend);
                     }
@@ -4075,9 +4402,17 @@ fn draw_scene(
                         format!("{key}#{next_frame}")
                     };
                     if let Some((texture, _, _)) = gfx.images.get_mut(&next_key) {
+                        texture.set_color_mod(brightness_rgb, brightness_rgb, brightness_rgb);
                         texture.set_alpha_mod((f64::from(alpha) * progress).round() as u8);
                         let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                        texture.set_color_mod(255, 255, 255);
                     }
+                }
+                if brightness_white > 0 {
+                    let white_alpha = (u16::from(alpha) * u16::from(brightness_white) / 255) as u8;
+                    canvas.set_blend_mode(BlendMode::Blend);
+                    canvas.set_draw_color(Color::RGBA(255, 255, 255, white_alpha));
+                    let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, dw, dh));
                 }
                 drawn[di].extra = format!(
                     "tex {iw}x{ih} frame {current_frame}{}{} draw ({x},{y} {}x{})",
@@ -4147,17 +4482,17 @@ fn draw_scene(
                 let bar = if bar_src.is_empty() {
                     None
                 } else {
-                    image_for(tc, assets, gfx, &bar_src, filter)
+                    image_for(tc, assets, vm, gfx, &bar_src, filter)
                 };
                 let thumb = if thumb_src.is_empty() {
                     None
                 } else {
-                    image_for(tc, assets, gfx, &thumb_src, filter)
+                    image_for(tc, assets, vm, gfx, &thumb_src, filter)
                 };
                 let buttons = if button_src.is_empty() {
                     None
                 } else {
-                    image_for(tc, assets, gfx, &button_src, filter)
+                    image_for(tc, assets, vm, gfx, &button_src, filter)
                 };
                 let bar_size = bar
                     .as_ref()
@@ -4374,7 +4709,7 @@ fn draw_scene(
                         continue;
                     }
                     let src = vm.prevmenu_button_image(&o.name, i, b, pm.hover == Some(i));
-                    let Some(key) = image_for(tc, assets, gfx, src, filter) else {
+                    let Some(key) = image_for(tc, assets, vm, gfx, src, filter) else {
                         continue;
                     };
                     let animation_id = format!("{}:{i}", o.name);
@@ -4427,6 +4762,7 @@ fn draw_scene(
                     (lw, lh),
                     cfg,
                     filter,
+                    false,
                 );
             }
             Kind::Caption => {
@@ -4551,11 +4887,10 @@ fn draw_scene(
         }
     }
     gfx.texts.retain(|k, _| {
-        vm.scene.objs.contains_key(k)
+        vm.scene.contains(k)
             || vm
-                .cinema_movies
-                .keys()
-                .any(|name| k.starts_with(&format!("{name}::lcm-text-")))
+                .cinema_named()
+                .any(|(name, _)| k.starts_with(&format!("{name}::lcm-text-")))
     });
     gfx.video_textures
         .retain(|name, _| vm.scene.get(name).is_some_and(|o| o.kind == Kind::Movie));
@@ -4583,13 +4918,23 @@ mod tests {
         edit_key_code, estimated_texture_bytes, gal_animation_frame, image_texture_cache_evictions,
         inferred_mask_group, interpolation_group_key, is_toolbar_visible, menu_content_rows,
         menu_geometry, menu_geometry_with_width, menu_hit, menu_hit_rows, menu_scrollbar_geometry,
-        should_interpolate_gal, toolbar_contains, toolbar_hit, toolbar_in_reveal_strip,
-        update_toolbar_open,
+        picture_present_floor, should_interpolate_gal, toolbar_contains, toolbar_hit,
+        toolbar_in_reveal_strip, update_toolbar_open, waits_for_picture,
     };
     use crate::interpolation::InterpolationMode;
     use crate::lsb::{Prop, expr::Value};
     use crate::scene::{Kind, Scene};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn scene_cut_waits_for_the_picture_not_the_map() {
+        let floor = picture_present_floor([95, 100, 505, 1102]).unwrap();
+        assert_eq!(floor, 95);
+        assert!(waits_for_picture(95, floor));
+        assert!(waits_for_picture(100, floor));
+        assert!(!waits_for_picture(505, floor));
+        assert!(!waits_for_picture(1102, floor));
+    }
 
     #[test]
     fn interpolation_is_limited_to_large_image_gals_and_toolbar_hit_targets() {

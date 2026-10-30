@@ -127,10 +127,7 @@ impl Vm {
                 log::warn!("asset not found: {src:?} for {name}");
             }
         }
-        if matches!(kind, CmdType::ImgNew | CmdType::Button | CmdType::MapImgNew) && !src.is_empty()
-        {
-            self.watch_anim(&name, &src);
-        }
+        self.clear_clock(&name);
         if kind == CmdType::Cinema && movie.is_none() {
             // Sin pista de imagen LiveCinema compatible, queda el placeholder temporizado.
             let d = props
@@ -138,8 +135,7 @@ impl Vm {
                 .map(|v| v.as_f64())
                 .filter(|d| *d > 0.0)
                 .unwrap_or(self.opts.cinema_ms);
-            self.cinemas
-                .insert(name.clone(), self.now + if self.skip { 0.0 } else { d });
+            self.set_cinema_deadline(&name, self.now + if self.skip { 0.0 } else { d });
             self.warn(
                 "unimpl:cmd Cinema (timed placeholder, no video decode)",
                 "Cinema: video not decoded; timed placeholder",
@@ -184,7 +180,6 @@ impl Vm {
                 }
             }
         }
-        self.videos.remove(&name);
         if !src.is_empty() {
             if let Some((w, h)) = self.slider_asset_size(&src) {
                 props.entry(Prop::ORIGWIDTH).or_insert(Value::Int(w as i64));
@@ -196,6 +191,13 @@ impl Vm {
             }
         }
         self.scene.create(&name, Kind::from_cmd(c.kind), props);
+        // Después de create: ObjDel deja el slot en Gone y watch_anim no
+        // encuentra objeto. Si corre antes, el GAL nuevo nace sin anim y
+        // se queda en el frame 0 (las preview de PrevMenu no pasan por aquí).
+        if matches!(kind, CmdType::ImgNew | CmdType::Button | CmdType::MapImgNew) && !src.is_empty()
+        {
+            self.watch_anim(&name, &src);
+        }
         if kind == CmdType::PrevMenuNew {
             self.load_prevmenu(&name, &src);
         }

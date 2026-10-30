@@ -6,10 +6,12 @@
 //! numéricos: **no confirmado** frente a un dump de constantes del runtime.
 //!
 //! Política livenyan (`COMPATIBILITY.md` I6/I7):
-//! - `WP_NONE` / `WP_FADE`: comportamiento dedicado.
-//! - `WP_WHITE` / `WP_BLACK` / `WP_FLASH`: overlay de color + fundido de targets
+//! - `WP_NONE`: corte.
+//! - `WP_FADE` y el resto de wipes (I6): las dos superficies, sin tocar `ALPHA`.
+//! - `WP_WHITE` / `WP_BLACK` / `WP_FLASH`: overlay de color
 //!   (**interpretación**: manual describe 表→色→裏 / 白→裏).
-//! - Resto: fundido `ALPHA` sin `unimpl` (**interpretación I6**: wipe→fade).
+
+use std::collections::HashSet;
 
 /// Nombres `WP_*` en el orden de `graphic.html` (Flip / 画面効果).
 pub const WP_NAMES: &[&str] = &[
@@ -72,6 +74,26 @@ pub fn wipe_label(wipe: i64) -> String {
 pub const WP_WHITE: i64 = 12;
 pub const WP_BLACK: i64 = 13;
 pub const WP_FLASH: i64 = 14;
+
+/// Fundido de Flip sobre las dos superficies. No toca `ALPHA` de los objetos.
+///
+/// `graphic.html`: `WP_FADE` es la de atrás que entra. La de adelante sale.
+/// El `Time` es el del comando.
+#[derive(Debug, Clone)]
+pub struct WipeFade {
+    pub started_at: f64,
+    pub dur_ms: f64,
+    /// Solo en la superficie vieja.
+    pub out: HashSet<String>,
+    /// Solo en la superficie nueva.
+    pub inn: HashSet<String>,
+}
+
+impl WipeFade {
+    pub fn progress(&self, now: f64) -> f64 {
+        ((now - self.started_at) / self.dur_ms.max(1.0)).clamp(0.0, 1.0)
+    }
+}
 
 /// Overlay de wipe WHITE/BLACK/FLASH.
 #[derive(Debug, Clone)]

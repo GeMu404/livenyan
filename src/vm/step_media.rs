@@ -1,4 +1,4 @@
-use super::{Event, VIDEO_EXTS, VideoPlayback, Vm, volume_gain};
+use super::{Clock, Event, VIDEO_EXTS, VideoPlayback, Vm, volume_gain};
 use crate::assets::SOUND_EXTS;
 use crate::lsb::Command;
 use crate::lsb::expr::Value;
@@ -86,8 +86,10 @@ impl Vm {
         props.remove(&Prop::HEIGHT);
         props.insert(Prop::PLAYING, Value::Bool(false));
 
-        self.videos.remove(&name);
-        self.anims.remove(&name);
+        self.clear_clock(&name);
+        if let Some(object) = self.scene.get_mut(&name) {
+            object.anim = None;
+        }
         self.video_generation = self.video_generation.wrapping_add(1);
         let generation = self.video_generation;
         let decoder = self
@@ -96,19 +98,20 @@ impl Vm {
             .resolve(&src, VIDEO_EXTS)
             .ok_or_else(|| format!("video asset not found: {src:?}"))
             .and_then(|file| {
-                self.assets
+                let started = std::time::Instant::now();
+                let data = self
+                    .assets
                     .data()
                     .read(&file)
-                    .map_err(|e| format!("{file}: {e}"))
-            })
-            .and_then(|data| {
+                    .map_err(|e| format!("{file}: {e}"))?;
                 let repeat = props.get(&Prop::REPEAT).is_some_and(Value::truthy);
                 // Un solo temp: probe nativo + decode sin scale.
-                let (decoder, native_w, native_h) = crate::video::Decoder::start(
-                    &data,
-                    crate::video::OutputSize::Source,
-                    repeat,
-                )?;
+                let (decoder, native_w, native_h) =
+                    crate::video::Decoder::start(&data, crate::video::OutputSize::Source, repeat)?;
+                log::info!(
+                    "load video {file}: {native_w}x{native_h} in {:.1} ms",
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
                 // Igual que Image: WIDTH/ORIG = fuente; zoom en `placed_rect`.
                 props.insert(Prop::ORIGWIDTH, Value::Int(native_w as i64));
                 props.insert(Prop::ORIGHEIGHT, Value::Int(native_h as i64));
@@ -138,7 +141,7 @@ impl Vm {
         };
         self.scene.create(&name, Kind::Movie, props);
         if let Some(playback) = playback {
-            self.videos.insert(name.clone(), playback);
+            self.clocks.insert(name.clone(), Clock::Video(playback));
         }
         self.object_defined(&name);
         detail
@@ -149,31 +152,29 @@ impl Vm {
         let target = self.eval(c.expr("Target")).as_str();
         let matches_target = |name: &str| target.is_empty() || name == target;
         let videos: Vec<String> = self
-            .videos
-            .keys()
+            .video_names()
+            .into_iter()
             .filter(|name| matches_target(name))
-            .cloned()
             .collect();
         for name in videos {
             self.stop_video(&name);
         }
-        for (name, end) in &mut self.cinemas {
-            if matches_target(name) {
-                *end = self.now;
-            }
-        }
-        let names: Vec<String> = self
-            .cinema_movies
-            .keys()
-            .filter(|name| matches_target(name))
-            .cloned()
-            .collect();
+        let names = self.cinema_names();
         for name in names {
-            if let Some(movie) = self.cinema_movies.get_mut(&name) {
-                movie.repeat = false;
-                movie.started_at = self.now - movie.duration_ms;
+            if !matches_target(&name) {
+                continue;
             }
-            self.cinemas.insert(name, self.now);
+            let now = self.now;
+            if let Some(movie) = self.cinema_mut(&name) {
+                movie.repeat = false;
+                movie.started_at = now - movie.duration_ms;
+            }
+            self.set_cinema_deadline(&name, self.now);
+        }
+        for name in self.one_shot_cinemas() {
+            if matches_target(&name) {
+                self.set_cinema_deadline(&name, self.now);
+            }
         }
     }
 }

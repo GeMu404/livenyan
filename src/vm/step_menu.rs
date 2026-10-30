@@ -28,6 +28,11 @@ impl Vm {
         if matches!(&self.state, State::Menu { name, .. } if name == &target) {
             self.state = State::Running;
         }
+        for frame in &mut self.frames {
+            if matches!(&frame.saved_state, Some(State::Menu { name, .. }) if name == &target) {
+                frame.saved_state = Some(State::Running);
+            }
+        }
         if !target.is_empty() {
             self.scene.set(&target, Prop::REVERSE, Value::Bool(true));
             self.scene.set(&target, Prop::VISIBLE, Value::Bool(false));

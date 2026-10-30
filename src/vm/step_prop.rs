@@ -36,12 +36,13 @@ impl Vm {
                     self.watch_anim(&obj, &src);
                 }
                 let clear_text_pause = p == Prop::TEXTPAUSED && !v.truthy();
+                let show = p == Prop::VISIBLE && v.truthy();
                 if obj == ROOT {
                     log::debug!(
                         "SetProp on root layer: {} = {v:?}",
                         crate::lsb::prop_name(p)
                     );
-                    self.root_props.insert(p, v);
+                    self.scene.set(ROOT, p, v);
                 } else if !self.scene.set(&obj, p, v) && !obj.is_empty() {
                     // LiveMaker: SetProp sobre objeto inexistente es no-op (no error).
                     // Los scripts novel a menudo tocan controles opcionales (barra de
@@ -49,7 +50,7 @@ impl Vm {
                     log::debug!(
                         "SetProp no-op on missing {obj:?} at {}:{pc} ({})",
                         script.name,
-                        if self.graveyard.contains_key(&obj) {
+                        if self.scene.was_deleted(&obj) {
                             "deleted earlier"
                         } else {
                             "never created"
@@ -58,9 +59,16 @@ impl Vm {
                 } else if p == Prop::ONPLAYEND {
                     self.object_defined(&obj);
                 }
+                // Flip FL_OUT con targets (MESOFF) archiva en `back`. 再生中/MESON
+                // vuelven a poner VISIBLE=1 sin otro Flip de entrada: hay que
+                // desarchivar. **experimento** test2: tras menú→iniciar el 土台
+                // seguía en back y el diálogo no se dibujaba.
+                if show {
+                    self.scene.unmark_back(&obj);
+                }
                 // El ONIDLE del cuadro suelta el clic poniendo PR_TEXTPAUSED a falso
                 // (アイドル時.lsb, auto / skip / clic).
-                if clear_text_pause && let Some(play) = self.plays.get_mut(&obj) {
+                if clear_text_pause && let Some(play) = self.play_mut(&obj) {
                     play.waiting_click = false;
                 }
             }
@@ -108,16 +116,12 @@ impl Vm {
                     channel: o.name.clone(),
                 });
             }
-            self.plays.remove(&o.name);
+            self.clocks.remove(&o.name);
             self.timers.remove(&o.name);
-            self.placeholders.remove(&o.name);
             self.prevmenus.remove(&o.name);
-            self.videos.remove(&o.name);
-            self.cinema_movies.remove(&o.name);
-            self.cinemas.remove(&o.name);
             self.forget_deleted_component(&o.name);
             gone.push(o.name.clone());
-            self.graveyard.insert(o.name.clone(), (o.kind, o.props));
+            self.scene.retain_deleted(o);
         }
         format!("{name:?} ({} objs: {})", gone.len(), gone.join(", "))
     }
@@ -145,6 +149,7 @@ impl Vm {
                 to,
                 start: self.now,
                 dur,
+                soft: false,
             });
             detail
         } else {

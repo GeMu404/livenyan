@@ -2,7 +2,49 @@ use super::{HistoryEntry, State, Vm};
 use crate::lsb::Command;
 use crate::lsb::expr::{Value, eval};
 use crate::lsb::names::Prop;
-use crate::scene::{Motion, TextItem};
+use crate::scene::TextItem;
+
+fn message_lineage(scene: &crate::scene::Scene) -> std::collections::HashSet<String> {
+    let mut keep = std::collections::HashSet::new();
+    for object in scene.live() {
+        if object.kind != crate::scene::Kind::Message {
+            continue;
+        }
+        let mut current = object.name.clone();
+        for _ in 0..64 {
+            if !keep.insert(current.clone()) {
+                break;
+            }
+            let Some(parent) = scene
+                .get(&current)
+                .map(|object| object.str(Prop::PARENT))
+                .filter(|parent| !parent.is_empty())
+            else {
+                break;
+            };
+            current = parent;
+        }
+    }
+    keep
+}
+
+fn flip_specified(scene: &crate::scene::Scene, name: &str, targets: &[String]) -> bool {
+    let mut current = name.to_string();
+    for _ in 0..64 {
+        if targets.iter().any(|target| target == &current) {
+            return true;
+        }
+        let Some(parent) = scene
+            .get(&current)
+            .map(|object| object.str(Prop::PARENT))
+            .filter(|parent| !parent.is_empty())
+        else {
+            return false;
+        };
+        current = parent;
+    }
+    false
+}
 
 fn redact(s: &str, show: bool) -> String {
     if show {
@@ -61,13 +103,21 @@ impl Vm {
         }
     }
 
-    /// Flip: transición sobre Targets durante Time (espera saltable).
+    /// Flip. Una sola pasada de dibujo: no hay framebuffer de atrás.
+    ///
+    /// Con targets, fundido (y `Delete`) solo de esos nombres. El manual habla
+    /// de capas (`graphic.html`); eso, aplicado a todo el árbol, apaga el cuadro
+    /// de mensaje y la pantalla recién creada.
+    ///
+    /// **interpretación livenyan** con targets vacíos y `FL_STAY`: lo creado en
+    /// este frame se queda; lo anterior se archiva y deja de dibujarse. Si no
+    /// se creó nada y hay una placa archivada, esa vuelve y `Delete` tira lo
+    /// que estaba a la vista. La primera placa (el título) se conserva. Los
+    /// cuadros de mensaje y sus padres no entran en la placa.
     ///
     /// Wipe (`WP_*`): **fuente primaria** `graphic.html`.
     /// - `0` NONE, `1` FADE; `12`–`14` WHITE/BLACK/FLASH → overlay (I7).
-    /// - Resto → fundido ALPHA (**interpretación I6**, sin `unimpl`).
-    ///
-    /// Act: dirección de fundido hoy; manual = capas (**no confirmado**).
+    /// - Resto → fundido ALPHA de lo que se va (**interpretación I6**).
     pub(crate) fn step_flip(&mut self, c: &Command) -> String {
         let wipe = self.eval(c.expr("Wipe")).as_int();
         let t = self.eval(c.expr("Time")).as_f64().max(0.0);
@@ -91,101 +141,242 @@ impl Vm {
                     .collect::<Vec<_>>()
             })
             .collect();
-        // FL_OUT=0 → fundido de salida; FL_STAY=1 → entrada; Reverse invierte.
-        let fade_out = (act == 0) != reverse;
+        let stay = (act == 1) != reverse;
+        let plan = if targets.is_empty() {
+            self.plan_empty_flip(stay, del)
+        } else {
+            let fade: Vec<String> = self
+                .scene
+                .names()
+                .into_iter()
+                .filter(|name| flip_specified(&self.scene, name, &targets))
+                .collect();
+            super::FlipPlan {
+                park: Vec::new(),
+                restore: Vec::new(),
+                scrap: if del { targets.clone() } else { Vec::new() },
+                fade,
+                fade_in: Vec::new(),
+                fade_out: (act == 0) != reverse,
+                remember_base: false,
+                base_born: None,
+            }
+        };
         let label = super::wipe::wipe_label(wipe);
-        match wipe {
-            0 => {}
-            1 => self.apply_flip_fade(&targets, fade_out, t),
-            super::wipe::WP_WHITE => {
-                self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, true));
-                self.apply_flip_fade(&targets, fade_out, t);
-            }
-            super::wipe::WP_BLACK => {
-                self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, false));
-                self.apply_flip_fade(&targets, fade_out, t);
-            }
-            super::wipe::WP_FLASH => {
-                self.wipe_flash = Some(super::wipe::WipeFlash::flash(self.now, t));
-                self.apply_flip_fade(&targets, fade_out, t);
-            }
-            _ => {
-                // I6: wipe geométrico → fade (sin spam unimpl).
-                log::debug!("Flip wipe {label}: using fade interpretation (I6)");
-                self.apply_flip_fade(&targets, fade_out, t);
+        if wipe != 0 {
+            match wipe {
+                super::wipe::WP_WHITE => {
+                    self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, true));
+                }
+                super::wipe::WP_BLACK => {
+                    self.wipe_flash = Some(super::wipe::WipeFlash::white_black(self.now, t, false));
+                }
+                super::wipe::WP_FLASH => {
+                    self.wipe_flash = Some(super::wipe::WipeFlash::flash(self.now, t));
+                }
+                1 => {}
+                _ => log::debug!("Flip wipe {label}: using fade interpretation (I6)"),
             }
         }
-        let defer_delete = del && t > 0.0 && !self.skip;
-        if del && !defer_delete {
-            for n in &targets {
-                self.scrap_component(n);
-            }
-        }
-        if defer_delete {
-            self.flip_pending_delete = targets.clone();
-        }
-        let detail = format!(
-            "wipe={label} {t}ms act={act} reverse={reverse} targets={} delete={del}",
-            targets.len()
+        // El fundido es de las dos superficies. El Time es el del comando.
+        // WHITE/BLACK/FLASH siguen en su overlay.
+        let color_overlay = matches!(
+            wipe,
+            super::wipe::WP_WHITE | super::wipe::WP_BLACK | super::wipe::WP_FLASH
         );
-        if t > 0.0 && !self.skip {
+        if t > 0.0 && !self.skip && wipe != 0 && !color_overlay {
+            let (out, inn) = if plan.fade_out {
+                (plan.fade.clone(), plan.fade_in.clone())
+            } else {
+                (Vec::new(), plan.fade.clone())
+            };
+            self.wipe_fade = Some(super::wipe::WipeFade {
+                started_at: self.now,
+                dur_ms: t,
+                out: out.into_iter().collect(),
+                inn: inn.into_iter().collect(),
+            });
+        } else {
+            self.wipe_fade = None;
+        }
+        let defer = t > 0.0 && !self.skip;
+        if defer {
+            self.flip_plan = Some(plan);
             self.state = State::WaitUntil {
                 until: self.now + t,
                 skippable: true,
             };
+        } else {
+            self.flip_plan = None;
+            self.apply_flip_plan(plan);
         }
-        detail
+        format!(
+            "wipe={label} {t}ms act={act} reverse={reverse} targets={} delete={del}",
+            targets.len()
+        )
     }
 
-    /// Fundido de `ALPHA` sobre Targets (WP_FADE y aproximación de otros wipes).
-    fn apply_flip_fade(&mut self, targets: &[String], fade_out: bool, t: f64) {
-        let animate = t > 0.0 && !self.skip;
-        for name in targets {
-            let Some(cur) = self
-                .scene
-                .get(name)
-                .map(|obj| obj.int(Prop::ALPHA, 255) as f64)
-            else {
-                continue;
+    fn plan_empty_flip(&mut self, stay: bool, delete: bool) -> super::FlipPlan {
+        if !stay {
+            let restore: Vec<String> = self.plates.pop().unwrap_or_default().into_iter().collect();
+            return super::FlipPlan {
+                fade: restore.clone(),
+                fade_in: Vec::new(),
+                fade_out: false,
+                restore,
+                park: Vec::new(),
+                scrap: Vec::new(),
+                remember_base: false,
+                base_born: None,
             };
-            if fade_out {
-                if animate {
-                    self.scene.add_motion(Motion {
-                        obj: name.clone(),
-                        prop: Prop::ALPHA,
-                        from: cur,
-                        to: 0.0,
-                        start: self.now,
-                        dur: t,
-                    });
-                } else {
-                    self.scene.set(name, Prop::ALPHA, Value::Int(0));
-                }
-            } else {
-                let to = if cur > 0.0 { cur } else { 255.0 };
-                if animate {
-                    self.scene.set(name, Prop::ALPHA, Value::Int(0));
-                    self.scene.add_motion(Motion {
-                        obj: name.clone(),
-                        prop: Prop::ALPHA,
-                        from: 0.0,
-                        to,
-                        start: self.now,
-                        dur: t,
-                    });
-                } else {
-                    self.scene
-                        .set(name, Prop::ALPHA, Value::Int(to.round() as i64));
+        }
+        let shown = self.plate_names();
+        let frame = self.scene.cohort();
+        let fresh: Vec<String> = shown
+            .iter()
+            .filter(|name| self.scene.born(name) == frame)
+            .cloned()
+            .collect();
+        let stale: Vec<String> = shown
+            .iter()
+            .filter(|name| self.scene.born(name) != frame)
+            .cloned()
+            .collect();
+        // Delete tira lo creado desde la primera placa (miniaturas incluidas,
+        // aunque hayan quedado archivadas). La placa base vuelve si no hay
+        // pantalla nueva en este frame.
+        if delete && let Some(origin) = self.base_born {
+            let mut scrap = Vec::new();
+            let mut restore = Vec::new();
+            for name in self.visual_names() {
+                let born = self.scene.born(&name);
+                if born >= origin && born != frame {
+                    scrap.push(name);
+                } else if fresh.is_empty() && born < origin {
+                    restore.push(name);
                 }
             }
+            let park = if fresh.is_empty() {
+                Vec::new()
+            } else {
+                stale
+                    .into_iter()
+                    .filter(|name| self.scene.born(name) < origin)
+                    .collect()
+            };
+            let mut fade = scrap.clone();
+            fade.extend(park.iter().cloned());
+            let fade_in = if fresh.is_empty() {
+                restore.clone()
+            } else {
+                fresh.clone()
+            };
+            return super::FlipPlan {
+                fade,
+                fade_in,
+                fade_out: true,
+                restore,
+                park,
+                scrap,
+                remember_base: false,
+                base_born: None,
+            };
+        }
+        if fresh.is_empty() && !self.plates.is_empty() {
+            let restore: Vec<String> = self.plates.pop().unwrap().into_iter().collect();
+            let fade = if delete { shown.clone() } else { Vec::new() };
+            return super::FlipPlan {
+                fade_in: restore.clone(),
+                fade,
+                fade_out: true,
+                restore,
+                park: Vec::new(),
+                scrap: if delete { shown } else { Vec::new() },
+                remember_base: false,
+                base_born: None,
+            };
+        }
+        let (park, drop) = match &self.base_plate {
+            Some(base) => {
+                let mut park = Vec::new();
+                let mut drop = Vec::new();
+                for name in stale {
+                    if base.contains(&name) {
+                        park.push(name);
+                    } else {
+                        drop.push(name);
+                    }
+                }
+                (park, drop)
+            }
+            None => (stale, Vec::new()),
+        };
+        let mut fade = park.clone();
+        if delete {
+            fade.extend(drop.iter().cloned());
+        }
+        let remember_base = self.base_plate.is_none() && !park.is_empty();
+        super::FlipPlan {
+            remember_base,
+            base_born: remember_base.then_some(frame),
+            park,
+            restore: Vec::new(),
+            scrap: if delete { drop } else { Vec::new() },
+            fade_in: fresh,
+            fade,
+            fade_out: true,
         }
     }
 
-    /// Tras WaitUntil de un Flip: borra Targets pendientes (Delete diferido).
+    fn visual_names(&self) -> Vec<String> {
+        let keep = message_lineage(&self.scene);
+        self.scene
+            .live()
+            .map(|object| object.name.clone())
+            .filter(|name| !keep.contains(name))
+            .collect()
+    }
+
+    fn plate_names(&self) -> Vec<String> {
+        let keep = message_lineage(&self.scene);
+        self.scene
+            .names()
+            .into_iter()
+            .filter(|name| !keep.contains(name))
+            .collect()
+    }
+
+    fn apply_flip_plan(&mut self, plan: super::FlipPlan) {
+        if plan.remember_base {
+            self.base_plate = Some(plan.park.iter().cloned().collect());
+            self.base_born = plan.base_born;
+        }
+        if !plan.park.is_empty() {
+            self.plates.push(plan.park.iter().cloned().collect());
+            for name in &plan.park {
+                self.scene.mark_back(name);
+            }
+        }
+        for name in &plan.restore {
+            self.scene.unmark_back(name);
+        }
+        // FL_OUT sin Delete: el objetivo queda en la superficie de atrás, no con ALPHA 0.
+        if plan.fade_out && plan.scrap.is_empty() && plan.park.is_empty() && plan.fade_in.is_empty()
+        {
+            for name in &plan.fade {
+                self.scene.mark_back(name);
+            }
+        }
+        for name in &plan.scrap {
+            self.scrap_component(name);
+        }
+    }
+
+    /// Tras WaitUntil de un Flip: aplica el cambio de pantalla.
     pub(crate) fn finish_flip_wait(&mut self) {
-        let pending = std::mem::take(&mut self.flip_pending_delete);
-        for n in pending {
-            self.scrap_component(&n);
+        self.wipe_fade = None;
+        if let Some(plan) = self.flip_plan.take() {
+            self.apply_flip_plan(plan);
         }
     }
 

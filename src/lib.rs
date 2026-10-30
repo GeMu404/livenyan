@@ -11,6 +11,7 @@ pub mod input;
 pub mod interpolation;
 pub mod lcm;
 pub mod lft;
+pub mod log_dedup;
 pub mod lpm;
 pub mod lsb;
 pub mod rgba;

@@ -92,11 +92,11 @@ fn parse_res(s: &str) -> Result<(u32, u32), String> {
 
 fn main() {
     let t0 = Instant::now();
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or("LIVENYAN_LOG", "warn"))
-        .format_timestamp_millis()
-        .init();
+    livenyan::log_dedup::init();
     let cli = Cli::parse();
-    if let Err(e) = real_main(cli, t0) {
+    let result = real_main(cli, t0);
+    livenyan::log_dedup::flush();
+    if let Err(e) = result {
         eprintln!("livenyan: {e}");
         std::process::exit(1);
     }

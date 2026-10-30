@@ -22,9 +22,7 @@ fn plan_has_trailing_click_wait(plan: &[Pending]) -> bool {
     for pending in plan.iter().rev() {
         match pending {
             Pending::Clear => continue,
-            Pending::Notify(event)
-                if system_text_event_name(event) == Some("TEXTCLEAR") =>
-            {
+            Pending::Notify(event) if system_text_event_name(event) == Some("TEXTCLEAR") => {
                 continue;
             }
             Pending::Click => return true,
@@ -71,7 +69,7 @@ impl Vm {
                 "TextIns target {target:?} (bytes {:02x?}) missing; existing message objects before stand-in: {msgs:?}",
                 target.as_bytes()
             );
-            match self.graveyard.get(target).cloned() {
+            match self.scene.retained(target) {
                 Some((kind, props)) => {
                     let evs: Vec<&str> = props
                         .keys()
@@ -89,11 +87,15 @@ impl Vm {
                     self.warn(&format!("mes:{target}"), &format!("TextIns into never-created message object {target:?}; creating an empty stand-in (no event handlers)"));
                     self.scene.create(target, Kind::Message, HashMap::new());
                     // texto retenido hasta que llegue el MesNew real
-                    self.placeholders.insert(target.to_string());
+                    if let Some(object) = self.scene.get_mut(target) {
+                        object.placeholder = true;
+                    }
                 }
             }
         }
-        self.ended_unnotified.remove(target);
+        if let Some(object) = self.scene.get_mut(target) {
+            object.ended_unnotified = false;
+        }
         let mut plan: Vec<Pending> = vec![];
         let mut cur: Vec<TextItem> = vec![];
         let flush = |plan: &mut Vec<Pending>, cur: &mut Vec<TextItem>| {
@@ -119,9 +121,7 @@ impl Vm {
                 }
                 Glyph::Return { kind } => match *kind {
                     brk::LINE => cur.push(TextItem::Newline),
-                    // Un <PG>/<PS> en un TextIns sin caracteres (logo, cierre del
-                    // menú) no es un clic de lectura. El arreglo de test2 los dejaba
-                    // esperando igual que una página con diálogo.
+                    // <PS> sin letras (solo tags CG/audio): no es pausa de lectura.
                     brk::PAUSE if !has_chars => {
                         flush(&mut plan, &mut cur);
                     }
@@ -129,12 +129,26 @@ impl Vm {
                         flush(&mut plan, &mut cur);
                         plan.push(Pending::Click);
                     }
-                    // <PG>: docs/livenovel/script.html — show cursor, wait for click,
-                    // then page break. If this TextIns already queued a click-wait
-                    // (`<PS>` / `{PAUSE}`), only clear — do not demand a second click.
-                    brk::PAGE => {
+                    // <PG> con diálogo: clic + 改ページ (script.html). Si ya hubo
+                    // `<PS>`/`{PAUSE}` en el mismo TextIns, solo Clear (coalesce).
+                    //
+                    // <PG> **sin** Glyph::Char (logo/título: CREATECG→WAITPLAY→CHANGECG→<PG>→MESEND):
+                    // solo Clear. **experimento** testgame `0000009C.lsb` cmd 63/43/12:
+                    // el clic de lectura sobra (WAITPLAY CLICK o el botón ya cubren input);
+                    // forzar clic deja negro muerto tras el logo / tras Iniciar.
+                    //
+                    // Tras `{PAUSE}`+`TEXTCLEAR` el `cur` ya se flusheó en el Event: un
+                    // `<PG>` con `cur` vacío no debe pedir otro clic (**experimento**
+                    // test2 `0000007A`: el último `<PG>` tras STOPSND dejaba el cuadro
+                    // vacío esperando un clic fantasma).
+                    brk::PAGE if !has_chars => {
                         flush(&mut plan, &mut cur);
-                        if !plan_has_trailing_click_wait(&plan) {
+                        plan.push(Pending::Clear);
+                    }
+                    brk::PAGE => {
+                        let had_visible = !cur.is_empty();
+                        flush(&mut plan, &mut cur);
+                        if had_visible && !plan_has_trailing_click_wait(&plan) {
                             plan.push(Pending::Click);
                         }
                         plan.push(Pending::Clear);
@@ -205,7 +219,12 @@ impl Vm {
             self.append_history(page, entry);
         }
         self.start_play(target, plan);
-        if wait && !self.placeholders.contains(target) {
+        if wait
+            && !self
+                .scene
+                .get(target)
+                .is_some_and(|object| object.placeholder)
+        {
             self.state = State::WaitText {
                 target: target.to_string(),
             };
@@ -245,9 +264,10 @@ impl Vm {
     /// `Some(None)` si hay más de un objeto con esa fuente.
     fn existing_movie(&self, reference: &str) -> Option<Option<String>> {
         if reference.is_empty() {
+            let videos = self.video_names();
             return Some(
-                (self.videos.len() == 1)
-                    .then(|| self.videos.keys().next().cloned())
+                (videos.len() == 1)
+                    .then(|| videos.into_iter().next())
                     .flatten(),
             );
         }
@@ -260,8 +280,7 @@ impl Vm {
         }
         let matches: Vec<String> = self
             .scene
-            .objs
-            .values()
+            .live()
             .filter(|obj| {
                 obj.kind == Kind::Movie && Self::same_media(&obj.str(Prop::SOURCE), reference)
             })
@@ -303,7 +322,7 @@ impl Vm {
         props.insert(Prop::PLAYING, Value::Bool(false));
         // Sin probe aquí: `restart_video` hace un solo temp+ffprobe; la
         // alineación L/C/R·T/C/B se aplica después (`script.html` <MOVIE>).
-        self.videos.remove(Self::TEXT_MOVIE);
+        self.clear_clock(Self::TEXT_MOVIE);
         self.scene.create(Self::TEXT_MOVIE, Kind::Movie, props);
         Some(Self::TEXT_MOVIE.to_string())
     }
@@ -363,7 +382,7 @@ impl Vm {
         log::debug!("system text event on {boxname}: {name} args {args:?}");
         match name {
             "PAUSE" => {
-                if let Some(playback) = self.plays.get_mut(boxname) {
+                if let Some(playback) = self.play_mut(boxname) {
                     playback.waiting_click = true;
                 }
                 if let Some(obj) = self.scene.get_mut(boxname) {
@@ -394,7 +413,7 @@ impl Vm {
                 let mode = args.get(1).map(String::as_str).unwrap_or("");
                 let click_skips = !mode.eq_ignore_ascii_case("NORMAL");
                 let Some(target) = args.first().filter(|target| !target.is_empty()) else {
-                    if click_skips && let Some(playback) = self.plays.get_mut(boxname) {
+                    if click_skips && let Some(playback) = self.play_mut(boxname) {
                         playback.waiting_click = true;
                     }
                     return;
@@ -403,7 +422,7 @@ impl Vm {
                     return;
                 }
                 let deadline = self.now + 3_600_000.0;
-                if let Some(playback) = self.plays.get_mut(boxname) {
+                if let Some(playback) = self.play_mut(boxname) {
                     playback.wait_for = Some((target.clone(), deadline));
                     playback.click_skips_wait = click_skips;
                 }
@@ -430,7 +449,7 @@ impl Vm {
                 if args.get(4).is_some_and(|mode| mode == "WAIT") && !self.skip && !self.opts.trace
                 {
                     let deadline = self.now + 3_600_000.0;
-                    if let Some(playback) = self.plays.get_mut(boxname) {
+                    if let Some(playback) = self.play_mut(boxname) {
                         playback.wait_for = Some((target, deadline));
                     }
                 }
@@ -438,8 +457,8 @@ impl Vm {
             "STOPMOVIE" => {
                 let target = args.first().map(String::as_str).unwrap_or("");
                 let videos: Vec<String> = self
-                    .videos
-                    .keys()
+                    .video_names()
+                    .into_iter()
                     .filter(|movie| {
                         target.is_empty()
                             || movie.as_str() == target
@@ -448,7 +467,6 @@ impl Vm {
                                 .get(movie)
                                 .is_some_and(|obj| obj.str(Prop::SOURCE) == target)
                     })
-                    .cloned()
                     .collect();
                 for movie in videos {
                     self.stop_video(&movie);
@@ -488,7 +506,7 @@ impl Vm {
                     // WAIT: el texto de la caja no sigue hasta que terminen la animación del
                     // objeto (su PLAYEND) y el fundido; con imagen estática y tiempo 0, nada.
                     let deadline = self.now + time + 30_000.0;
-                    if let Some(p) = self.plays.get_mut(boxname) {
+                    if let Some(p) = self.play_mut(boxname) {
                         p.wait_for = Some((obj.clone(), deadline));
                     }
                 }
@@ -533,8 +551,7 @@ impl Vm {
                                 }
                                 Ok(None) => {}
                             }
-                            self.cinema_movies.remove(&obj);
-                            self.cinemas.remove(&obj);
+                            self.clear_clock(&obj);
                             if let Some(r) = self.assets.data().resolve(src, IMAGE_EXTS) {
                                 self.assets.request(&r);
                             }
@@ -626,8 +643,7 @@ impl Vm {
                 if args.get(2).is_some_and(|e| e == "REPEAT") {
                     props.insert(Prop::REPEAT, Value::Bool(true));
                 }
-                self.cinema_movies.remove(&obj);
-                self.cinemas.remove(&obj);
+                self.clear_clock(&obj);
                 self.scene.create(&obj, kind, props);
                 if time > 0.0 {
                     self.scene.add_motion(Motion {
@@ -637,6 +653,7 @@ impl Vm {
                         to: target_alpha as f64,
                         start: self.now,
                         dur: time,
+                        soft: false,
                     });
                 }
                 if let Some(movie) = movie {
@@ -665,13 +682,10 @@ impl Vm {
                     let gone = self.scene.delete_names(obj);
                     log::debug!("DELETECG {obj:?}: removed {} objects", gone.len());
                     for o in gone {
-                        self.anims.remove(&o.name);
                         self.prevmenus.remove(&o.name);
-                        self.videos.remove(&o.name);
-                        self.cinema_movies.remove(&o.name);
-                        self.cinemas.remove(&o.name);
+                        self.clear_clock(&o.name);
                         self.forget_deleted_component(&o.name);
-                        self.graveyard.insert(o.name.clone(), (o.kind, o.props));
+                        self.scene.retain_deleted(o);
                     }
                 }
             }
@@ -791,10 +805,7 @@ impl Vm {
             "OPENURL" => {
                 let url = args.first().map(String::as_str).unwrap_or("");
                 if !super::open_external_url(url) {
-                    self.warn(
-                        "openurl",
-                        &format!("OPENURL failed for {url:?}"),
-                    );
+                    self.warn("openurl", &format!("OPENURL failed for {url:?}"));
                 }
             }
             "WALLPAPER" => {
@@ -816,7 +827,7 @@ impl Vm {
                     return;
                 }
                 let deadline = self.now + 3_600_000.0;
-                if let Some(playback) = self.plays.get_mut(boxname) {
+                if let Some(playback) = self.play_mut(boxname) {
                     playback.wait_for = Some((target.clone(), deadline));
                     playback.click_skips_wait = click_abort;
                 }
@@ -859,7 +870,10 @@ impl Vm {
                 });
             }
             "STOPQUAKE" => {
-                let time = args.first().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let time = args
+                    .first()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 if let Some(q) = self.quake.as_mut() {
                     if time <= 0.0 {
                         self.quake = None;
@@ -1073,10 +1087,10 @@ mod tests {
             Kind::Message,
             HashMap::from([(Prop::ONNOTIFY, Value::Str("ev.lsc".into()))]),
         );
-        vm.plays.insert("msg".into(), Playback::default());
+        vm.ensure_play("msg");
 
         vm.system_text_event("msg", "PAUSE", &[]);
-        assert!(vm.plays.get("msg").unwrap().waiting_click);
+        assert!(vm.play_of("msg").unwrap().waiting_click);
         assert!(vm.get_prop("msg", Prop::TEXTPAUSED).truthy());
 
         // MESOFF encola ONNOTIFY; el script del juego oculta el 土台 (no hardcode local).
@@ -1133,20 +1147,14 @@ mod tests {
         plan.push_back(Pending::Notify("\x01MESOFF".into()));
         plan.push_back(Pending::Notify("\x01WAITPLAY\r\n背景\r\nCLICK".into()));
         plan.push_back(Pending::Notify("MESEND".into()));
-        vm.plays.insert(
-            "msg".into(),
-            Playback {
-                plan,
-                ..Playback::default()
-            },
-        );
+        vm.scene.get_mut("msg").unwrap().play = Some(Playback {
+            plan,
+            ..Playback::default()
+        });
 
         vm.update(0.0, 0);
-        assert!(
-            vm.plays.get("msg").unwrap().waiting_click,
-            "PAUSE must wait"
-        );
-        assert!(vm.plays.contains_key("msg"), "must not reach MESEND yet");
+        assert!(vm.play_of("msg").unwrap().waiting_click, "PAUSE must wait");
+        assert!(vm.play_of("msg").is_some(), "must not reach MESEND yet");
 
         vm.click();
         vm.update(16.0, 0);
@@ -1156,8 +1164,7 @@ mod tests {
         for step in 0..6 {
             vm.update(32.0 + step as f64 * 16.0, 0);
             if vm
-                .plays
-                .get("msg")
+                .play_of("msg")
                 .is_some_and(|playback| playback.waiting_click || playback.wait_for.is_some())
             {
                 saw_wait = true;
@@ -1168,8 +1175,58 @@ mod tests {
             "idle WAITPLAY CLICK must not wait for another click"
         );
         assert!(
-            !vm.plays.contains_key("msg"),
+            !vm.play_of("msg").is_some(),
             "MESEND should finish playback without an extra click"
+        );
+    }
+
+    #[test]
+    fn page_break_without_chars_does_not_wait() {
+        // Logo/título: solo events + <PG> + MESEND → no clic de lectura.
+        use crate::lsb::tpword::{TpWord, brk};
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
+        );
+        let tw = TpWord {
+            version: 105,
+            body: vec![
+                Glyph::Event {
+                    event: "\x01WAITPLAY\r\n背景\r\nCLICK".into(),
+                },
+                Glyph::Return { kind: brk::PAGE },
+                Glyph::Event {
+                    event: "MESEND".into(),
+                },
+            ],
+            ..TpWord::default()
+        };
+        vm.run_text("msg", &tw, true, false, false);
+        vm.update(0.0, 0);
+        assert!(
+            !vm.wants_click(),
+            "CG-only <PG> must not demand a reading click"
         );
     }
 
@@ -1222,15 +1279,12 @@ mod tests {
             vm.wants_click(),
             "<PG> must wait for a click after showing text"
         );
-        assert!(vm.plays.contains_key("msg"));
+        assert!(vm.play_of("msg").is_some());
         vm.click();
         vm.update(16.0, 0);
+        assert!(!vm.wants_click(), "click should release the <PG> wait");
         assert!(
-            !vm.wants_click(),
-            "click should release the <PG> wait"
-        );
-        assert!(
-            !vm.plays.contains_key("msg"),
+            !vm.play_of("msg").is_some(),
             "page break should finish playback after the click"
         );
         let text = vm
@@ -1297,7 +1351,7 @@ mod tests {
             !vm.wants_click(),
             "coalesced <PG> must not require a second click"
         );
-        assert!(!vm.plays.contains_key("msg"));
+        assert!(!vm.play_of("msg").is_some());
     }
 
     #[test]
@@ -1358,7 +1412,84 @@ mod tests {
             !vm.wants_click(),
             "<PG> after {{PAUSE}}/{{TEXTCLEAR}} must not wait again"
         );
-        assert!(!vm.plays.contains_key("msg"));
+        assert!(!vm.play_of("msg").is_some());
+    }
+
+    /// test2 novel: `{PAUSE}` + `TEXTCLEAR` (ONNOTIFY, sin `\x01`) + `<PG>`, luego
+    /// otro `<PG>` tras STOPSND. El segundo no debe dejar clic con el cuadro vacío.
+    #[test]
+    fn trailing_page_after_pause_does_not_phantom_click() {
+        use crate::lsb::tpword::{TpWord, brk};
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
+        );
+        let tw = TpWord {
+            version: 105,
+            body: vec![
+                Glyph::Char {
+                    ch: "a".into(),
+                    decorator: -1,
+                    link: -1,
+                    speed: 0,
+                    condition: -1,
+                },
+                Glyph::Event {
+                    event: "\x01PAUSE\r\n".into(),
+                },
+                Glyph::Event {
+                    event: "TEXTCLEAR".into(),
+                },
+                Glyph::Return { kind: brk::PAGE },
+                Glyph::Event {
+                    event: "\x01STOPSND\r\n".into(),
+                },
+                Glyph::Return { kind: brk::PAGE },
+                Glyph::Event {
+                    event: "MESEND".into(),
+                },
+            ],
+            ..TpWord::default()
+        };
+        vm.run_text("msg", &tw, true, false, false);
+        vm.update(0.0, 0);
+        assert!(vm.wants_click(), "first PAUSE waits");
+        vm.click();
+        for step in 0..8 {
+            vm.update(16.0 + step as f64, 0);
+            assert!(
+                !vm.wants_click(),
+                "no phantom click after PAUSE/TEXTCLEAR/<PG> (step {step})"
+            );
+            if !vm.play_of("msg").is_some() {
+                break;
+            }
+        }
+        assert!(
+            !vm.play_of("msg").is_some(),
+            "MESEND should finish without a second click"
+        );
     }
 
     #[test]
@@ -1399,13 +1530,10 @@ mod tests {
             already_read: false,
         });
         plan.push_back(Pending::Click);
-        vm.plays.insert(
-            "msg".into(),
-            Playback {
-                plan,
-                ..Playback::default()
-            },
-        );
+        vm.scene.get_mut("msg").unwrap().play = Some(Playback {
+            plan,
+            ..Playback::default()
+        });
         vm.update(0.0, 0);
         let caret_x = vm.get_prop("msg", Prop::CARETX).as_int();
         let caret_h = vm.get_prop("msg", Prop::CARETHEIGHT).as_int();
@@ -1445,7 +1573,8 @@ mod tests {
                 Value::Str("MOVIE\\なつみ家外観（昼のみ）.wmv".into()),
             )]),
         );
-        vm.plays.insert("msg".into(), Playback::default());
+        vm.scene.create("msg", Kind::Message, HashMap::new());
+        vm.ensure_play("msg");
 
         vm.system_text_event(
             "msg",
@@ -1464,7 +1593,7 @@ mod tests {
         assert!(vm.warned.contains("playmovie:bg"));
         assert!(!vm.warned.contains("playmovie:なつみ家外観（昼のみ）.wmv"));
         assert!(!vm.warned.contains("playmovie:missing-target"));
-        assert!(vm.plays["msg"].wait_for.is_none());
+        assert!(vm.play_of("msg").unwrap().wait_for.is_none());
     }
 
     #[test]
@@ -1502,7 +1631,7 @@ mod tests {
 
         vm.run_text("msg", &text, false, false, false);
         assert_eq!(vm.history.len(), 0);
-        vm.plays.clear();
+        vm.scene.clear_plays();
         vm.run_text("msg", &text, false, true, false);
         assert_eq!(vm.history.len(), 1);
         vm.append_history("page".into(), vec![TextItem::Char("B".into())]);

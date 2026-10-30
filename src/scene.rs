@@ -2,8 +2,11 @@
 
 use crate::lsb::expr::Value;
 use crate::lsb::{CmdType, Prop, names::prop_id};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+
+/// Nombre de la capa raíz (pantalla) en LiveMaker: el carácter 0x01.
+pub const ROOT: &str = "\u{1}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -82,6 +85,45 @@ pub enum TextItem {
     Image { source: String, align: u8 },
 }
 
+/// Elementos pendientes de la reproducción de texto de un objeto de mensaje.
+#[derive(Debug, Clone)]
+pub enum Pending {
+    Clear,
+    /// `already_read`: este TextIns ya se mostró (docs/livenovel/text.html, 再生開始).
+    Text {
+        items: Vec<TextItem>,
+        already_read: bool,
+    },
+    Click,
+    /// Evento en línea (TWdOpeEvent) -> ONNOTIFY.
+    Notify(String),
+}
+
+/// Reproducción de texto del mensaje. Vive en el objeto: al borrarlo, se va con él.
+#[derive(Debug, Clone, Default)]
+pub struct Playback {
+    pub plan: VecDeque<Pending>,
+    pub cur: Vec<TextItem>,
+    pub pos: usize,
+    pub next: f64,
+    pub waiting_click: bool,
+    /// El TextIns ya se había mostrado (docs/livenovel/text.html, 再生開始).
+    pub already_read: bool,
+    /// Efecto WAIT: el texto espera a que termine la animación o el fundido.
+    pub wait_for: Option<(String, f64)>,
+    /// `WAITPLAY … CLICK`: un clic corta la espera.
+    pub click_skips_wait: bool,
+    /// Última etiqueta procesada (solo depuración).
+    pub last_tag: String,
+}
+
+/// Animación GAL del objeto.
+#[derive(Debug, Clone)]
+pub struct Anim {
+    pub source: String,
+    pub started: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Obj {
     pub name: String,
@@ -96,9 +138,39 @@ pub struct Obj {
     pub text_rev: u64,
     /// Frame actual de una animación GAL (lo avanza el VM).
     pub frame: usize,
+    /// Archivado por Flip: el script lo ve; el dibujo y el clic no.
+    archived: bool,
+    /// Frame en que se creó. Lo usa el cambio de placa.
+    born: u64,
+    /// Texto en curso. Muere con el objeto.
+    pub play: Option<Playback>,
+    pub anim: Option<Anim>,
+    /// TextIns llegó antes que el MesNew.
+    pub placeholder: bool,
+    /// El texto terminó y todavía no había ONPLAYEND.
+    pub ended_unnotified: bool,
 }
 
 impl Obj {
+    fn blank(name: String, kind: Kind, seq: u64, props: HashMap<u8, Value>) -> Self {
+        Self {
+            name,
+            kind,
+            seq,
+            props,
+            text: vec![],
+            shown: 0,
+            text_rev: 0,
+            frame: 0,
+            archived: false,
+            born: 0,
+            play: None,
+            anim: None,
+            placeholder: false,
+            ended_unnotified: false,
+        }
+    }
+
     pub fn get(&self, p: u8) -> Option<&Value> {
         self.props.get(&p)
     }
@@ -201,13 +273,71 @@ pub struct Motion {
     pub to: f64,
     pub start: f64,
     pub dur: f64,
+    /// Entrada: smoothstep. La lineal sale de negro de golpe.
+    pub soft: bool,
 }
 
-#[derive(Default)]
+enum Slot {
+    /// El script lo ve. `Obj::archived` es la placa de atrás.
+    Live(Obj),
+    /// Borrado. GetProp no lo ve; un TextIns posterior hereda las props.
+    Gone {
+        kind: Kind,
+        props: HashMap<u8, Value>,
+    },
+}
+
 pub struct Scene {
-    pub objs: HashMap<String, Obj>,
+    slots: HashMap<String, Slot>,
+    /// Capa `\x01`. No entra en el orden de dibujo.
+    root: Obj,
+    /// Frame actual. Los objetos creados ahora nacen con este valor.
+    cohort: u64,
     seq: u64,
     pub motions: Vec<Motion>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            slots: HashMap::new(),
+            root: Obj::blank(ROOT.to_string(), Kind::Other(0), 0, HashMap::new()),
+            cohort: 0,
+            seq: 0,
+            motions: Vec::new(),
+        }
+    }
+}
+
+/// `docs/livenovel/graphic.html` (画像/タイル, 明るさ): 255 deja el rectángulo
+/// blanco y -255 lo deja negro. 0 no cambia el sprite.
+///
+/// El primer valor es el multiplicador RGB del sprite (0 negro, 255 igual).
+/// El segundo es la capa blanca encima, de 0 a 255.
+pub fn brightness_draw(brightness: i64) -> (u8, u8) {
+    let b = brightness.clamp(-255, 255);
+    if b >= 0 {
+        ((255 - b) as u8, b as u8)
+    } else {
+        ((255 + b) as u8, 0)
+    }
+}
+
+/// Tamaño sin zoom para dibujo y clic. Si la propiedad es 0, vale el archivo.
+pub fn pointer_box(prop_w: i64, prop_h: i64, intrinsic: Option<(u32, u32)>) -> (f64, f64) {
+    let width = if prop_w > 0 {
+        prop_w as f64
+    } else {
+        intrinsic.map(|(width, _)| f64::from(width)).unwrap_or(0.0)
+    };
+    let height = if prop_h > 0 {
+        prop_h as f64
+    } else {
+        intrinsic
+            .map(|(_, height)| f64::from(height))
+            .unwrap_or(0.0)
+    };
+    (width, height)
 }
 
 /// Convierte el valor de ObjProp (id numérico o nombre) en PropertyType.
@@ -229,38 +359,113 @@ pub fn prop_of(v: &Value) -> Option<u8> {
 }
 
 impl Scene {
+    fn live_ref(&self, name: &str) -> Option<&Obj> {
+        match self.slots.get(name) {
+            Some(Slot::Live(obj)) => Some(obj),
+            _ => None,
+        }
+    }
+
+    fn live_mut(&mut self, name: &str) -> Option<&mut Obj> {
+        match self.slots.get_mut(name) {
+            Some(Slot::Live(obj)) => Some(obj),
+            _ => None,
+        }
+    }
+
+    /// Objetos que el script ve, archivados incluidos. La raíz no entra.
+    pub fn live(&self) -> impl Iterator<Item = &Obj> {
+        self.slots.values().filter_map(|slot| match slot {
+            Slot::Live(obj) => Some(obj),
+            Slot::Gone { .. } => None,
+        })
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.live_ref(name).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self
+            .slots
+            .values()
+            .any(|slot| matches!(slot, Slot::Live(_)))
+    }
+
+    /// Props del último ObjDel, para el stand-in de TextIns.
+    pub fn retained(&self, name: &str) -> Option<(Kind, HashMap<u8, Value>)> {
+        match self.slots.get(name) {
+            Some(Slot::Gone { kind, props }) => Some((*kind, props.clone())),
+            _ => None,
+        }
+    }
+
+    pub fn was_deleted(&self, name: &str) -> bool {
+        matches!(self.slots.get(name), Some(Slot::Gone { .. }))
+    }
+
+    /// Guarda kind y props de un objeto ya sacado de la escena.
+    pub fn retain_deleted(&mut self, object: Obj) {
+        self.slots.insert(
+            object.name.clone(),
+            Slot::Gone {
+                kind: object.kind,
+                props: object.props,
+            },
+        );
+    }
+
     pub fn create(&mut self, name: &str, kind: Kind, props: HashMap<u8, Value>) {
         // Replacing an object updates it in place: preserve its draw order and text state.
-        let (text, shown, text_rev, seq) = match self.objs.remove(name) {
-            Some(old) => (old.text, old.shown, old.text_rev + 1, old.seq),
-            None => {
-                self.seq += 1;
-                (vec![], 0, 0, self.seq)
-            }
-        };
-        let o = Obj {
-            name: name.to_string(),
-            kind,
-            seq,
-            props,
-            text,
-            shown,
-            text_rev,
-            frame: 0,
-        };
-        self.objs.insert(name.to_string(), o);
+        let (text, shown, text_rev, seq, play, anim, placeholder, ended_unnotified) =
+            match self.slots.remove(name) {
+                Some(Slot::Live(old)) => {
+                    // Recrear cuenta como objeto de este frame: si no, el Flip
+                    // lo trata como sobra de la visita anterior y lo borra.
+                    (
+                        old.text,
+                        old.shown,
+                        old.text_rev + 1,
+                        old.seq,
+                        old.play,
+                        old.anim,
+                        old.placeholder,
+                        old.ended_unnotified,
+                    )
+                }
+                _ => {
+                    self.seq += 1;
+                    (vec![], 0, 0, self.seq, None, None, false, false)
+                }
+            };
+        let mut object = Obj::blank(name.to_string(), kind, seq, props);
+        object.text = text;
+        object.shown = shown;
+        object.text_rev = text_rev;
+        object.born = self.cohort;
+        object.play = play;
+        object.anim = anim;
+        object.placeholder = placeholder;
+        object.ended_unnotified = ended_unnotified;
+        self.slots.insert(name.to_string(), Slot::Live(object));
     }
 
     pub fn get(&self, name: &str) -> Option<&Obj> {
-        self.objs.get(name)
+        if name == ROOT {
+            return Some(&self.root);
+        }
+        self.live_ref(name)
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Obj> {
-        self.objs.get_mut(name)
+        if name == ROOT {
+            return Some(&mut self.root);
+        }
+        self.live_mut(name)
     }
 
     pub fn set(&mut self, name: &str, prop: u8, v: Value) -> bool {
-        match self.objs.get_mut(name) {
+        match self.get_mut(name) {
             Some(o) => {
                 if prop == Prop::TEXT && matches!(o.kind, Kind::Message | Kind::Caption) {
                     if o.kind == Kind::Message {
@@ -286,8 +491,6 @@ impl Scene {
         }
     }
 
-    /// Borra el objeto y, recursivamente, sus hijos (PR_PARENT).
-    /// Borra el objeto y sus hijos (PR_PARENT), devolviendo los nombres borrados.
     /// Borra `name` y sus descendientes (por PR_PARENT); devuelve los objetos borrados.
     pub fn delete_names(&mut self, name: &str) -> Vec<Obj> {
         if name.is_empty() {
@@ -296,15 +499,16 @@ impl Scene {
         let mut todo = vec![name.to_string()];
         let mut out = vec![];
         while let Some(x) = todo.pop() {
-            if let Some(o) = self.objs.remove(&x) {
-                out.push(o);
+            if let Some(Slot::Live(object)) = self.slots.remove(&x) {
+                out.push(object);
             }
             self.motions.retain(|m| m.obj != x);
-            for (k, o) in &self.objs {
-                if o.str(Prop::PARENT) == x {
-                    todo.push(k.clone());
-                }
-            }
+            let kids: Vec<String> = self
+                .live()
+                .filter(|object| object.str(Prop::PARENT) == x)
+                .map(|object| object.name.clone())
+                .collect();
+            todo.extend(kids);
         }
         out
     }
@@ -314,11 +518,7 @@ impl Scene {
         let mut out = vec![];
         let mut todo = vec![name.to_string()];
         while let Some(p) = todo.pop() {
-            let mut v: Vec<&Obj> = self
-                .objs
-                .values()
-                .filter(|o| o.str(Prop::PARENT) == p)
-                .collect();
+            let mut v: Vec<&Obj> = self.live().filter(|o| o.str(Prop::PARENT) == p).collect();
             v.sort_by_key(|o| o.seq);
             for o in v {
                 out.push(o.name.clone());
@@ -330,17 +530,115 @@ impl Scene {
         out
     }
 
-    /// Saca objetos de la escena (para SaveCabinet).
+    /// Saca objetos de la escena (para SaveCabinet). Sale de la placa de atrás.
     pub fn take(&mut self, name: &str) -> Option<Obj> {
-        self.objs.remove(name)
+        match self.slots.remove(name) {
+            Some(Slot::Live(mut object)) => {
+                object.archived = false;
+                Some(object)
+            }
+            Some(gone) => {
+                self.slots.insert(name.to_string(), gone);
+                None
+            }
+            None => None,
+        }
     }
 
-    pub fn put(&mut self, o: Obj) {
-        self.objs.insert(o.name.clone(), o);
+    pub fn put(&mut self, object: Obj) {
+        self.slots.insert(object.name.clone(), Slot::Live(object));
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.objs.keys().cloned().collect()
+        self.live()
+            .filter(|object| !self.on_back(&object.name))
+            .map(|object| object.name.clone())
+            .collect()
+    }
+
+    pub fn on_back(&self, name: &str) -> bool {
+        let mut current = name.to_string();
+        for _ in 0..64 {
+            let Some(object) = self.live_ref(&current) else {
+                return false;
+            };
+            if object.archived {
+                return true;
+            }
+            let parent = object.str(Prop::PARENT);
+            if parent.is_empty() {
+                return false;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    pub fn mark_back(&mut self, name: &str) {
+        if self.live_mut(name).is_some() {
+            self.motions.retain(|motion| motion.obj != name);
+            if let Some(object) = self.live_mut(name) {
+                object.archived = true;
+            }
+        }
+    }
+
+    pub fn unmark_back(&mut self, name: &str) {
+        if let Some(object) = self.live_mut(name) {
+            object.archived = false;
+        }
+        // Flip con targets puede archivar padre e hijo (FACE: 土台+メッセージボックス).
+        // 再生中/MESON solo SetProp VISIBLE en el 土台: hay que desarchivar la
+        // descendencia o el Message sigue fuera de `draw_order`.
+        let mut stack = vec![name.to_string()];
+        while let Some(parent) = stack.pop() {
+            let children: Vec<String> = self
+                .live()
+                .filter(|object| object.str(Prop::PARENT) == parent)
+                .map(|object| object.name.clone())
+                .collect();
+            for child in children {
+                if let Some(object) = self.live_mut(&child) {
+                    object.archived = false;
+                }
+                stack.push(child);
+            }
+        }
+    }
+
+    pub fn set_cohort(&mut self, cohort: u64) {
+        self.cohort = cohort;
+    }
+
+    pub fn cohort(&self) -> u64 {
+        self.cohort
+    }
+
+    pub fn born(&self, name: &str) -> u64 {
+        self.live_ref(name).map(|object| object.born).unwrap_or(0)
+    }
+
+    pub fn clear_back(&mut self) {
+        for slot in self.slots.values_mut() {
+            if let Slot::Live(object) = slot {
+                object.archived = false;
+            }
+        }
+    }
+
+    pub fn clear_plays(&mut self) {
+        for slot in self.slots.values_mut() {
+            if let Slot::Live(object) = slot {
+                object.play = None;
+            }
+        }
+    }
+
+    pub fn back_names(&self) -> Vec<String> {
+        self.live()
+            .filter(|object| self.on_back(&object.name))
+            .map(|object| object.name.clone())
+            .collect()
     }
 
     pub fn delete(&mut self, name: &str) -> usize {
@@ -350,21 +648,22 @@ impl Scene {
         let mut todo = vec![name.to_string()];
         let mut n = 0;
         while let Some(x) = todo.pop() {
-            if self.objs.remove(&x).is_some() {
+            if matches!(self.slots.remove(&x), Some(Slot::Live(_))) {
                 n += 1;
             }
             self.motions.retain(|m| m.obj != x);
-            for (k, o) in &self.objs {
-                if o.str(Prop::PARENT) == x {
-                    todo.push(k.clone());
-                }
-            }
+            let kids: Vec<String> = self
+                .live()
+                .filter(|object| object.str(Prop::PARENT) == x)
+                .map(|object| object.name.clone())
+                .collect();
+            todo.extend(kids);
         }
         n
     }
 
     pub fn clear(&mut self) {
-        self.objs.clear();
+        self.slots.clear();
         self.motions.clear();
     }
 
@@ -396,7 +695,7 @@ impl Scene {
         let mut p = o.str(Prop::PARENT);
         let mut guard = 0;
         while !p.is_empty() && guard < 32 {
-            match self.objs.get(&p) {
+            match self.live_ref(&p) {
                 Some(po) => {
                     x += po.int(Prop::LEFT, 0) as f64;
                     y += po.int(Prop::TOP, 0) as f64;
@@ -418,7 +717,7 @@ impl Scene {
         let mut p = o.str(Prop::PARENT);
         let mut guard = 0;
         while !p.is_empty() && guard < 32 {
-            match self.objs.get(&p) {
+            match self.live_ref(&p) {
                 Some(po) if !po.visible() => return false,
                 Some(po) => p = po.str(Prop::PARENT),
                 None => break,
@@ -435,18 +734,19 @@ impl Scene {
     pub fn draw_order(&self) -> Vec<&Obj> {
         let mut kids: HashMap<&str, Vec<&Obj>> = HashMap::new();
         let mut roots = vec![];
-        for o in self.objs.values() {
+        let live: Vec<&Obj> = self.live().collect();
+        for o in &live {
             let p = o
                 .props
                 .get(&Prop::PARENT)
                 .map(|v| v.as_str())
                 .unwrap_or_default();
-            if !p.is_empty() && self.objs.contains_key(&p) && p != o.name {
-                kids.entry(self.objs.get_key_value(&p).unwrap().0.as_str())
+            if !p.is_empty() && self.contains(&p) && p != o.name {
+                kids.entry(self.live_ref(&p).unwrap().name.as_str())
                     .or_default()
-                    .push(o);
+                    .push(*o);
             } else {
-                roots.push(o);
+                roots.push(*o);
             }
         }
         let key = |o: &&Obj| (o.int(Prop::PRIORITY, 0), o.seq);
@@ -454,11 +754,14 @@ impl Scene {
         for v in kids.values_mut() {
             v.sort_by_key(key);
         }
-        let mut out = Vec::with_capacity(self.objs.len());
+        let mut out = Vec::with_capacity(live.len());
         let mut stack: Vec<&Obj> = roots.into_iter().rev().collect();
         while let Some(o) = stack.pop() {
-            if out.len() > self.objs.len() {
+            if out.len() > live.len() {
                 break; // ciclo de padres
+            }
+            if self.on_back(&o.name) {
+                continue;
             }
             out.push(o);
             if let Some(ch) = kids.get(o.name.as_str()) {
@@ -478,13 +781,17 @@ impl Scene {
     pub fn update(&mut self, now: f64) {
         let mut done = vec![];
         for (i, m) in self.motions.iter().enumerate() {
+            if now < m.start {
+                continue;
+            }
             let t = if m.dur <= 0.0 {
                 1.0
             } else {
                 ((now - m.start) / m.dur).clamp(0.0, 1.0)
             };
+            let t = if m.soft { t * t * (3.0 - 2.0 * t) } else { t };
             let v = m.from + (m.to - m.from) * t;
-            if let Some(o) = self.objs.get_mut(&m.obj) {
+            if let Some(Slot::Live(o)) = self.slots.get_mut(&m.obj) {
                 o.props.insert(m.prop, Value::Int(v.round() as i64));
             }
             if t >= 1.0 {
@@ -502,6 +809,25 @@ impl Scene {
 
     /// Objeto visible más alto bajo el punto que tenga alguno de los manejadores `props`.
     pub fn hit_handler(&self, x: f64, y: f64, props: &[u8], hit: MouseHit) -> Option<&Obj> {
+        self.hit_handler_with(x, y, props, hit, |object| {
+            (
+                object.int(Prop::WIDTH, 0) as f64,
+                object.int(Prop::HEIGHT, 0) as f64,
+            )
+        })
+    }
+
+    pub fn hit_handler_with<F>(
+        &self,
+        x: f64,
+        y: f64,
+        props: &[u8],
+        hit: MouseHit,
+        size: F,
+    ) -> Option<&Obj>
+    where
+        F: Fn(&Obj) -> (f64, f64),
+    {
         self.draw_order().into_iter().rev().find(|o| {
             if o.ignores_mouse(hit)
                 || !props
@@ -511,11 +837,8 @@ impl Scene {
             {
                 return false;
             }
-            let (ox, oy, w, h) = self.placed_rect(
-                o,
-                o.int(Prop::WIDTH, 0) as f64,
-                o.int(Prop::HEIGHT, 0) as f64,
-            );
+            let (width, height) = size(o);
+            let (ox, oy, w, h) = self.placed_rect(o, width, height);
             w > 0.0 && h > 0.0 && x >= ox && y >= oy && x < ox + w && y < oy + h
         })
     }
@@ -607,6 +930,12 @@ mod tests {
             shown: 0,
             text_rev: 0,
             frame: 0,
+            archived: false,
+            born: 0,
+            play: None,
+            anim: None,
+            placeholder: false,
+            ended_unnotified: false,
         }
     }
 
@@ -622,6 +951,22 @@ mod tests {
         let (x, y, w, h) = scene.placed_rect(&half, 100.0, 60.0);
         assert!((x - 125.0).abs() < 1e-9 && (y - 65.0).abs() < 1e-9);
         assert!((w - 50.0).abs() < 1e-9 && (h - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn brightness_runs_from_black_to_white() {
+        assert_eq!(brightness_draw(0), (255, 0));
+        assert_eq!(brightness_draw(-255), (0, 0));
+        assert_eq!(brightness_draw(255), (0, 255));
+        assert_eq!(brightness_draw(-128), (127, 0));
+        assert_eq!(brightness_draw(128), (127, 128));
+    }
+
+    #[test]
+    fn pointer_box_uses_the_file_when_width_and_height_are_unset() {
+        assert_eq!(pointer_box(0, 0, Some((133, 100))), (133.0, 100.0));
+        assert_eq!(pointer_box(40, 0, Some((133, 100))), (40.0, 100.0));
+        assert_eq!(pointer_box(0, 0, None), (0.0, 0.0));
     }
 
     #[test]

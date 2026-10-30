@@ -1,9 +1,31 @@
 use super::Vm;
+use crate::assets::Assets;
 use crate::assets::IMAGE_EXTS;
 use crate::lsb::expr::Value;
 use crate::lsb::names::Prop;
 use crate::scene::Kind;
 use crate::slider::{SliderPart, slider_size};
+
+pub(super) fn source_pixel_size(assets: &Assets, source: &str) -> Option<(u32, u32)> {
+    if source.is_empty() {
+        return None;
+    }
+    let name = assets.data().resolve(source, IMAGE_EXTS)?;
+    if let Some(crate::assets::Asset::Image(image)) = assets.try_get(&name) {
+        return Some((image.w, image.h));
+    }
+    // Solo la cabecera. El decode del frame en este hilo retrasa el zoom.
+    let peeked = assets
+        .data()
+        .read_prefix(&name, 65536)
+        .and_then(|bytes| crate::gal::peek_size(&bytes))
+        .or_else(|| {
+            let bytes = assets.data().read(&name).ok()?;
+            crate::gal::peek_size(&bytes)
+        });
+    assets.request(&name);
+    peeked
+}
 
 impl Vm {
     pub(crate) fn slider_visual_state(&self, name: &str) -> u32 {
@@ -120,28 +142,7 @@ impl Vm {
     }
 
     pub(crate) fn slider_asset_size(&self, source: &str) -> Option<(u32, u32)> {
-        if source.is_empty() {
-            return None;
-        }
-        let name = self.assets.data().resolve(source, IMAGE_EXTS)?;
-        if let Some(crate::assets::Asset::Image(image)) = self.assets.try_get(&name) {
-            return Some((image.w, image.h));
-        }
-        // Cabecera GAL: el novel system pregunta el tamaño al crear cada miniatura.
-        // Decodificar el frame aquí bloquea la apertura de la galería.
-        let peeked = self
-            .assets
-            .data()
-            .read_prefix(&name, 4096)
-            .and_then(|bytes| crate::gal::peek_size(&bytes));
-        if peeked.is_some() {
-            self.assets.request(&name);
-            return peeked;
-        }
-        match self.assets.get(&name) {
-            crate::assets::Asset::Image(image) => Some((image.w, image.h)),
-            _ => None,
-        }
+        source_pixel_size(&self.assets, source)
     }
 
     fn slider_parts(
@@ -323,6 +324,7 @@ mod tests {
             to: 40.0,
             start: 0.0,
             dur: 100.0,
+            soft: false,
         });
         vm.scene.update(50.0);
         assert!(vm.focus_edit_at(210.0, 25.0));

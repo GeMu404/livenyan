@@ -340,6 +340,44 @@ pub fn save_game(
     Ok(())
 }
 
+/// Lee un blob con nombre propio dentro de `save.dat` (rutas `save:…` de calc.html).
+pub fn read_save_blob(game_dir: &Path, name: &str) -> Option<Vec<u8>> {
+    let save_path = save_file_path(game_dir);
+    let Ok(entries) = read_all_save_entries(&save_path) else {
+        return None;
+    };
+    entries
+        .into_iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, data)| data)
+}
+
+/// Escribe/sobrescribe un blob con nombre propio en `save.dat` (`save:…`).
+pub fn write_save_blob(game_dir: &Path, name: &str, data: &[u8]) -> io::Result<()> {
+    let save_path = save_file_path(game_dir);
+    let mut all_entries = read_all_save_entries(&save_path).unwrap_or_default();
+    let mut replaced = false;
+    for (entry_name, content) in &mut all_entries {
+        if entry_name.eq_ignore_ascii_case(name) {
+            *content = data.to_vec();
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        all_entries.push((name.to_string(), data.to_vec()));
+    }
+    let refs: Vec<(&str, &[u8])> = all_entries
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_slice()))
+        .collect();
+    let vf_bytes = write_vf_archive(&refs)?;
+    let tmp_path = game_dir.join("save.dat.$$$");
+    fs::write(&tmp_path, &vf_bytes)?;
+    fs::rename(&tmp_path, &save_path)?;
+    Ok(())
+}
+
 /// Carga una partida desde el archivo `save.dat`.
 pub fn load_game(game_dir: &Path, slot: i64) -> io::Result<SaveSlot> {
     let save_path = save_file_path(game_dir);
@@ -428,6 +466,28 @@ mod tests {
         assert_eq!(loaded1.globals.get("SceneIndex"), Some(&Value::Int(99)));
 
         // Limpieza
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn save_blob_roundtrip_in_save_dat() {
+        let temp_dir = std::env::temp_dir().join("livenyan_save_blob_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("create temp dir ok");
+        write_save_blob(&temp_dir, "__savescr0.gal", b"gal-bytes").expect("write blob");
+        assert_eq!(
+            read_save_blob(&temp_dir, "__savescr0.gal").as_deref(),
+            Some(b"gal-bytes".as_slice())
+        );
+        // Convive con un slot de partida.
+        let mut globals = HashMap::new();
+        globals.insert("x".into(), Value::Int(1));
+        save_game(&temp_dir, 0, "p.lsb", 1, "c", &globals).expect("save game");
+        assert_eq!(
+            read_save_blob(&temp_dir, "__savescr0.gal").as_deref(),
+            Some(b"gal-bytes".as_slice()),
+            "GameSave must not drop named save: blobs"
+        );
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

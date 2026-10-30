@@ -482,7 +482,14 @@ fn read_gale_frame(r: &mut Rd, info: &Info, ver: u32, prev: &[Frame]) -> R<Frame
     let _name = cp932(r.take(nl)?);
     let hdr_start = r.p;
     r.take(13)?;
-    let raw_hdr: Vec<u8> = r.d[hdr_start..hdr_start + 13].to_vec();
+    let mut raw_hdr: Vec<u8> = r.d[hdr_start..hdr_start + 13].to_vec();
+    // Bytes 0..4: máscara de transparencia en orden B,G,R (igual que el framebuffer
+    // 24bpp). Layer/GaleX TransColor usa TColor 0x00BBGGRR (R en el byte bajo).
+    // Normalizar aquí para que [`apply_key`] compare RGB de forma uniforme.
+    // **experimento:** btn.gal del novel system (matte RGB 236,94,96; cabecera `60 5e ec`).
+    if raw_hdr.len() >= 3 {
+        raw_hdr.swap(0, 2);
+    }
     let layer_count = r.usize()?;
     if layer_count < 1 {
         return err("invalid frame (no layers)");
@@ -1304,6 +1311,55 @@ pub fn decode(d: &[u8]) -> R<Image> {
     })
 }
 
+/// Codifica RGBA8 → GaleX200 24bpp zlib (CompType 0), legible por [`decode`].
+/// Formato de escritura mínimo de livenyan (**no** es el encoder del LiveMaker original).
+pub fn encode_galex_rgba(w: u32, h: u32, rgba: &[u8]) -> R<Vec<u8>> {
+    use std::io::Write;
+    let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    if w == 0 || h == 0 || rgba.len() < need {
+        return err("invalid rgba for GaleX encode");
+    }
+    let st = stride(w, 24);
+    let mut bgr = vec![0u8; st.saturating_mul(h as usize)];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let i = (y * w as usize + x) * 4;
+            let o = y * st + x * 3;
+            bgr[o] = rgba[i + 2];
+            bgr[o + 1] = rgba[i + 1];
+            bgr[o + 2] = rgba[i];
+        }
+    }
+    let zlib = |data: &[u8]| -> R<Vec<u8>> {
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(data)
+            .map_err(|e| GalError(format!("zlib: {e}")))?;
+        enc.finish().map_err(|e| GalError(format!("zlib: {e}")))
+    };
+    let xml = format!(
+        concat!(
+            r#"<?xml version="1.0"?>"#,
+            r#"<Frames Version="200" Width="{w}" Height="{h}" Bpp="24" Count="1" "#,
+            r#"Randomized="0" CompType="0" BlockWidth="0" BlockHeight="0">"#,
+            r#"<Frame TransColor="-1" Delay="0">"#,
+            r#"<Layers Count="1" Width="{w}" Height="{h}" Bpp="24">"#,
+            r#"<Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/>"#,
+            r#"</Layers></Frame></Frames>"#
+        ),
+        w = w,
+        h = h
+    );
+    let zx = zlib(xml.as_bytes())?;
+    let zpixels = zlib(&bgr)?;
+    let mut out = b"GaleX200".to_vec();
+    out.extend_from_slice(&(zx.len() as u32).to_le_bytes());
+    out.extend(&zx);
+    out.extend_from_slice(&(zpixels.len() as u32).to_le_bytes());
+    out.extend(&zpixels);
+    out.extend_from_slice(&0u32.to_le_bytes()); // sin canal alfa
+    Ok(out)
+}
+
 /// Decodifica GAL o, como alternativa, PNG/JPEG/BMP (juegos extraídos/parcheados).
 pub fn decode_any(d: &[u8]) -> R<Image> {
     if d.starts_with(b"Gale") {
@@ -1410,6 +1466,21 @@ mod tests {
         assert_eq!(image.frames.len(), 1);
         assert_eq!(image.frames[0], image.rgba);
         assert_eq!(image.delays, [67, 67]);
+    }
+
+    #[test]
+    fn galex_rgba_roundtrip() {
+        let (w, h) = (3u32, 2u32);
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[x as u8 * 40, y as u8 * 80, 200, 255]);
+            }
+        }
+        let gal = encode_galex_rgba(w, h, &rgba).unwrap();
+        let img = decode(&gal).unwrap();
+        assert_eq!((img.w, img.h), (w, h));
+        assert_eq!(img.rgba, rgba);
     }
 
     #[test]
@@ -1633,5 +1704,29 @@ mod tests {
             attr(r#" BlockWidth="4" Width="10""#, "Width").as_deref(),
             Some("10")
         );
+    }
+
+    #[test]
+    fn novel_btn_gal_colorkey_is_transparent() {
+        let Ok(data) =
+            std::fs::read("/home/gemu/Desktop/testgame/data/ノベルシステム/画像/btn.gal")
+        else {
+            return;
+        };
+        let img = decode_any(&data).expect("btn.gal");
+        let mut transparent = 0usize;
+        let mut leftover_key = 0usize;
+        for p in img.rgba.chunks(4) {
+            if p[3] == 0 {
+                transparent += 1;
+            } else if p[0] == 236 && p[1] == 94 && p[2] == 96 {
+                leftover_key += 1;
+            }
+        }
+        assert!(
+            transparent > 0,
+            "btn.gal Gale106 mask should key out the red matte"
+        );
+        assert_eq!(leftover_key, 0, "keyed matte must not stay opaque");
     }
 }

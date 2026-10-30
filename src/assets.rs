@@ -278,12 +278,32 @@ impl Assets {
 fn timed_decode(sh: &Shared, name: &str) -> Asset {
     let t = Instant::now();
     let a = decode(&sh.data, name);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
     sh.stats.decoded.fetch_add(1, Ordering::Relaxed);
     sh.stats
         .decode_us
         .fetch_add(t.elapsed().as_micros() as usize, Ordering::Relaxed);
-    if let Asset::Failed(e) = &a {
-        log::warn!("decode failed: {e}");
+    match &a {
+        Asset::Failed(e) => log::warn!("decode failed: {e}"),
+        Asset::Script(script) => log::info!(
+            "load script {name}: {} commands in {ms:.1} ms",
+            script.commands.len()
+        ),
+        Asset::Image(image) => log::info!(
+            "load image {name}: {}x{}, {} frame(s) in {ms:.1} ms",
+            image.w,
+            image.h,
+            image.frames.len() + 1
+        ),
+        Asset::Sound(pcm) => log::info!(
+            "load sound {name}: {} Hz, {} ch, {} samples in {ms:.1} ms",
+            pcm.rate,
+            pcm.channels,
+            pcm.samples.len()
+        ),
+        Asset::Bytes(bytes) => {
+            log::info!("load resource {name}: {} bytes in {ms:.1} ms", bytes.len())
+        }
     }
     a
 }

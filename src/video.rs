@@ -51,10 +51,7 @@ pub fn probe_size(data: &[u8]) -> Result<(u32, u32), String> {
     if let Err(e) = std::fs::remove_file(&temp_file)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        log::warn!(
-            "cannot remove temporary video {}: {e}",
-            temp_file.display()
-        );
+        log::warn!("cannot remove temporary video {}: {e}", temp_file.display());
     }
     result
 }
@@ -108,11 +105,7 @@ fn probe_file(path: &PathBuf) -> Result<(u32, u32), String> {
 impl Decoder {
     /// Escribe el asset una sola vez, resuelve tamaño, arranca ffmpeg y espera el 1.er frame.
     /// Devuelve `(decoder, width, height)` de los frames RGBA.
-    pub fn start(
-        data: &[u8],
-        size: OutputSize,
-        repeat: bool,
-    ) -> Result<(Self, u32, u32), String> {
+    pub fn start(data: &[u8], size: OutputSize, repeat: bool) -> Result<(Self, u32, u32), String> {
         let temp_file = create_temp_video(data)?;
         let (width, height, do_scale) = match size {
             OutputSize::Exact(width, height) => {
