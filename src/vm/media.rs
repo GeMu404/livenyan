@@ -329,7 +329,7 @@ impl Vm {
             }
             let mut finished = false;
             let mut notifies = vec![];
-            // efecto WAIT pendiente: animación o fundido del objeto aún en curso
+            // Efecto WAIT pendiente: animación o fundido del objeto aún en curso
             let waiting_obj = self.play_of(&n).and_then(|p| p.wait_for.clone());
             if let Some((o, deadline)) = waiting_obj {
                 let busy = self.effect_busy(&o);
@@ -449,7 +449,7 @@ impl Vm {
                             .unwrap_or("")
                             .to_string();
                         notifies.push(e);
-                        // un evento por vez: puede fijar una espera (WAIT) antes de seguir
+                        // Un evento por vez: puede fijar una espera (WAIT) antes de seguir
                         break;
                     }
                     Some(Pending::Clear) => {

@@ -177,7 +177,7 @@ impl Vm {
         };
         let cycle = q.cycle_ms.max(1.0);
         let phase = if q.random_phase {
-            // desfase estable por nombre
+            // Desfase estable por nombre
             let h = name
                 .bytes()
                 .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));

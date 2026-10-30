@@ -84,7 +84,7 @@ impl Vm {
                 None => {
                     self.warn(&format!("mes:{target}"), &format!("TextIns into never-created message object {target:?}; creating an empty stand-in (no event handlers)"));
                     self.scene.create(target, Kind::Message, HashMap::new());
-                    // texto retenido hasta que llegue el MesNew real
+                    // Texto retenido hasta que llegue el MesNew real
                     if let Some(object) = self.scene.get_mut(target) {
                         object.placeholder = true;
                     }
@@ -469,9 +469,9 @@ mod tests {
             Kind::Message,
             HashMap::from([(Prop::VISIBLE, Value::Bool(true))]),
         );
-        // {PAUSE} (system Notify) waits for click. This plan then uses Clear (like
-        // <CLR>), not a <PG> glyph — so there is no second click-wait.
-        // WAITPLAY CLICK only waits while the target is still busy.
+        // {PAUSE} (Notify de sistema) espera clic; el plan sigue con Clear (como <CLR>),
+        // no con un glifo <PG>, así que no hay segunda espera (H10). WAITPLAY CLICK solo
+        // espera mientras el objetivo sigue ocupado.
         let mut plan = VecDeque::new();
         plan.push_back(Pending::Text {
             items: vec![TextItem::Char("あ".into())],
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn page_break_glyph_waits_for_click_then_clears() {
-        // docs/livenovel/script.html <PG>: wait for click, then page break.
+        // docs/livenovel/script.html <PG>: espera clic y luego cambia de página.
         use crate::lsb::tpword::{TpWord, brk};
 
         let p =
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn page_break_after_pause_glyph_does_not_demand_a_second_click() {
-        // `<PS>` then `<PG>` in one TextIns: one click-wait, then clear.
+        // `<PS>` y luego `<PG>` en un TextIns: una espera de clic y luego Clear.
         use crate::lsb::tpword::{TpWord, brk};
 
         let p =

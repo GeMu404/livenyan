@@ -138,7 +138,7 @@ impl WipeFlash {
             return None;
         }
         let a = if self.peak_mid {
-            // triángulo 0→1→0
+            // Triángulo 0→1→0
             let t = if p < 0.5 { p * 2.0 } else { (1.0 - p) * 2.0 };
             (t * 255.0).round() as u8
         } else {

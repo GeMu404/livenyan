@@ -163,7 +163,7 @@ impl Vm {
                 if let Some(obj) = self.scene.get_mut(boxname) {
                     obj.props.insert(Prop::TEXTPAUSED, Value::Bool(true));
                 }
-                // ONNOTIFY → イベント.lsb (cursor, TEXTPAUSED script-side).
+                // ONNOTIFY → イベント.lsb (cursor y TEXTPAUSED los lleva el script).
                 self.fire(boxname, Prop::ONNOTIFY, vec![Value::Str("PAUSE".into())]);
             }
             "TEXTCLEAR" => {

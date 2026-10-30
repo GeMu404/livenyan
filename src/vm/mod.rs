@@ -957,7 +957,7 @@ impl Vm {
         }
         let one_shots = self.one_shot_cinemas();
         if !one_shots.is_empty() {
-            // clic salta los cinemas de una sola pasada; los que repiten (HUD) siguen
+            // Clic salta los cinemas de una sola pasada; los que repiten (HUD) siguen
             for name in one_shots {
                 if let Some(Clock::Cinema { movie, until }) = self.clocks.get_mut(&name) {
                     *until = Some(self.now);
@@ -1270,7 +1270,7 @@ impl Vm {
         {
             return;
         }
-        // un manejador a la vez: si ya hay uno activo, esperar a que termine
+        // Un manejador a la vez: si ya hay uno activo, esperar a que termine
         if !allow_nested
             && self.frames.iter().any(|f| f.saved_state.is_some())
             && matches!(self.state, State::Running)
@@ -1396,7 +1396,7 @@ impl Vm {
                 self.budget_location.as_deref().unwrap_or("<unknown>")
             );
         }
-        // el texto puede haber empezado en este frame
+        // El texto puede haber empezado en este frame
         self.update_plays();
         self.mouse_left_click = false;
         self.mouse_right_click = false;
@@ -1504,7 +1504,7 @@ impl Vm {
         result_var: String,
         params: Vec<Value>,
     ) -> bool {
-        // manejadores "script.lsc:ETIQUETA": empiezan en el comando Label con ese nombre
+        // Manejadores "script.lsc:ETIQUETA": empiezan en el comando Label con ese nombre
         let mut label = label;
         let mut named: Option<String> = None;
         let page = match page.rsplit_once(':') {
@@ -1672,7 +1672,7 @@ impl Vm {
         let script = f.script.clone();
         let pc = f.pc;
         if pc >= script.commands.len() {
-            // fin de script sin Exit: retorna
+            // Fin de script sin Exit: retorna
             self.do_return(Value::Empty);
             return;
         }
@@ -1901,7 +1901,7 @@ impl Vm {
                 self.assign(&f.result_var, ret);
             }
             if let Some(st) = f.saved_state {
-                // vuelta de un manejador de evento: restaurar lo que hacía el script.
+                // Vuelta de un manejador de evento: restaurar lo que hacía el script.
                 // ONSELECT deja el menú modal solo si sigue en pantalla.
                 // Ceder el frame: si el script de abajo sigue en el mismo turno,
                 // pisa la animación que el evento acaba de arrancar.
@@ -2099,7 +2099,7 @@ impl Vm {
             // El deslizador de auto guarda segundos × 1000. Sin valor de proyecto, 1 s.
             "StatusAutoTextWait" => Value::Int(1000),
             "StatusSkipRead" => Value::Bool(false),
-            // por marco de llamada: cada Call apila los suyos y se recuperan al volver
+            // Por marco de llamada: cada Call apila los suyos y se recuperan al volver
             "@ParamStr" => Value::Array(
                 self.frames
                     .last()
@@ -2264,7 +2264,7 @@ impl Vm {
                 })
                 .unwrap_or(0),
         };
-        // el texto del ítem (si el menú lo tiene en PR_TEXT, una línea por ítem)
+        // El texto del ítem (si el menú lo tiene en PR_TEXT, una línea por ítem)
         let item = self
             .scene
             .get(&name)

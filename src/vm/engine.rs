@@ -192,7 +192,7 @@ impl Env for Vm {
                 }
                 Value::Bool(true)
             }
-            // ventana = espacio lógico (letterbox lo resuelve SDL), así que la conversión es identidad
+            // Ventana = espacio lógico (letterbox lo resuelve SDL), así que la conversión es identidad
             Func::TOSCREENX | Func::TOSCREENY | Func::TOCLIENTX | Func::TOCLIENTY => {
                 a.last().cloned().unwrap_or(Value::Int(0))
             }
