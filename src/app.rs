@@ -4962,28 +4962,28 @@ mod tests {
             600_000.0,
             600_000.0
         ));
+        // Los puntos se toman del centro de cada rect para seguir al layout real.
+        let mid = |r: FRect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (ox, oy) = mid(
+            super::toolbar_button_rects(800)
+                .into_iter()
+                .find(|(a, _)| matches!(a, super::ToolbarAction::Options))
+                .expect("botón Options")
+                .1,
+        );
+        assert!(matches!(toolbar_hit(800, ox, oy, false), Some(super::ToolbarAction::Options)));
+        let (ix, iy) = mid(super::interpolation_option_rects(800)[1].1);
         assert!(matches!(
-            toolbar_hit(800, 730.0, 10.0, false),
-            Some(super::ToolbarAction::Options)
+            toolbar_hit(800, ix, iy, true),
+            Some(super::ToolbarAction::Interpolation(InterpolationMode::Crossfade))
         ));
-        assert!(matches!(
-            toolbar_hit(800, 700.0, 90.0, true),
-            Some(super::ToolbarAction::Interpolation(
-                InterpolationMode::Crossfade
-            ))
-        ));
-        assert!(matches!(
-            toolbar_hit(800, 700.0, 155.0, true),
-            Some(super::ToolbarAction::ToggleFpsMeter)
-        ));
-        assert!(matches!(
-            toolbar_hit(800, 700.0, 210.0, true),
-            Some(super::ToolbarAction::ExportTexts)
-        ));
-        assert!(matches!(
-            toolbar_hit(800, 700.0, 125.0, true),
-            Some(super::ToolbarAction::ScaleFilter(_))
-        ));
+        let (fx, fy) = mid(super::fps_meter_option_rect(800));
+        assert!(matches!(toolbar_hit(800, fx, fy, true), Some(super::ToolbarAction::ToggleFpsMeter)));
+        let (ex, ey) = mid(super::export_texts_option_rect(800));
+        assert!(matches!(toolbar_hit(800, ex, ey, true), Some(super::ToolbarAction::ExportTexts)));
+        let (sx, sy) = mid(super::scale_filter_option_rects(800)[0].1);
+        assert!(matches!(toolbar_hit(800, sx, sy, true), Some(super::ToolbarAction::ScaleFilter(_))));
+        assert!(toolbar_hit(800, fx, fy, false).is_none(), "opciones cerradas: sin acciones del panel");
         assert!(toolbar_in_reveal_strip(0.0));
         assert!(toolbar_in_reveal_strip(5.0));
         assert!(!toolbar_in_reveal_strip(6.0));
@@ -4992,7 +4992,8 @@ mod tests {
         assert!(is_toolbar_visible(false, true));
         assert!(toolbar_contains(800, 400.0, 20.0, false));
         assert!(toolbar_contains(800, 400.0, 40.0, false));
-        assert!(!toolbar_contains(800, 400.0, 46.0, false));
+        assert!(toolbar_contains(800, 400.0, super::TOOLBAR_BAR_HEIGHT - 1.0, false));
+        assert!(!toolbar_contains(800, 400.0, super::TOOLBAR_BAR_HEIGHT + 1.0, false));
         assert!(toolbar_contains(800, 700.0, 100.0, true));
         let mut toolbar_open = false;
         let mut options_open = false;
