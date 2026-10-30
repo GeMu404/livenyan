@@ -44,7 +44,7 @@ pub(super) fn apply_cached_texture_scale_modes(gfx: &mut Gfx, mode: ScaleMode) {
     }
 }
 
-/// Letterbox del framebuffer lógico con nearest (líneas nítidas, sin IA).
+/// Letterbox del framebuffer lógico con nearest (líneas nítidas, sin suavizado).
 pub(super) fn present_sharp_frame(
     canvas: &mut Canvas<Window>,
     scene_frame: &mut Texture,

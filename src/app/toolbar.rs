@@ -11,7 +11,7 @@ pub(super) enum ToolbarAction {
     ExportTexts,
 }
 
-/// Edge strip that reveals the toolbar; keep small so it does not steal play space.
+/// Franja superior que muestra la barra; estrecha para no quitar área de juego.
 const TOOLBAR_REVEAL_HEIGHT: f32 = 6.0;
 
 /// Drawn bar height. Open chrome stays hit-testable while hovered.
@@ -254,12 +254,12 @@ pub(super) fn toolbar_in_reveal_strip(mouse_y: f32) -> bool {
     (0.0..TOOLBAR_REVEAL_HEIGHT).contains(&mouse_y)
 }
 
-/// Visible when latched open (hover chrome) or while the options panel is open.
+/// Visible mientras está abierta por hover o con el panel de opciones abierto.
 pub(super) fn is_toolbar_visible(toolbar_open: bool, options_open: bool) -> bool {
     toolbar_open || options_open
 }
 
-/// Open on the thin top strip; stay open while over bar/panel; close when leaving that chrome.
+/// Se abre en la franja superior, sigue abierta sobre la barra o el panel y se cierra al salir.
 pub(super) fn update_toolbar_open(
     toolbar_open: &mut bool,
     options_open: &mut bool,

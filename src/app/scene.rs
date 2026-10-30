@@ -1272,7 +1272,7 @@ pub(super) fn draw_scene(
                     dw as i64,
                     dh as i64
                 );
-                // Buttons with TEXT render a label centred over the image
+                // Un Button con TEXT dibuja la etiqueta centrada sobre la imagen.
                 if o.kind == Kind::Button {
                     let text = o.str(Prop::TEXT);
                     if !text.is_empty()
@@ -1719,7 +1719,7 @@ pub(super) fn draw_scene(
             _ => st!() = "not rendered (kind)",
         }
     }
-    // tamaños intrínsecos para hit-testing y GetProp
+    // Tamaños intrínsecos para hit-testing y GetProp
     for (n, w, h) in sizes {
         if let Some(o) = vm.scene.get_mut(&n) {
             o.props

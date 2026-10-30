@@ -164,7 +164,7 @@ pub fn run(
         let _ = window.set_fullscreen(true);
     }
     if !cfg.window.renderer.is_empty() {
-        // probar el driver antes: si no funciona en este sistema, avisar y usar el automático
+        // Probar el driver antes: si no funciona en este sistema, avisar y usar el automático
         let name = std::ffi::CString::new(cfg.window.renderer.as_str()).unwrap_or_default();
         // SAFETY: `window` sigue vivo y `name` es un CString válido durante la llamada; el
         // renderer de prueba se destruye aquí mismo y no escapa del bloque.
@@ -189,7 +189,7 @@ pub fn run(
     }
     let mut canvas: Canvas<Window> = window.into_canvas();
     // SAFETY: el renderer de `canvas` está vivo; SDL devuelve una cadena estática terminada
-    // en NUL (o NULL, que se comprueba) y se copia antes de salir.
+    // En NUL (o NULL, que se comprueba) y se copia antes de salir.
     let rname = unsafe {
         let p = sdl3::sys::render::SDL_GetRendererName(canvas.raw());
         if p.is_null() {
@@ -263,7 +263,7 @@ pub fn run(
     });
     let mut sharp_compose: Option<Texture> = None;
 
-    // primer frame cuanto antes
+    // Primer frame cuanto antes
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
     canvas.present();
@@ -272,7 +272,7 @@ pub fn run(
         t0.elapsed().as_secs_f64() * 1000.0
     );
 
-    // fuente en segundo plano
+    // Fuente en segundo plano
     let (ftx, frx) = mpsc::channel();
     {
         let (fp, fi) = (cfg.text.font.clone(), cfg.text.font_index);
@@ -404,7 +404,7 @@ pub fn run(
                     win_event: WindowEvent::PixelSizeChanged(..) | WindowEvent::Resized(..),
                     ..
                 } => {
-                    // la presentación lógica de SDL ya recalcula el letterbox
+                    // La presentación lógica de SDL ya recalcula el letterbox
                 }
                 Event::Window {
                     win_event: WindowEvent::MouseLeave,
@@ -816,7 +816,7 @@ pub fn run(
             }
         }
 
-        // con --snapshot-frame el reloj es simulado (60 fps) para que la captura sea reproducible
+        // Con --snapshot-frame el reloj es simulado (60 fps) para que la captura sea reproducible
         let now = if snapshot.is_some() {
             frame as f64 * 1000.0 / 60.0
         } else {
@@ -899,7 +899,7 @@ pub fn run(
             break;
         }
 
-        // Keep the last complete scene until the picture layer of the next one is decoded.
+        // Se mantiene la última escena completa hasta decodificar la capa de imagen de la siguiente (I13).
         let scene_render_started = Instant::now();
         let mut drawn = Vec::new();
         let mut ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
@@ -1141,7 +1141,7 @@ pub fn run(
                 last_dbg = now;
                 let n = drawn.iter().filter(|d| d.status == "drawn").count();
                 let (ww, wh) = canvas.window().size();
-                // tamaño real en píxeles, consultado en cada log (output_size() puede venir
+                // Tamaño real en píxeles, consultado en cada log (output_size() puede venir
                 // afectado por la presentación lógica)
                 let (pw, ph) = canvas.window().size_in_pixels();
                 let (rw, rh) = canvas.output_size().unwrap_or((0, 0));
@@ -1155,7 +1155,7 @@ pub fn run(
                     vp.height(),
                     canvas.scale()
                 );
-                // dónde cae el lienzo lógico en píxeles reales (letterbox: escala uniforme, centrado)
+                // Dónde cae el lienzo lógico en píxeles reales (letterbox: escala uniforme, centrado)
                 let (bx, by, cw, chh) = crate::util::letterbox((pw, ph), (lw, lh));
                 let k = cw / lw as f64;
                 log::debug!(
