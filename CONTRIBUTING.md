@@ -7,7 +7,8 @@
   `audio:`, `video:`, `docs:`, `tests:`, `build:`.
 - Un asunto por commit. El cuerpo explica **por qué** y cita el manual
   (`docs/livenovel/…`) o la entrada H\*/I\* de [`COMPATIBILITY.md`](COMPATIBILITY.md).
-- Sin trailers de coautoría automáticos.
+- Se permiten trailers de coautoría (`Co-authored-by: Cursor`, Copilot…). Lo que no va son
+  rastros de herramientas en los comentarios del código.
 - Plantilla: `git config commit.template .gitmessage`.
 
 Ejemplo:
