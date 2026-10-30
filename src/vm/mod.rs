@@ -794,8 +794,6 @@ impl Vm {
         }
     }
 
-    // ---------- prefetch ----------
-
     /// Escanea comandos por delante y encola recursos referenciados.
     fn prefetch_from(&mut self, script: &Arc<Lsb>, pc: usize) {
         let end = (pc + self.opts.lookahead).min(script.commands.len());
@@ -823,8 +821,6 @@ impl Vm {
         self.prefetched_upto
             .insert(script.name.clone(), end.max(upto));
     }
-
-    // ---------- variables ----------
 
     fn lookup(&self, name: &str) -> Option<&Value> {
         if name == "@SelStr" {
@@ -882,8 +878,6 @@ impl Vm {
             v => v.truthy(),
         }
     }
-
-    // ---------- control externo ----------
 
     pub fn ended(&self) -> bool {
         matches!(self.state, State::Ended)
@@ -1497,8 +1491,6 @@ impl Vm {
         sample_animation_frames(delays, elapsed, total, repeat)
     }
 
-    // ---------- ejecución ----------
-
     fn goto_script(
         &mut self,
         page: &str,
@@ -1575,7 +1567,7 @@ impl Vm {
         self.prefetch_from(&script, pc);
         if push {
             let mut locals = HashMap::new();
-            // Convención provisional: parámetros como Param1..N (no verificado con juegos reales).
+            // Param1..N: **provisional** (COMPATIBILITY H1).
             for (i, p) in params.iter().enumerate() {
                 locals.insert(format!("Param{}", i + 1), p.clone());
             }

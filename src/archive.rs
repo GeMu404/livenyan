@@ -628,7 +628,6 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
     let count = entries.len();
     let version = 103u32;
 
-    // 1. Comprimir los datos de cada entrada
     let mut compressed_data = Vec::with_capacity(count);
     let mut sums = Vec::with_capacity(count);
     for (_, raw) in entries {
@@ -639,13 +638,11 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
         compressed_data.push(comp);
     }
 
-    // 2. Codificar nombres a CP932
     let cp932_names: Vec<Vec<u8>> = entries
         .iter()
         .map(|(name, _)| crate::util::to_cp932(name))
         .collect();
 
-    // 3. Calcular tamaño exacto del directorio
     let mut dir_size = 2 + 4 + 4; // "vf" + version + count
     for name in &cp932_names {
         dir_size += 4 + name.len(); // len + raw bytes
@@ -656,7 +653,6 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
     dir_size += count * 4; // checksum: 4 bytes
     dir_size += count; // encrypt_flag: 1 byte
 
-    // 4. Calcular offsets acumulados empezando justo después del directorio
     let mut offsets = Vec::with_capacity(count + 1);
     let mut cur_offset = dir_size as u64;
     offsets.push(cur_offset);
@@ -665,13 +661,11 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
         offsets.push(cur_offset);
     }
 
-    // 5. Construir el buffer de salida
     let mut out = Vec::with_capacity(cur_offset as usize);
     out.extend_from_slice(b"vf");
     out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&(count as u32).to_le_bytes());
 
-    // Nombres ofuscados
     let mut ob_names = Obfuscator::new();
     for name in &cp932_names {
         out.extend_from_slice(&(name.len() as u32).to_le_bytes());
@@ -680,7 +674,6 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
         }
     }
 
-    // Offsets ofuscados
     let mut ob_lo = Obfuscator::new();
     let mut ob_hi = Obfuscator::new();
     for &off in &offsets {
@@ -690,25 +683,20 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
         out.extend_from_slice(&hi.to_le_bytes());
     }
 
-    // Compression types (0 = Zlib)
     out.resize(out.len() + count, 0u8);
 
-    // Unk1 (0)
     for _ in 0..count {
         out.extend_from_slice(&0u32.to_le_bytes());
     }
 
-    // Checksums
     for sum in sums {
         out.extend_from_slice(&sum.to_le_bytes());
     }
 
-    // Encrypt flags (0 = None)
     out.resize(out.len() + count, 0u8);
 
     assert_eq!(out.len(), dir_size);
 
-    // 6. Escribir los datos de los ficheros
     for comp in compressed_data {
         out.extend_from_slice(&comp);
     }

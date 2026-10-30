@@ -377,7 +377,7 @@ impl Vm {
     /// CREATECG/CHANGECG crean imágenes y películas LiveCinema; otros eventos se registran.
     /// Argumentos observados de CREATECG: [nombre, fuente ("$RRGGBB" = color sólido), efecto,
     /// "#n", alineación H (L/C/R), alineación V (T/C/B), ?, ?, tiempo ms, ?, ?, "", ?, ?, ?, alfa].
-    /// Solo nombre, fuente, alineación y alfa se usan; el resto está sin verificar.
+    /// Solo nombre, fuente, alineación y alfa se usan; el resto **sin verificar** (H7).
     pub(crate) fn system_text_event(&mut self, boxname: &str, name: &str, args: &[String]) {
         log::debug!("system text event on {boxname}: {name} args {args:?}");
         match name {
@@ -484,7 +484,7 @@ impl Vm {
                 // Posiciones: CREATECG [0]=nombre [1]=fuente/$color [2]=efecto (NORMAL/WAIT...)
                 // [3]=#capa [4]=alin. H [5]=alin. V [8]=tiempo ms [15]=alfa (solo forma de 16 args).
                 // CHANGECG [0]=nombre [1]=fuente/$color [2]=efecto [4]=tiempo ms.
-                // El resto sin verificar: no se usa (nunca se deduce alfa por posición dudosa).
+                // El resto **sin verificar** (H7): no se usa.
                 let num = |i: usize| args.get(i).and_then(|a| a.trim().parse::<f64>().ok());
                 let alpha = if name == "CREATECG" && args.len() >= 16 {
                     num(15)

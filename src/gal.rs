@@ -1272,7 +1272,7 @@ pub fn decode(d: &[u8]) -> R<Image> {
     };
     let (w, h, rgba) = compose(&info, &frames[0], None)?;
     // Gale binario: los bytes 4..8 de la cabecera de frame (tras la máscara) son la duración
-    // del frame en ms (visto en un juego real: 67 ms y una pausa de 2333 ms).
+    // del frame en ms (**experimento**, H23).
     let delay_of = |f: &Frame| {
         f.delay.or_else(|| {
             f.raw_hdr

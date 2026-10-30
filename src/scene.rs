@@ -345,7 +345,7 @@ pub fn pointer_box(prop_w: i64, prop_h: i64, intrinsic: Option<(u32, u32)>) -> (
 pub fn prop_of(v: &Value) -> Option<u8> {
     match v {
         // Los índices numéricos de propiedad son base 0 (igual que los bits de command_params:
-        // bit j -> PropertyType j+1). Confirmado con un juego real: 1=PARENT, 3=LEFT, 4=TOP.
+        // bit j -> PropertyType j+1). **experimento** H24: 1=PARENT, 3=LEFT, 4=TOP.
         Value::Int(i) if (0..=254).contains(i) => Some(*i as u8 + 1),
         Value::Float(f) if (0.0..=254.0).contains(f) => Some(*f as u8 + 1),
         Value::Str(s) => s
@@ -731,7 +731,6 @@ impl Scene {
     /// Objetos en orden de dibujo (prioridad, luego creación).
     /// Orden de dibujo jerárquico: cada objeto se dibuja después de su padre y sus hijos
     /// justo encima de él; entre hermanos manda PRIORITY y luego el orden de creación.
-    /// (Antes era un orden global por PRIORITY: un "土台" con prioridad alta tapaba a sus hijos.)
     pub fn draw_order(&self) -> Vec<&Obj> {
         let mut kids: HashMap<&str, Vec<&Obj>> = HashMap::new();
         let mut roots = vec![];

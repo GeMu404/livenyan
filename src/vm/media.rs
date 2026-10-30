@@ -383,7 +383,6 @@ impl Vm {
                     None => (false, false, String::new()),
                 };
                 // Caja oculta (ella o un padre, p.ej. 土台): no saltar el clic.
-                // MESOFF + WAITPLAY/CLICK antes de MESEND avanzaba la escena sola.
                 let shown = shown && parent_chain_visible(&self.scene, &parent);
                 let cps = cps_of(self, &n);
                 let p = &mut playback;

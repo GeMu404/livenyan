@@ -140,7 +140,6 @@ pub fn decode_status_variables(data: &[u8]) -> io::Result<HashMap<String, Value>
 
         let val = match vtype {
             3 => {
-                // Bool (1 byte)
                 if pos >= data.len() {
                     break;
                 }
@@ -149,7 +148,6 @@ pub fn decode_status_variables(data: &[u8]) -> io::Result<HashMap<String, Value>
                 Value::Bool(b)
             }
             1 => {
-                // Int (4 bytes)
                 if pos + 4 > data.len() {
                     break;
                 }
@@ -158,7 +156,6 @@ pub fn decode_status_variables(data: &[u8]) -> io::Result<HashMap<String, Value>
                 Value::Int(i as i64)
             }
             2 => {
-                // Float (8 bytes)
                 if pos + 8 > data.len() {
                     break;
                 }
@@ -201,15 +198,12 @@ pub fn encode_game_save_slot(slot: &SaveSlot) -> Vec<u8> {
     out.extend_from_slice(&(cap_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(cap_bytes);
 
-    // Page (script de retorno)
     let page_bytes = slot.page.as_bytes();
     out.extend_from_slice(&(page_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(page_bytes);
 
-    // Label
     out.extend_from_slice(&slot.label.to_le_bytes());
 
-    // Variables globales
     let vars_bytes = encode_status_variables(&slot.globals);
     out.extend_from_slice(&(vars_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&vars_bytes);
@@ -323,7 +317,6 @@ pub fn save_game(
         all_entries.insert(0, ("STATUSSAVEDATA".to_string(), status_bytes));
     }
 
-    // Convertir a slices para write_vf_archive
     let refs: Vec<(&str, &[u8])> = all_entries
         .iter()
         .map(|(n, c)| (n.as_str(), c.as_slice()))
@@ -438,34 +431,27 @@ mod tests {
         globals.insert("StatusBGMVolume".to_string(), Value::Int(800));
         globals.insert("SceneIndex".to_string(), Value::Int(42));
 
-        // 1. Guardar slot 0
         save_game(&temp_dir, 0, "main.lsb", 10, "Partida 001", &globals).expect("save 0 ok");
 
-        // 2. Comprobar que existe save.dat y que el caption coincide
         assert_eq!(read_save_caption(&temp_dir, 0), "Partida 001");
         assert_eq!(read_save_caption(&temp_dir, 1), ""); // slot 1 aun vacio
 
-        // 3. Guardar slot 1
         globals.insert("SceneIndex".to_string(), Value::Int(99));
         save_game(&temp_dir, 1, "next.lsb", 25, "Partida 002 Final", &globals).expect("save 1 ok");
 
-        // 4. Comprobar captions de ambos slots
         assert_eq!(read_save_caption(&temp_dir, 0), "Partida 001");
         assert_eq!(read_save_caption(&temp_dir, 1), "Partida 002 Final");
 
-        // 5. Cargar slot 0
         let loaded0 = load_game(&temp_dir, 0).expect("load 0 ok");
         assert_eq!(loaded0.page, "main.lsb");
         assert_eq!(loaded0.label, 10);
         assert_eq!(loaded0.globals.get("SceneIndex"), Some(&Value::Int(42)));
 
-        // 6. Cargar slot 1
         let loaded1 = load_game(&temp_dir, 1).expect("load 1 ok");
         assert_eq!(loaded1.page, "next.lsb");
         assert_eq!(loaded1.label, 25);
         assert_eq!(loaded1.globals.get("SceneIndex"), Some(&Value::Int(99)));
 
-        // Limpieza
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

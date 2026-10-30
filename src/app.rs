@@ -4691,8 +4691,7 @@ fn draw_scene(
             }
             Kind::Box => {
                 // Un Box es ante todo un contenedor ("土台"): solo se rellena si tiene COLOR
-                // explícito (no clNone/-1) y tamaño. Antes un Box sin COLOR ni tamaño se
-                // pintaba negro a pantalla completa y tapaba todo.
+                // explícito (no clNone/-1) y tamaño.
                 let col = o.get(Prop::COLOR).map(|v| v.as_int());
                 let fill = matches!(col, Some(c) if c >= 0 && c != 0x1FFF_FFFF);
                 if !fill || ow <= 0 || oh <= 0 {

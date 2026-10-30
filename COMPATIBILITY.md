@@ -251,6 +251,9 @@ Cruce de este índice y de [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERF
 | H19 | Una lista Save/Load midió 140×20 y se partió en siete celdas de 20×20. Un solo asset | Solo esa imagen | Reusarlo en otro menú parte mal la tira |
 | H20 | Layout `.lft` leído en versión `100` de un solo juego (**no confirmado** fuera). U+0020 ausente: el avance del espacio se sintetiza (**inventado**, W12) | Glifos y el ancho del espacio | Otra versión, o un espacio real en el `.lft`, cambian el avance |
 | H21 | Los exports de `live.dll` son la superficie nativa de media. Mapearlos 1:1 a comandos LSB o a nombres de prop: **no confirmado** | Qué símbolo atendería un comando de media | Ese mapeo cambiaría el dispatch. Hoy no se hace |
+| H22 | Botones `.lpm`: si los dos primeros enteros coinciden con el tamaño de la imagen son tamaño y la posición sale de unk15/unk16; si no, son la posición (**no confirmado**) | Dónde cae cada botón de PrevMenu | Si el criterio es otro, los botones se desplazan |
+| H23 | Gale binario: bytes 4..8 de la cabecera de frame = duración en ms (**experimento**, valores plausibles en un juego) | Ritmo de animaciones `.gal` | Si el campo es otra cosa, la animación corre a otro ritmo |
+| H24 | Índice numérico de `ObjProp` en base 0 (PropertyType = índice + 1) (**experimento**: PARENT, LEFT y TOP cuadran) | Qué prop lee un `GetProp` numérico | Con otra base se leería la prop vecina |
 
 ## Mantenimiento
 

@@ -230,7 +230,7 @@ impl Vm {
 
     /// Carga los botones de un .lpm. Posición: si los dos primeros enteros del botón
     /// coinciden con el tamaño de su imagen son tamaño y la posición son unk15/unk16; si no,
-    /// son la posición (sin verificar: se registran todos los números a debug).
+    /// son la posición (**no confirmado**, H22; los números van a debug).
     pub(crate) fn load_prevmenu(&mut self, name: &str, src: &str) {
         let data = self.assets.data().clone();
         let Some(file) = data.resolve(src, &[".lpm"]) else {
