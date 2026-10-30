@@ -293,6 +293,93 @@ fn translation_token(glyph: &Glyph, index: usize) -> String {
     format!("{{{{LV:{kind}:{index}}}}}")
 }
 
+fn parse_glyph(r: &mut Reader, v: u32) -> Result<Glyph> {
+    let t = r.u8()?;
+    if !matches!(t, 1..=7 | 9 | 10) {
+        // pylivemaker: Select(..., Byte) consume solo el byte de tipo
+        return Ok(Glyph::Unknown(t));
+    }
+    let condition = if v >= 104 { r.i32()? } else { -1 };
+    let real = |r: &mut Reader| -> Result<(i32, u32)> {
+        let link = if v < 105 {
+            r.string()?;
+            -1
+        } else {
+            r.i32()?
+        };
+        Ok((link, r.u32()?))
+    };
+    Ok(match t {
+        1 => {
+            let (link, speed) = real(r)?;
+            let raw = r.u16()?;
+            let ch = if raw >> 8 == 0 {
+                cp932(&[raw as u8])
+            } else {
+                cp932(&[(raw >> 8) as u8, raw as u8])
+            };
+            let decorator = r.i32()?;
+            Glyph::Char {
+                ch,
+                decorator,
+                link,
+                speed,
+                condition,
+            }
+        }
+        2 => {
+            let align = r.u8()?;
+            if v >= 105 {
+                r.i32()?;
+                r.i32()?;
+                r.u8()?;
+            }
+            Glyph::Div { align }
+        }
+        3 => Glyph::Return { kind: r.u8()? },
+        4 => Glyph::Indent,
+        5 => Glyph::Undent,
+        6 => Glyph::Event { event: r.string()? },
+        7 | 10 => {
+            r.i32()?;
+            if v > 100 {
+                r.u32()?;
+            }
+            if v > 100 && v < 105 {
+                r.string()?;
+            }
+            if v >= 105 {
+                r.i32()?;
+            }
+            let name = if v < 102 {
+                LiveParser::parse(r)?.render(false)
+            } else {
+                r.string()?
+            };
+            Glyph::Var {
+                name,
+                hist: t == 10,
+            }
+        }
+        9 => {
+            real(r)?;
+            let src = r.string()?;
+            let align = r.u8()?;
+            if v >= 103 {
+                r.string()?;
+            }
+            if v >= 105 {
+                for _ in 0..4 {
+                    r.i32()?;
+                }
+                r.string()?;
+            }
+            Glyph::Img { src, align }
+        }
+        _ => unreachable!(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Glyph, TpWord, brk};
@@ -404,91 +491,4 @@ mod tests {
         assert!(!text.replace_translation_text("Hola {{LV:VAR:9}}"));
         assert!(matches!(text.body[0], Glyph::Var { .. }));
     }
-}
-
-fn parse_glyph(r: &mut Reader, v: u32) -> Result<Glyph> {
-    let t = r.u8()?;
-    if !matches!(t, 1..=7 | 9 | 10) {
-        // pylivemaker: Select(..., Byte) consume solo el byte de tipo
-        return Ok(Glyph::Unknown(t));
-    }
-    let condition = if v >= 104 { r.i32()? } else { -1 };
-    let real = |r: &mut Reader| -> Result<(i32, u32)> {
-        let link = if v < 105 {
-            r.string()?;
-            -1
-        } else {
-            r.i32()?
-        };
-        Ok((link, r.u32()?))
-    };
-    Ok(match t {
-        1 => {
-            let (link, speed) = real(r)?;
-            let raw = r.u16()?;
-            let ch = if raw >> 8 == 0 {
-                cp932(&[raw as u8])
-            } else {
-                cp932(&[(raw >> 8) as u8, raw as u8])
-            };
-            let decorator = r.i32()?;
-            Glyph::Char {
-                ch,
-                decorator,
-                link,
-                speed,
-                condition,
-            }
-        }
-        2 => {
-            let align = r.u8()?;
-            if v >= 105 {
-                r.i32()?;
-                r.i32()?;
-                r.u8()?;
-            }
-            Glyph::Div { align }
-        }
-        3 => Glyph::Return { kind: r.u8()? },
-        4 => Glyph::Indent,
-        5 => Glyph::Undent,
-        6 => Glyph::Event { event: r.string()? },
-        7 | 10 => {
-            r.i32()?;
-            if v > 100 {
-                r.u32()?;
-            }
-            if v > 100 && v < 105 {
-                r.string()?;
-            }
-            if v >= 105 {
-                r.i32()?;
-            }
-            let name = if v < 102 {
-                LiveParser::parse(r)?.render(false)
-            } else {
-                r.string()?
-            };
-            Glyph::Var {
-                name,
-                hist: t == 10,
-            }
-        }
-        9 => {
-            real(r)?;
-            let src = r.string()?;
-            let align = r.u8()?;
-            if v >= 103 {
-                r.string()?;
-            }
-            if v >= 105 {
-                for _ in 0..4 {
-                    r.i32()?;
-                }
-                r.string()?;
-            }
-            Glyph::Img { src, align }
-        }
-        _ => unreachable!(),
-    })
 }

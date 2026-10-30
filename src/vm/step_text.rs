@@ -67,12 +67,12 @@ impl Vm {
             "{}:line={}:command={pc}:field=Text",
             frame.script.name, c.line_no
         );
-        if let Some(translated) = self.translations.get(&translation_key) {
-            if !tw.replace_translation_text(translated) {
-                log::debug!(
-                    "skipping translation with missing or invalid runtime placeholders: {translation_key}"
-                );
-            }
+        if let Some(translated) = self.translations.get(&translation_key)
+            && !tw.replace_translation_text(translated)
+        {
+            log::debug!(
+                "skipping translation with missing or invalid runtime placeholders: {translation_key}"
+            );
         }
         let mut detail = format!("target={target:?} chars={}", tw.char_count());
         if show {

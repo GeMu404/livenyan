@@ -71,7 +71,7 @@ impl Vm {
         let caption = self.eval(c.expr("Caption")).as_str();
         let detail = format!("slot={slot} page={page:?} label={label} caption={caption:?}");
         if let Err(e) =
-            crate::save::save_game(&self.save_dir, slot, &page, label, &caption, &self.globals)
+            crate::save::save_game(&self.save_dir, slot, page, label, &caption, &self.globals)
         {
             log::error!("GameSave error: {e}");
         }

@@ -506,10 +506,10 @@ impl Movie {
             .min(self.duration_frames.saturating_sub(1));
         let mut superseded = vec![false; self.clips.len()];
         for clip in &self.clips {
-            if frame >= clip.start {
-                if let Some(previous) = clip.previous {
-                    superseded[previous] = true;
-                }
+            if frame >= clip.start
+                && let Some(previous) = clip.previous
+            {
+                superseded[previous] = true;
             }
         }
         self.clips

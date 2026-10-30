@@ -691,9 +691,7 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
     }
 
     // Compression types (0 = Zlib)
-    for _ in 0..count {
-        out.push(0u8);
-    }
+    out.resize(out.len() + count, 0u8);
 
     // Unk1 (0)
     for _ in 0..count {
@@ -706,9 +704,7 @@ pub fn write_vf_archive(entries: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
     }
 
     // Encrypt flags (0 = None)
-    for _ in 0..count {
-        out.push(0u8);
-    }
+    out.resize(out.len() + count, 0u8);
 
     assert_eq!(out.len(), dir_size);
 

@@ -2130,7 +2130,13 @@ impl Vm {
         if !self.one_shot_cinemas().is_empty() {
             return "cinema";
         }
-        if matches!(self.state, State::WaitUntil { skippable: true, .. }) {
+        if matches!(
+            self.state,
+            State::WaitUntil {
+                skippable: true,
+                ..
+            }
+        ) {
             return "skip-wait";
         }
         "none"
@@ -2368,10 +2374,7 @@ impl Vm {
             }
         } else {
             if self.begin_slider_drag(x, y) {
-                let name = self
-                    .slider_focus
-                    .clone()
-                    .unwrap_or_else(|| "slider".into());
+                let name = self.slider_focus.clone().unwrap_or_else(|| "slider".into());
                 let kind = self.object_kind_name(&name);
                 self.log_click(x, y, false, &name, kind, "drag", false, "");
                 return;
@@ -2401,7 +2404,9 @@ impl Vm {
         };
         let object_hit = self
             .scene
-            .hit_handler_with(x, y, props, mouse_hit, |object| pointer_box(&assets, object))
+            .hit_handler_with(x, y, props, mouse_hit, |object| {
+                pointer_box(&assets, object)
+            })
             .map(|o| (o.name.clone(), (o.int(Prop::PRIORITY, 0), o.seq)));
 
         if let Some((n, i)) = menu_hit
@@ -2995,10 +3000,10 @@ impl Env for Vm {
             }
             Func::GETPROP => {
                 let p = prop_of(a.get(1)?)?;
-                if p == Prop::COUNT {
-                    if let Some(pm) = self.prevmenus.get(&s(0)) {
-                        return Some(Value::Int(pm.buttons.len() as i64));
-                    }
+                if p == Prop::COUNT
+                    && let Some(pm) = self.prevmenus.get(&s(0))
+                {
+                    return Some(Value::Int(pm.buttons.len() as i64));
                 }
                 self.get_prop(&s(0), p)
             }
@@ -4136,7 +4141,7 @@ mod tests {
         };
         assert!(vm.step_reset(&cmd, &mut detail));
         assert!(vm.scene.get("tmp").is_none());
-        assert!(vm.globals.get("game_flag").is_none());
+        assert!(!vm.globals.contains_key("game_flag"));
         assert_eq!(vm.globals.get("status_flag"), Some(&Value::Int(9)));
         assert_eq!(vm.frames.len(), 1);
     }
@@ -5208,11 +5213,7 @@ mod tests {
                 auto_scrap_sender: false,
             });
             vm.do_return(Value::Empty);
-            assert_eq!(
-                vm.yielded, expect_yield,
-                "{}",
-                crate::lsb::prop_name(prop)
-            );
+            assert_eq!(vm.yielded, expect_yield, "{}", crate::lsb::prop_name(prop));
         }
     }
 

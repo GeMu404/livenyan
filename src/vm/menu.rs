@@ -268,10 +268,10 @@ impl Vm {
                 self.assets.request(r);
             }
             if let Some(r) = &res_selected {
-                self.assets.request(&r);
+                self.assets.request(r);
             }
             if let Some(r) = &res_disabled {
-                self.assets.request(&r);
+                self.assets.request(r);
             }
             let (w, h) = size.unwrap_or((b.a.0 as i64, b.a.1 as i64));
             let a_is_size = size == Some((b.a.0 as i64, b.a.1 as i64));

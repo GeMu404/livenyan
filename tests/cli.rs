@@ -120,7 +120,7 @@ fn while_end_listcompo_props_timer() {
     ] {
         assert!(s.contains(want), "missing {want:?}\n{s}");
     }
-    assert_eq!(s.matches("While -> true").count() >= 2, true);
+    assert!(s.matches("While -> true").count() >= 2);
 }
 
 /// El detector de estancamiento de --trace debe atrapar bucles que repiten SetProp.

@@ -1,4 +1,6 @@
 //! livenyan: reimplementación nativa del reproductor LiveMaker.
+// Dibujo y VM pasan el contexto explícito; se agrupará en structs en el refactor de app.rs/vm.
+#![allow(clippy::too_many_arguments)]
 pub mod app;
 pub mod archive;
 pub mod assets;

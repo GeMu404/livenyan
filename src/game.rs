@@ -341,15 +341,16 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
             pat.extend_from_slice(name);
             find(blk, &pat).and_then(|q| dfm_int(blk, q + pat.len()))
         };
-        if let (Some(w), Some(h)) = (get(b"ClientWidth"), get(b"ClientHeight")) {
-            if (160..=8192).contains(&w) && (120..=8192).contains(&h) {
-                out.push(ExeForm {
-                    class,
-                    w: w as u32,
-                    h: h as u32,
-                    main: false,
-                });
-            }
+        if let (Some(w), Some(h)) = (get(b"ClientWidth"), get(b"ClientHeight"))
+            && (160..=8192).contains(&w)
+            && (120..=8192).contains(&h)
+        {
+            out.push(ExeForm {
+                class,
+                w: w as u32,
+                h: h as u32,
+                main: false,
+            });
         }
     }
     // principal: clase con "Main"/"Live"/"Novel"; si no, la primera de mayor área
@@ -376,8 +377,10 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
 mod form_tests {
     #[test]
     fn lpb_header_resolution() {
-        let mut p = super::Project::default();
-        p.unk = [1024, 768, 1024, 768];
+        let mut p = super::Project {
+            unk: [1024, 768, 1024, 768],
+            ..Default::default()
+        };
         assert_eq!(super::lpb_resolution(&p), Some((1024, 768)));
         p.unk = [0, 0, 640, 480];
         assert_eq!(super::lpb_resolution(&p), Some((640, 480)));

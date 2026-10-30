@@ -87,10 +87,10 @@ impl Db {
     pub fn load_tsv(&mut self, table: &str, text: &str) -> usize {
         let t = self.tables.entry(table.to_string()).or_default();
         let mut lines = text.lines().filter(|l| !l.is_empty());
-        if t.fields.is_empty() {
-            if let Some(h) = lines.next() {
-                t.fields = h.split('\t').map(|s| s.to_string()).collect();
-            }
+        if t.fields.is_empty()
+            && let Some(h) = lines.next()
+        {
+            t.fields = h.split('\t').map(|s| s.to_string()).collect();
         }
         for l in lines {
             let mut row: Vec<Value> = l.split('\t').map(|s| Value::Str(s.to_string())).collect();

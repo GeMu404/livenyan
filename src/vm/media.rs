@@ -85,9 +85,9 @@ impl Vm {
         }
         let pen = self
             .message_font(&family)
-            .and_then(|renderer| {
+            .map(|renderer| {
                 let px = renderer.size_for_cell_height(font_h as f32);
-                Some(renderer.pen_after(&items, max_w, px, &images))
+                renderer.pen_after(&items, max_w, px, &images)
             })
             .map(|(x, y)| (f64::from(x), f64::from(y)))
             .unwrap_or_else(|| {
@@ -510,20 +510,20 @@ impl Vm {
                     o.props.insert(Prop::PLAYING, Value::Bool(false));
                     o.props.insert(Prop::TEXTPAUSED, Value::Bool(false));
                 }
-                if !self.fire(&n, Prop::ONPLAYEND, vec![]) {
-                    if let Some(object) = self.scene.get_mut(&n) {
-                        object.ended_unnotified = true;
-                    }
+                if !self.fire(&n, Prop::ONPLAYEND, vec![])
+                    && let Some(object) = self.scene.get_mut(&n)
+                {
+                    object.ended_unnotified = true;
                 }
                 if matches!(&self.state, State::WaitText { target } if *target == n) {
                     self.state = State::Running;
                 }
             }
         }
-        if let State::WaitText { target } = &self.state {
-            if self.play_of(target).is_none() {
-                self.state = State::Running;
-            }
+        if let State::WaitText { target } = &self.state
+            && self.play_of(target).is_none()
+        {
+            self.state = State::Running;
         }
     }
 

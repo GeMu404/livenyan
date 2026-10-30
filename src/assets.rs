@@ -82,22 +82,22 @@ pub fn decode(data: &GameData, name: &str) -> Asset {
     };
     let fail = |e: String| Asset::Failed(format!("{name}: {e}").into());
     match ext(name).as_str() {
-        "gal" | "png" | "jpg" | "jpeg" | "bmp" => match {
+        "gal" | "png" | "jpg" | "jpeg" | "bmp" => {
             log::debug!("decoding image {name} ({} bytes)", raw.len());
-            gal::decode_any(&raw)
-        } {
-            Ok(i) => {
-                log::debug!(
-                    "decoded image {name}: {}x{}, {} frame(s), delays {:?}",
-                    i.w,
-                    i.h,
-                    i.frames.len() + 1,
-                    i.delays
-                );
-                Asset::Image(Arc::new(i))
+            match gal::decode_any(&raw) {
+                Ok(i) => {
+                    log::debug!(
+                        "decoded image {name}: {}x{}, {} frame(s), delays {:?}",
+                        i.w,
+                        i.h,
+                        i.frames.len() + 1,
+                        i.delays
+                    );
+                    Asset::Image(Arc::new(i))
+                }
+                Err(e) => fail(e.to_string()),
             }
-            Err(e) => fail(e.to_string()),
-        },
+        }
         "wav" => decode_wav(&raw)
             .map(|p| Asset::Sound(Arc::new(p)))
             .unwrap_or_else(fail),

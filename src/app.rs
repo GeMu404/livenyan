@@ -305,7 +305,7 @@ fn toolbar_hit(width: u32, x: f32, y: f32, options_open: bool) -> Option<Toolbar
 }
 
 fn toolbar_contains(width: u32, x: f32, y: f32, options_open: bool) -> bool {
-    let in_bar = y >= 0.0 && y < TOOLBAR_BAR_HEIGHT && x >= 0.0 && x < width as f32;
+    let in_bar = (0.0..TOOLBAR_BAR_HEIGHT).contains(&y) && x >= 0.0 && x < width as f32;
     if in_bar {
         return true;
     }
@@ -380,8 +380,13 @@ fn gal_frame_pixels(image: &crate::gal::Image, frame: usize) -> Option<&[u8]> {
 }
 
 fn frame_is_opaque(image: &crate::gal::Image, frame: usize) -> bool {
-    gal_frame_pixels(image, frame)
-        .is_some_and(|pixels| pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX))
+    gal_frame_pixels(image, frame).is_some_and(|pixels| {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == u8::MAX)
+    })
 }
 
 fn can_crossfade_frames(
@@ -525,17 +530,14 @@ fn interpolation_group_areas(
 
     let mut group_bounds = HashMap::new();
     let mut object_groups = Vec::with_capacity(members.len());
-    for index in 0..members.len() {
-        let key = if members[index].1.starts_with("object:") {
+    for (index, member) in members.iter().enumerate() {
+        let key = if member.1.starts_with("object:") {
             format!("overlap:{}", find_group_root(&mut parents, index))
         } else {
-            members[index].1.clone()
+            member.1.clone()
         };
-        add_rect_to_bounds(
-            group_bounds.entry(key.clone()).or_insert(None),
-            members[index].2,
-        );
-        object_groups.push((members[index].0.clone(), key));
+        add_rect_to_bounds(group_bounds.entry(key.clone()).or_insert(None), member.2);
+        object_groups.push((member.0.clone(), key));
     }
     let group_areas: HashMap<String, f64> = group_bounds
         .into_iter()
@@ -577,18 +579,12 @@ fn should_interpolate_gal(
 fn load_interpolation_preference(default: InterpolationMode) -> InterpolationMode {
     #[derive(serde::Deserialize)]
     #[serde(default)]
+    #[derive(Default)]
     struct UiPreferences {
         interpolation_mode: Option<String>,
         interpolate_animations: bool,
     }
-    impl Default for UiPreferences {
-        fn default() -> Self {
-            Self {
-                interpolation_mode: None,
-                interpolate_animations: false,
-            }
-        }
-    }
+
     let path = crate::util::config_dir().join("ui-preferences.toml");
     match std::fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<UiPreferences>(&contents) {
@@ -861,7 +857,7 @@ fn draw_language_picker(
         canvas,
         tc,
         gfx,
-        font.as_deref_mut(),
+        font,
         "Flechas + Enter · Esc: original",
         panel.x + 16.0,
         panel.y + panel.h - 32.0,
@@ -1847,7 +1843,7 @@ pub fn run(
             canvas
                 .with_texture_canvas(compose, |overlay| {
                     overlay.set_draw_color(Color::RGB(0, 0, 0));
-                    let _ = overlay.clear();
+                    overlay.clear();
                     let _ = overlay.copy(
                         &scene_frame,
                         None,
@@ -2472,7 +2468,7 @@ fn draw_toolbar(
                 canvas,
                 tc,
                 gfx,
-                font.as_deref_mut(),
+                font,
                 status,
                 panel.x + 16.0,
                 panel.y + 228.0,
@@ -2803,6 +2799,7 @@ fn scroll_menu(vm: &mut Vm, name: &str, choice_count: usize, amount: i64, select
 }
 
 /// Código de tecla de Windows (`@KeyPush` / `@KeyClick`, docs/livenovel/calc.html).
+#[allow(clippy::just_underscores_and_digits)] // `_0`..`_9` son las variantes de Keycode de SDL
 fn windows_vk(key: sdl3::keyboard::Keycode) -> Option<usize> {
     use sdl3::keyboard::Keycode::*;
     Some(match key {
@@ -3009,7 +3006,7 @@ fn draw_menu(
         } else {
             None
         }
-        .or_else(|| font.as_deref_mut())?;
+        .or(font.as_deref_mut())?;
         choices
             .iter()
             .map(|choice| renderer.measure_text_width(choice, font_size))
@@ -3077,7 +3074,7 @@ fn draw_menu(
                 halign,
                 filter,
             )
-        } else if let Some(f) = font.as_deref_mut() {
+        } else if let Some(f) = font {
             render_menu_textures(
                 f,
                 tc,
@@ -3418,10 +3415,18 @@ fn upload_decoded_image(
     gfx.animation_delays.insert(key.clone(), img.delays.clone());
     if log::log_enabled!(log::Level::Debug) {
         let n = (img.w * img.h).max(1) as u64;
-        let asum: u64 = img.rgba.chunks_exact(4).map(|p| p[3] as u64).sum();
+        let asum: u64 = img
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3] as u64)
+            .sum();
         let rgbsum: u64 = img
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
             .sum();
         log::debug!(
@@ -3749,7 +3754,7 @@ fn draw_caption_text(
     canvas: &mut Canvas<Window>,
     tc: &TextureCreator<WindowContext>,
     gfx: &mut Gfx,
-    mut font: Option<&mut TextRenderer>,
+    font: Option<&mut TextRenderer>,
     o: &Obj,
     alpha: u8,
     (x, y): (f64, f64),
@@ -3826,7 +3831,7 @@ fn draw_caption_text(
             } else {
                 None
             };
-            let selected = selected.or_else(|| font.as_deref_mut());
+            let selected = selected.or(font);
             selected.map(|renderer| {
                 let px = renderer.size_for_cell_height(font_height);
                 renderer.render_aligned(&items, bounds.0, bounds.1, px, font_color, shadow, align)
@@ -4004,7 +4009,7 @@ fn draw_scene(
     let interpolation_areas = if interpolation_mode == InterpolationMode::Off {
         HashMap::new()
     } else {
-        interpolation_group_areas(&vm.scene, &order, gfx, assets)
+        interpolation_group_areas(&vm.scene, order, gfx, assets)
     };
     let mut sizes: Vec<(String, u32, u32)> = vec![];
     let mut active_menu_animations = HashSet::new();
@@ -4432,44 +4437,44 @@ fn draw_scene(
                 // Buttons with TEXT render a label centred over the image
                 if o.kind == Kind::Button {
                     let text = o.str(Prop::TEXT);
-                    if !text.is_empty() {
-                        if let Some(font) = font.as_deref_mut() {
-                            let px = o
-                                .get(Prop::FONTHEIGHT)
+                    if !text.is_empty()
+                        && let Some(font) = font.as_deref_mut()
+                    {
+                        let px =
+                            o.get(Prop::FONTHEIGHT)
                                 .map(Value::as_f64)
                                 .filter(|v| *v > 0.0)
-                                .unwrap_or(cfg.text.size as f64)
-                                as f32;
-                            let color = o
-                                .get(Prop::FONTCOLOR)
-                                .map(|v| tcolor(v.as_int(), 255))
-                                .unwrap_or(cfg.text.color);
-                            let items: Vec<TextItem> = text
-                                .chars()
-                                .map(|c| TextItem::Char(c.to_string()))
-                                .collect();
-                            let text_width = font.measure_text_width(&text, px).ceil().max(1.0);
-                            let text_height = (px * 1.5).ceil().max(1.0);
-                            let img = font.render_aligned(
-                                &items,
-                                text_width.min(dw).max(1.0) as u32,
-                                text_height.min(dh).max(1.0) as u32,
-                                px,
-                                color,
-                                false,
-                                1,
+                                .unwrap_or(cfg.text.size as f64) as f32;
+                        let color = o
+                            .get(Prop::FONTCOLOR)
+                            .map(|v| tcolor(v.as_int(), 255))
+                            .unwrap_or(cfg.text.color);
+                        let items: Vec<TextItem> = text
+                            .chars()
+                            .map(|c| TextItem::Char(c.to_string()))
+                            .collect();
+                        let text_width = font.measure_text_width(&text, px).ceil().max(1.0);
+                        let text_height = (px * 1.5).ceil().max(1.0);
+                        let img = font.render_aligned(
+                            &items,
+                            text_width.min(dw).max(1.0) as u32,
+                            text_height.min(dh).max(1.0) as u32,
+                            px,
+                            color,
+                            false,
+                            1,
+                        );
+                        if img.w > 0
+                            && img.h > 0
+                            && let Some(texture) = upload(tc, img.w, img.h, &img.rgba, filter)
+                        {
+                            let tx = x as f32 + (dw - img.w as f32) / 2.0;
+                            let ty = y as f32 + (dh - img.h as f32) / 2.0;
+                            let _ = canvas.copy(
+                                &texture,
+                                None,
+                                FRect::new(tx, ty, img.w as f32, img.h as f32),
                             );
-                            if img.w > 0 && img.h > 0 {
-                                if let Some(texture) = upload(tc, img.w, img.h, &img.rgba, filter) {
-                                    let tx = x as f32 + (dw - img.w as f32) / 2.0;
-                                    let ty = y as f32 + (dh - img.h as f32) / 2.0;
-                                    let _ = canvas.copy(
-                                        &texture,
-                                        None,
-                                        FRect::new(tx, ty, img.w as f32, img.h as f32),
-                                    );
-                                }
-                            }
                         }
                     }
                 }
@@ -4904,7 +4909,7 @@ fn draw_scene(
     if let Some((r, g, b, a)) = vm.wipe_flash_rgba()
         && a > 0
     {
-        let _ = canvas.set_blend_mode(BlendMode::Blend);
+        canvas.set_blend_mode(BlendMode::Blend);
         canvas.set_draw_color(Color::RGBA(r, g, b, a));
         let _ = canvas.fill_rect(FRect::new(0.0, 0.0, lw as f32, lh as f32));
     }
@@ -4964,26 +4969,41 @@ mod tests {
         ));
         // Los puntos se toman del centro de cada rect para seguir al layout real.
         let mid = |r: FRect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let (ox, oy) = mid(
-            super::toolbar_button_rects(800)
-                .into_iter()
-                .find(|(a, _)| matches!(a, super::ToolbarAction::Options))
-                .expect("botón Options")
-                .1,
-        );
-        assert!(matches!(toolbar_hit(800, ox, oy, false), Some(super::ToolbarAction::Options)));
+        let (ox, oy) = mid(super::toolbar_button_rects(800)
+            .into_iter()
+            .find(|(a, _)| matches!(a, super::ToolbarAction::Options))
+            .expect("botón Options")
+            .1);
+        assert!(matches!(
+            toolbar_hit(800, ox, oy, false),
+            Some(super::ToolbarAction::Options)
+        ));
         let (ix, iy) = mid(super::interpolation_option_rects(800)[1].1);
         assert!(matches!(
             toolbar_hit(800, ix, iy, true),
-            Some(super::ToolbarAction::Interpolation(InterpolationMode::Crossfade))
+            Some(super::ToolbarAction::Interpolation(
+                InterpolationMode::Crossfade
+            ))
         ));
         let (fx, fy) = mid(super::fps_meter_option_rect(800));
-        assert!(matches!(toolbar_hit(800, fx, fy, true), Some(super::ToolbarAction::ToggleFpsMeter)));
+        assert!(matches!(
+            toolbar_hit(800, fx, fy, true),
+            Some(super::ToolbarAction::ToggleFpsMeter)
+        ));
         let (ex, ey) = mid(super::export_texts_option_rect(800));
-        assert!(matches!(toolbar_hit(800, ex, ey, true), Some(super::ToolbarAction::ExportTexts)));
+        assert!(matches!(
+            toolbar_hit(800, ex, ey, true),
+            Some(super::ToolbarAction::ExportTexts)
+        ));
         let (sx, sy) = mid(super::scale_filter_option_rects(800)[0].1);
-        assert!(matches!(toolbar_hit(800, sx, sy, true), Some(super::ToolbarAction::ScaleFilter(_))));
-        assert!(toolbar_hit(800, fx, fy, false).is_none(), "opciones cerradas: sin acciones del panel");
+        assert!(matches!(
+            toolbar_hit(800, sx, sy, true),
+            Some(super::ToolbarAction::ScaleFilter(_))
+        ));
+        assert!(
+            toolbar_hit(800, fx, fy, false).is_none(),
+            "opciones cerradas: sin acciones del panel"
+        );
         assert!(toolbar_in_reveal_strip(0.0));
         assert!(toolbar_in_reveal_strip(5.0));
         assert!(!toolbar_in_reveal_strip(6.0));
@@ -4992,8 +5012,18 @@ mod tests {
         assert!(is_toolbar_visible(false, true));
         assert!(toolbar_contains(800, 400.0, 20.0, false));
         assert!(toolbar_contains(800, 400.0, 40.0, false));
-        assert!(toolbar_contains(800, 400.0, super::TOOLBAR_BAR_HEIGHT - 1.0, false));
-        assert!(!toolbar_contains(800, 400.0, super::TOOLBAR_BAR_HEIGHT + 1.0, false));
+        assert!(toolbar_contains(
+            800,
+            400.0,
+            super::TOOLBAR_BAR_HEIGHT - 1.0,
+            false
+        ));
+        assert!(!toolbar_contains(
+            800,
+            400.0,
+            super::TOOLBAR_BAR_HEIGHT + 1.0,
+            false
+        ));
         assert!(toolbar_contains(800, 700.0, 100.0, true));
         let mut toolbar_open = false;
         let mut options_open = false;

@@ -687,7 +687,9 @@ mod tests {
     }
 
     fn test_font() -> std::path::PathBuf {
-        std::env::var_os("LIVENYAN_TEST_FONT").expect("LIVENYAN_TEST_FONT").into()
+        std::env::var_os("LIVENYAN_TEST_FONT")
+            .expect("LIVENYAN_TEST_FONT")
+            .into()
     }
 
     #[test]
@@ -704,7 +706,10 @@ mod tests {
         catalog.insert_parsed(font);
         let mut renderer = TextRenderer::load_family("JKゴシックM", &catalog, None).expect("ume");
         assert!(!renderer.is_pixel_font());
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         assert!(renderer.face().contains(stem));
         let latin = renderer.glyph('A', renderer.size_for_cell_height(16.0));
         let kana = renderer.glyph('あ', renderer.size_for_cell_height(16.0));

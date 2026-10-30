@@ -274,10 +274,10 @@ pub fn read_save_caption(game_dir: &Path, slot: i64) -> String {
 
     let target_name = format!("GAMESAVEDATA{slot}");
     for (name, data) in entries {
-        if name.eq_ignore_ascii_case(&target_name) {
-            if let Ok(slot_data) = decode_game_save_slot(&data) {
-                return slot_data.caption;
-            }
+        if name.eq_ignore_ascii_case(&target_name)
+            && let Ok(slot_data) = decode_game_save_slot(&data)
+        {
+            return slot_data.caption;
         }
     }
     String::new()

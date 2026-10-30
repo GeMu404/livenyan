@@ -277,6 +277,7 @@ pub struct Motion {
     pub soft: bool,
 }
 
+#[allow(clippy::large_enum_variant)] // Gone es transitorio; boxear Live añadiría una indirección a cada acceso
 enum Slot {
     /// El script lo ve. `Obj::archived` es la placa de atrás.
     Live(Obj),

@@ -299,21 +299,21 @@ fn collect_menu_item_labels(
                     }
                 }
 
-                if operation.op == crate::lsb::op::TO {
-                    if let Some(values) = resolve_static_strings(
+                if operation.op == crate::lsb::op::TO
+                    && let Some(values) = resolve_static_strings(
                         operation.operands.last(),
                         &temporaries,
                         &static_strings,
                         global_strings,
-                    ) {
-                        if operation.name.starts_with("____") {
-                            temporaries.insert(
-                                operation.name.clone(),
-                                values.into_iter().next().unwrap_or_default(),
-                            );
-                        } else {
-                            static_strings.insert(operation.name.clone(), values);
-                        }
+                    )
+                {
+                    if operation.name.starts_with("____") {
+                        temporaries.insert(
+                            operation.name.clone(),
+                            values.into_iter().next().unwrap_or_default(),
+                        );
+                    } else {
+                        static_strings.insert(operation.name.clone(), values);
                     }
                 }
             }

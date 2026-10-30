@@ -215,13 +215,12 @@ pub fn eval(lp: &LiveParser, env: &mut dyn Env) -> Value {
             op::DIMTO => {
                 if let (Some(Param::Var(arr_var)), Some(idx_val)) =
                     (e.operands.first(), args.get(1))
+                    && !arr_var.starts_with("____")
                 {
-                    if !arr_var.starts_with("____") {
-                        array_lvalues.insert(
-                            e.name.as_str(),
-                            (arr_var.clone(), idx_val.as_int().max(0) as usize),
-                        );
-                    }
+                    array_lvalues.insert(
+                        e.name.as_str(),
+                        (arr_var.clone(), idx_val.as_int().max(0) as usize),
+                    );
                 }
                 let mut cur = a;
                 for idx in &args[1.min(args.len())..] {

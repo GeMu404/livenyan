@@ -179,7 +179,7 @@ fn real_main(cli: Cli, t0: Instant) -> Result<(), String> {
                     })
                     .collect();
                 match c.len() {
-                    0 => return Err(format!("not in archive: {name}").into()),
+                    0 => return Err(format!("not in archive: {name}")),
                     1 => c[0].clone(),
                     _ => {
                         eprintln!("ambiguous: {name} matches {} files:", c.len());
@@ -291,7 +291,7 @@ fn info(
         *exts.entry(e).or_default() += 1;
     }
     let mut exts: Vec<_> = exts.into_iter().collect();
-    exts.sort_by(|a, b| b.1.cmp(&a.1));
+    exts.sort_by_key(|e| std::cmp::Reverse(e.1));
     println!("archive:     {}", game.data.describe());
     println!("entries:     {}", names.len());
     println!(
@@ -543,25 +543,28 @@ fn trace(mut vm: Vm, steps: u64, t0: Instant) -> Result<(), String> {
         last_sig = sig;
         // a partir de 60 frames sin código nuevo, intentar cada frame hasta que haya un menú
         // (en un bucle de título el menú puede existir solo en algunos frames del ciclo)
-        if cov_idle >= 60 {
-            if let Some(m) = vm.auto_menu() {
-                menus += 1;
-                cov_idle = 0;
-                println!("[{t:>8.0}ms] auto-select menu {m}");
-            }
+        if cov_idle >= 60
+            && let Some(m) = vm.auto_menu()
+        {
+            menus += 1;
+            cov_idle = 0;
+            println!("[{t:>8.0}ms] auto-select menu {m}");
         }
         // el script espera y no hay texto pendiente: clic en la caja de mensajes
-        if idle > 0 && idle % 30 == 0 && idle % 60 != 0 {
-            if let Some(m) = vm.click_message() {
-                clicks += 1;
-                println!("[{t:>8.0}ms] auto-click on screen -> {m}");
-            }
+        if idle > 0
+            && idle % 30 == 0
+            && idle % 60 != 0
+            && let Some(m) = vm.click_message()
+        {
+            clicks += 1;
+            println!("[{t:>8.0}ms] auto-click on screen -> {m}");
         }
-        if idle > 0 && idle % 60 == 0 {
-            if let Some(o) = vm.auto_fire(fired) {
-                fired += 1;
-                println!("[{t:>8.0}ms] auto-click on object {o}");
-            }
+        if idle > 0
+            && idle % 60 == 0
+            && let Some(o) = vm.auto_fire(fired)
+        {
+            fired += 1;
+            println!("[{t:>8.0}ms] auto-click on object {o}");
         }
         if idle > 3000 {
             println!("# stalled at {}", vm.location());

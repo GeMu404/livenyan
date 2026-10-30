@@ -22,16 +22,16 @@ impl Vm {
         if i > 0 && is_wl(i - 1) {
             return i;
         }
-        if let Some(w) = while_pc {
-            if let Some(k) = (w + 1..script.commands.len()).find(|&k| {
+        if let Some(w) = while_pc
+            && let Some(k) = (w + 1..script.commands.len()).find(|&k| {
                 is_wl(k)
                     && script.commands[k]
                         .u32("Start")
                         .map(|s| Self::loop_target(script, s, CmdType::While))
                         == Some(w)
-            }) {
-                return k + 1;
-            }
+            })
+        {
+            return k + 1;
         }
         Self::loop_target(script, v, CmdType::WhileLoop) + 1
     }
@@ -71,25 +71,24 @@ impl Vm {
         let mut vars = vec![];
         for o in &e.entries {
             for p in &o.operands {
-                if let Param::Var(v) = p {
-                    if !v.starts_with("____")
-                        && !vars.iter().any(|(x, _): &(String, String)| x == v)
-                    {
-                        let val = self
-                            .lookup(v)
-                            .cloned()
-                            .or_else(|| self.system_var(v))
-                            .unwrap_or(Value::Empty);
-                        let shown = match &val {
-                            Value::Str(t) if !self.opts.show_text => {
-                                format!("<{} chars>", t.chars().count())
-                            }
-                            Value::Array(a) => format!("[array {}]", a.len()),
-                            Value::Empty => "(undef)".into(),
-                            v => format!("{v:?}"),
-                        };
-                        vars.push((v.clone(), shown));
-                    }
+                if let Param::Var(v) = p
+                    && !v.starts_with("____")
+                    && !vars.iter().any(|(x, _): &(String, String)| x == v)
+                {
+                    let val = self
+                        .lookup(v)
+                        .cloned()
+                        .or_else(|| self.system_var(v))
+                        .unwrap_or(Value::Empty);
+                    let shown = match &val {
+                        Value::Str(t) if !self.opts.show_text => {
+                            format!("<{} chars>", t.chars().count())
+                        }
+                        Value::Array(a) => format!("[array {}]", a.len()),
+                        Value::Empty => "(undef)".into(),
+                        v => format!("{v:?}"),
+                    };
+                    vars.push((v.clone(), shown));
                 }
             }
         }

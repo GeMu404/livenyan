@@ -180,15 +180,15 @@ impl Vm {
                 }
             }
         }
-        if !src.is_empty() {
-            if let Some((w, h)) = self.slider_asset_size(&src) {
-                props.entry(Prop::ORIGWIDTH).or_insert(Value::Int(w as i64));
-                props
-                    .entry(Prop::ORIGHEIGHT)
-                    .or_insert(Value::Int(h as i64));
-                props.entry(Prop::WIDTH).or_insert(Value::Int(w as i64));
-                props.entry(Prop::HEIGHT).or_insert(Value::Int(h as i64));
-            }
+        if !src.is_empty()
+            && let Some((w, h)) = self.slider_asset_size(&src)
+        {
+            props.entry(Prop::ORIGWIDTH).or_insert(Value::Int(w as i64));
+            props
+                .entry(Prop::ORIGHEIGHT)
+                .or_insert(Value::Int(h as i64));
+            props.entry(Prop::WIDTH).or_insert(Value::Int(w as i64));
+            props.entry(Prop::HEIGHT).or_insert(Value::Int(h as i64));
         }
         self.scene.create(&name, Kind::from_cmd(c.kind), props);
         // Después de create: ObjDel deja el slot en Gone y watch_anim no

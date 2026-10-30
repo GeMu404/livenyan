@@ -176,16 +176,15 @@ impl Audio {
         }
         self.pending = still;
         self.chans.retain(|channel, c| {
-            if let Some(fade_out) = c.fade_out {
-                if faded_gain(
+            if let Some(fade_out) = c.fade_out
+                && faded_gain(
                     fade_out.start_gain,
                     fade_out.started_at.elapsed(),
                     fade_out.duration,
                 )
                 .is_none()
-                {
-                    return false;
-                }
+            {
+                return false;
             }
             let queued_bytes = match c.stream.queued_bytes() {
                 Ok(queued_bytes) if queued_bytes >= 0 => queued_bytes as usize,
@@ -240,7 +239,7 @@ impl Audio {
         if pcm.rate == 0
             || pcm.channels == 0
             || pcm.samples.is_empty()
-            || pcm.samples.len() % usize::from(pcm.channels) != 0
+            || !pcm.samples.len().is_multiple_of(usize::from(pcm.channels))
         {
             return Err(format!(
                 "invalid PCM format: {} Hz, {} channel(s), {} samples",

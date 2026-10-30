@@ -134,13 +134,13 @@ struct Prev<'a> {
     frames: &'a [Frame],
     alpha: bool,
     /// Capas ya leídas del frame en curso (índice de frame = frames.len()).
-    cur: &'a [(Layer, Vec<u8>, Option<Vec<u8>>)],
+    cur: &'a [LayerData],
 }
 
 impl Prev<'_> {
     fn block_src(&self, fr: i32, lr: i32) -> Option<&[u8]> {
         let fr = usize::try_from(fr).ok()?;
-        let layers: &[(Layer, Vec<u8>, Option<Vec<u8>>)] = if fr == self.frames.len() {
+        let layers: &[LayerData] = if fr == self.frames.len() {
             self.cur
         } else {
             &self.frames.get(fr)?.layers
@@ -728,7 +728,7 @@ pub fn quick_class(d: &[u8]) -> String {
         Ok(img) => {
             let mut opaque_black = true;
             let mut transparent = true;
-            for p in img.rgba.chunks_exact(4) {
+            for p in img.rgba.as_chunks::<4>().0 {
                 if p[3] != 0 {
                     transparent = false;
                     if p[0] | p[1] | p[2] != 0 {
@@ -1043,7 +1043,7 @@ pub fn stats(d: &[u8]) -> R<String> {
             apply_key_frame(f, data, &mut px, key);
             let n = (px.len() / 4).max(1) as u64;
             let (mut r, mut g, mut b, mut al, mut nz) = (0u64, 0u64, 0u64, 0u64, 0u64);
-            for p in px.chunks_exact(4) {
+            for p in px.as_chunks::<4>().0 {
                 r += p[0] as u64;
                 g += p[1] as u64;
                 b += p[2] as u64;
@@ -1236,11 +1236,9 @@ fn compose(info: &Info, frame: &Frame, previous: Option<&[u8]>) -> R<(u32, u32, 
                 for c in 0..3 {
                     let sc = px[s + c] as u32;
                     let dc = canvas[dpos + c] as u32;
-                    canvas[dpos + c] = if oa == 0 {
-                        0
-                    } else {
-                        ((sc * sa + dc * da * (255 - sa) / 255) / oa) as u8
-                    };
+                    canvas[dpos + c] = (sc * sa + dc * da * (255 - sa) / 255)
+                        .checked_div(oa)
+                        .unwrap_or(0) as u8;
                 }
                 canvas[dpos + 3] = oa as u8;
             }
