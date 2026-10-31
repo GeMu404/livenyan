@@ -325,7 +325,7 @@ pub(super) fn read_vfs_bytes(vm: &Vm, path: &str) -> Option<Vec<u8>> {
     std::fs::read(&src_path).ok()
 }
 
-pub(super) fn resample_nearest(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+pub(crate) fn resample_nearest(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return out;

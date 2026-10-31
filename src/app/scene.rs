@@ -539,6 +539,7 @@ fn draw_edit_text(
     focused: bool,
     cfg: &Config,
     filter: ScaleMode,
+    text_scale: f32,
 ) -> &'static str {
     let Some(font) = font else {
         return "font not loaded yet";
@@ -555,8 +556,9 @@ fn draw_edit_text(
         .get(Prop::FONTCOLOR)
         .map(|v| tcolor(v.as_int(), 255))
         .unwrap_or(cfg.text.color);
+    let raster = outline_raster(font.is_pixel_font(), text_scale, px, width, height, filter);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (text.as_str(), px.to_bits(), color).hash(&mut hasher);
+    (text.as_str(), px.to_bits(), color, raster.w, raster.h).hash(&mut hasher);
     let style = hasher.finish() as usize;
     let stale = gfx
         .texts
@@ -567,8 +569,8 @@ fn draw_edit_text(
             .chars()
             .map(|c| TextItem::Char(c.to_string()))
             .collect();
-        let img = font.render(&items, width, height, px, color, false);
-        if let Some(texture) = upload(tc, img.w, img.h, &img.rgba, filter) {
+        let img = font.render(&items, raster.w, raster.h, raster.px, color, false);
+        if let Some(texture) = upload(tc, img.w, img.h, &img.rgba, raster.filter) {
             gfx.texts.insert(o.name.clone(), (0, style, texture));
         }
     }
@@ -598,6 +600,7 @@ fn draw_caption_text(
     (x, y): (f64, f64),
     (lw, _lh): (u32, u32),
     filter: ScaleMode,
+    text_scale: f32,
 ) -> &'static str {
     let text = o.str(Prop::TEXT);
     if text.is_empty() {
@@ -645,6 +648,7 @@ fn draw_caption_text(
         align,
         shadow,
         o.int(Prop::FONTSTYLE, 0),
+        text_scale.to_bits(),
     )
         .hash(&mut hasher);
     let style = hasher.finish() as usize;
@@ -672,11 +676,22 @@ fn draw_caption_text(
             let selected = selected.or(font);
             selected.map(|renderer| {
                 let px = renderer.size_for_cell_height(font_height);
-                renderer.render_aligned(&items, bounds.0, bounds.1, px, font_color, shadow, align)
+                let raster = outline_raster(
+                    renderer.is_pixel_font(),
+                    text_scale,
+                    px,
+                    bounds.0,
+                    bounds.1,
+                    filter,
+                );
+                let image = renderer.render_aligned(
+                    &items, raster.w, raster.h, raster.px, font_color, shadow, align,
+                );
+                (image, raster.filter)
             })
         };
-        if let Some(rendered) = rendered
-            && let Some(texture) = upload(tc, rendered.w, rendered.h, &rendered.rgba, filter)
+        if let Some((rendered, text_filter)) = rendered
+            && let Some(texture) = upload(tc, rendered.w, rendered.h, &rendered.rgba, text_filter)
         {
             gfx.texts
                 .insert(o.name.clone(), (o.text_rev, style, texture));
@@ -706,6 +721,7 @@ fn draw_message_text(
     cfg: &Config,
     filter: ScaleMode,
     debug_layout: bool,
+    text_scale: f32,
 ) -> &'static str {
     let Some(font) = font else {
         return "font not loaded yet";
@@ -772,6 +788,7 @@ fn draw_message_text(
         shadow_color,
         border,
         border_color,
+        text_scale.to_bits(),
     )
         .hash(&mut hasher);
     let extra = hasher.finish() as usize;
@@ -798,11 +815,12 @@ fn draw_message_text(
         let renderer = selected.unwrap_or(font);
         // FONTHEIGHT = "フォントの高さ" (docs/livenovel/text.html); unidades exactas no confirmadas.
         let px = renderer.size_for_cell_height(font_height);
+        let raster = outline_raster(renderer.is_pixel_font(), text_scale, px, w, h, filter);
         let img = renderer.render_aligned_with_images(
             &items,
-            w,
-            h,
-            px,
+            raster.w,
+            raster.h,
+            raster.px,
             color,
             shadow,
             shadow_color,
@@ -811,17 +829,16 @@ fn draw_message_text(
             0,
             &images,
         );
-        if let Some(t) = upload(tc, img.w, img.h, &img.rgba, filter) {
+        if let Some(t) = upload(tc, img.w, img.h, &img.rgba, raster.filter) {
             gfx.texts.insert(o.name.clone(), (o.text_rev, extra, t));
         }
     }
     if let Some((_, _, texture)) = gfx.texts.get_mut(&o.name) {
         texture.set_alpha_mod(alpha);
-        let q = texture.query();
         let _ = canvas.copy(
             texture,
             None,
-            FRect::new(x as f32, y as f32, q.width as f32, q.height as f32),
+            FRect::new(x as f32, y as f32, w as f32, h as f32),
         );
     }
     "drawn"
@@ -841,6 +858,7 @@ pub(super) fn draw_scene(
     (lw, lh): (u32, u32),
     debug_layout: bool,
     interpolation_mode: InterpolationMode,
+    text_scale: f32,
 ) -> Vec<Drawn> {
     let order = ordered_objects;
     gfx.image_texture_used_this_frame.clear();
@@ -993,6 +1011,7 @@ pub(super) fn draw_scene(
                         cfg,
                         filter,
                         true,
+                        text_scale,
                     );
                 }
                 if (ow <= 0 || oh <= 0)
@@ -1046,39 +1065,49 @@ pub(super) fn draw_scene(
                     text.color,
                     movie_w,
                     movie_h,
+                    text_scale.to_bits(),
                 )
                     .hash(&mut hasher);
                 let style = hasher.finish() as usize;
                 let key = format!("{}::lcm-text-{index}", o.name);
+                let width = (movie_w as f32 - text.x.max(0.0)).ceil().max(1.0) as u32;
+                let height = (movie_h as f32 - text.y.max(0.0))
+                    .ceil()
+                    .max(text.font_height as f32) as u32;
                 let stale = gfx
                     .texts
                     .get(&key)
                     .is_none_or(|(revision, old_style, _)| *revision != 0 || *old_style != style);
                 if stale {
-                    let width = (movie_w as f32 - text.x.max(0.0)).ceil().max(1.0) as u32;
-                    let height = (movie_h as f32 - text.y.max(0.0))
-                        .ceil()
-                        .max(text.font_height as f32) as u32;
                     let rendered = font.as_deref_mut().map(|renderer| {
                         let px = renderer.size_for_cell_height(text.font_height as f32);
+                        let raster = outline_raster(
+                            renderer.is_pixel_font(),
+                            text_scale,
+                            px,
+                            width,
+                            height,
+                            filter,
+                        );
                         let items: Vec<TextItem> = text
                             .value
                             .chars()
                             .map(|c| TextItem::Char(c.to_string()))
                             .collect();
-                        renderer.render_aligned(
+                        let image = renderer.render_aligned(
                             &items,
-                            width,
-                            height,
-                            px,
+                            raster.w,
+                            raster.h,
+                            raster.px,
                             tcolor(text.color as i64, 255),
                             false,
                             0,
-                        )
+                        );
+                        (image, raster.filter)
                     });
-                    if let Some(rendered) = rendered
+                    if let Some((rendered, text_filter)) = rendered
                         && let Some(texture) =
-                            upload(tc, rendered.w, rendered.h, &rendered.rgba, filter)
+                            upload(tc, rendered.w, rendered.h, &rendered.rgba, text_filter)
                     {
                         gfx.texts.insert(key.clone(), (0, style, texture));
                     }
@@ -1091,8 +1120,8 @@ pub(super) fn draw_scene(
                         FRect::new(
                             x as f32 + text.x,
                             y as f32 + text.y,
-                            texture.query().width as f32,
-                            texture.query().height as f32,
+                            width as f32,
+                            height as f32,
                         ),
                     );
                     rendered_text += 1;
@@ -1293,25 +1322,29 @@ pub(super) fn draw_scene(
                             .collect();
                         let text_width = font.measure_text_width(&text, px).ceil().max(1.0);
                         let text_height = (px * 1.5).ceil().max(1.0);
-                        let img = font.render_aligned(
-                            &items,
-                            text_width.min(dw).max(1.0) as u32,
-                            text_height.min(dh).max(1.0) as u32,
+                        let box_w = text_width.min(dw).max(1.0) as u32;
+                        let box_h = text_height.min(dh).max(1.0) as u32;
+                        let raster = outline_raster(
+                            font.is_pixel_font(),
+                            text_scale,
                             px,
-                            color,
-                            false,
-                            1,
+                            box_w,
+                            box_h,
+                            filter,
                         );
+                        let img = font
+                            .render_aligned(&items, raster.w, raster.h, raster.px, color, false, 1);
                         if img.w > 0
                             && img.h > 0
-                            && let Some(texture) = upload(tc, img.w, img.h, &img.rgba, filter)
+                            && let Some(texture) =
+                                upload(tc, img.w, img.h, &img.rgba, raster.filter)
                         {
-                            let tx = x as f32 + (dw - img.w as f32) / 2.0;
-                            let ty = y as f32 + (dh - img.h as f32) / 2.0;
+                            let tx = x as f32 + (dw - box_w as f32) / 2.0;
+                            let ty = y as f32 + (dh - box_h as f32) / 2.0;
                             let _ = canvas.copy(
                                 &texture,
                                 None,
-                                FRect::new(tx, ty, img.w as f32, img.h as f32),
+                                FRect::new(tx, ty, box_w as f32, box_h as f32),
                             );
                         }
                     }
@@ -1605,6 +1638,7 @@ pub(super) fn draw_scene(
                     cfg,
                     filter,
                     false,
+                    text_scale,
                 );
             }
             Kind::Caption => {
@@ -1618,6 +1652,7 @@ pub(super) fn draw_scene(
                     (x, y),
                     (lw, lh),
                     filter,
+                    text_scale,
                 );
             }
             Kind::Edit => {
@@ -1632,6 +1667,7 @@ pub(super) fn draw_scene(
                     vm.active_edit_name() == Some(o.name.as_str()),
                     cfg,
                     filter,
+                    text_scale,
                 );
             }
             Kind::Movie => {

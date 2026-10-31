@@ -286,7 +286,6 @@ pub fn run(
     } else {
         ScaleMode::Linear
     });
-    let mut sharp_compose: Option<Texture> = None;
 
     // Primer frame cuanto antes
     canvas.set_draw_color(Color::RGB(0, 0, 0));
@@ -947,11 +946,41 @@ pub fn run(
         let mut ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
         vm.append_wipe_incoming(&mut ordered_objects);
         let savescreen_req = vm.take_pending_savescreen();
+        let output_pixels = canvas.window().size_in_pixels();
+        let target = scene_target_size(present_scale.external_upscale(), output_pixels, (lw, lh));
+        if scene_frame.query().width != target.0 || scene_frame.query().height != target.1 {
+            match tc.create_texture_target(PixelFormat::RGBA32, target.0, target.1) {
+                Ok(mut texture) => {
+                    texture.set_blend_mode(BlendMode::None);
+                    texture.set_scale_mode(ScaleMode::Nearest);
+                    scene_frame = texture;
+                    scene_frame_ready = false;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "cannot resize scene target to {}x{}: {error}",
+                        target.0,
+                        target.1
+                    );
+                }
+            }
+        }
+        let text_scale = outline_text_scale(
+            (scene_frame.query().width, scene_frame.query().height),
+            (lw, lh),
+        );
         if scene_images_ready(&assets, &vm, &ordered_objects) {
             let mut captured_rgba: Option<Vec<u8>> = None;
             let need_capture = savescreen_req.is_some();
             canvas
                 .with_texture_canvas(&mut scene_frame, |scene_canvas| {
+                    if let Err(error) = scene_canvas.set_logical_size(
+                        lw,
+                        lh,
+                        sdl3::sys::render::SDL_LOGICAL_PRESENTATION_STRETCH,
+                    ) {
+                        log::warn!("scene target logical size: {error}");
+                    }
                     scene_canvas.set_draw_color(Color::RGB(0, 0, 0));
                     scene_canvas.clear();
                     drawn = draw_scene(
@@ -967,6 +996,7 @@ pub fn run(
                         (lw, lh),
                         debug_layout,
                         interpolation_mode,
+                        text_scale,
                     );
                     if let State::Menu { name, choices, .. } = &vm.state {
                         draw_menu(
@@ -982,6 +1012,7 @@ pub fn run(
                             (lw, lh),
                             filter,
                             cfg.text.font.is_some(),
+                            text_scale,
                         );
                     } else {
                         gfx.menu = None;
@@ -992,7 +1023,7 @@ pub fn run(
                         && let Ok(shot) = shot.convert_format(PixelFormat::RGBA32)
                     {
                         let (w, h, pitch) = (shot.width(), shot.height(), shot.pitch() as usize);
-                        if w == lw && h == lh {
+                        if w > 0 && h > 0 {
                             let mut rgba = Vec::with_capacity((w * h * 4) as usize);
                             shot.with_lock(|px: &[u8]| {
                                 for y in 0..h as usize {
@@ -1001,7 +1032,11 @@ pub fn run(
                                     );
                                 }
                             });
-                            captured_rgba = Some(rgba);
+                            captured_rgba = Some(if w == lw && h == lh {
+                                rgba
+                            } else {
+                                crate::vm::resample_nearest(&rgba, w, h, lw, lh)
+                            });
                         }
                     }
                 })
@@ -1021,139 +1056,68 @@ pub fn run(
         let toolbar_visible = snapshot.is_none()
             && !language_picker_open
             && is_toolbar_visible(toolbar_open, options_open);
-        let use_sharp_present = present_scale.present_nearest() && scene_frame_ready;
         let draw_lang = language_picker_open && snapshot.is_none();
         let draw_fps = fps_meter_enabled && snapshot.is_none() && !language_picker_open;
-        let sharp_needs_overlay = use_sharp_present && (draw_lang || toolbar_visible || draw_fps);
-        if sharp_needs_overlay {
-            if sharp_compose.as_ref().is_none_or(|texture| {
-                let q = texture.query();
-                q.width != lw || q.height != lh
-            }) {
-                let mut texture = tc
-                    .create_texture_target(PixelFormat::RGBA32, lw, lh)
-                    .map_err(|e| format!("cannot create sharp compose target: {e}"))?;
-                texture.set_blend_mode(BlendMode::None);
-                texture.set_scale_mode(ScaleMode::Nearest);
-                sharp_compose = Some(texture);
-            }
-            let compose = sharp_compose
-                .as_mut()
-                .ok_or_else(|| "sharp compose target missing".to_string())?;
-            canvas
-                .with_texture_canvas(compose, |overlay| {
-                    overlay.set_draw_color(Color::RGB(0, 0, 0));
-                    overlay.clear();
-                    let _ = overlay.copy(
-                        &scene_frame,
-                        None,
-                        FRect::new(0.0, 0.0, lw as f32, lh as f32),
-                    );
-                    if draw_lang {
-                        draw_language_picker(
-                            overlay,
-                            &tc,
-                            &mut gfx,
-                            font.as_mut(),
-                            (lw, lh),
-                            &languages,
-                            language_selection,
-                            (mouse.0, mouse.1),
-                        );
-                    }
-                    if toolbar_visible {
-                        draw_toolbar(
-                            overlay,
-                            &tc,
-                            &mut gfx,
-                            font.as_mut(),
-                            (lw, lh),
-                            (mouse.0, mouse.1),
-                            options_open,
-                            interpolation_mode,
-                            present_scale,
-                            vsync_active,
-                            fps_meter_enabled,
-                            export_status.as_deref(),
-                        );
-                    }
-                    if draw_fps {
-                        draw_fps_meter(
-                            overlay,
-                            &tc,
-                            &mut gfx,
-                            font.as_mut(),
-                            fps_value,
-                            refresh_rate,
-                            vm_time_ms,
-                            scene_time_ms,
-                            present_time_ms,
-                            vm_steps_per_frame,
-                            vm.budget_location(),
-                        );
-                    }
-                })
-                .map_err(|e| format!("cannot composite sharp overlays: {e}"))?;
-        } else if !use_sharp_present {
-            if scene_frame_ready {
-                canvas
-                    .copy(
-                        &scene_frame,
-                        None,
-                        FRect::new(0.0, 0.0, lw as f32, lh as f32),
-                    )
-                    .map_err(|e| e.to_string())?;
-            } else {
-                canvas.set_draw_color(Color::RGB(0, 0, 0));
-                canvas.clear();
-            }
-            if language_picker_open && snapshot.is_none() {
-                draw_language_picker(
-                    &mut canvas,
-                    &tc,
-                    &mut gfx,
-                    font.as_mut(),
-                    (lw, lh),
-                    &languages,
-                    language_selection,
-                    (mouse.0, mouse.1),
+        if scene_frame_ready {
+            if let Err(error) = blit_scene_frame(&mut canvas, &mut scene_frame, (lw, lh)) {
+                log::warn!("scene blit failed; using SDL letterbox: {error}");
+                let _ = canvas.copy(
+                    &scene_frame,
+                    None,
+                    FRect::new(0.0, 0.0, lw as f32, lh as f32),
                 );
             }
-            if toolbar_visible {
-                draw_toolbar(
-                    &mut canvas,
-                    &tc,
-                    &mut gfx,
-                    font.as_mut(),
-                    (lw, lh),
-                    (mouse.0, mouse.1),
-                    options_open,
-                    interpolation_mode,
-                    present_scale,
-                    vsync_active,
-                    fps_meter_enabled,
-                    export_status.as_deref(),
-                );
-            }
-            if fps_meter_enabled && snapshot.is_none() && !language_picker_open {
-                draw_fps_meter(
-                    &mut canvas,
-                    &tc,
-                    &mut gfx,
-                    font.as_mut(),
-                    fps_value,
-                    refresh_rate,
-                    vm_time_ms,
-                    scene_time_ms,
-                    present_time_ms,
-                    vm_steps_per_frame,
-                    vm.budget_location(),
-                );
-            }
+        } else {
+            canvas.set_draw_color(Color::RGB(0, 0, 0));
+            canvas.clear();
+        }
+        if draw_lang {
+            draw_language_picker(
+                &mut canvas,
+                &tc,
+                &mut gfx,
+                font.as_mut(),
+                (lw, lh),
+                &languages,
+                language_selection,
+                (mouse.0, mouse.1),
+            );
+        }
+        if toolbar_visible {
+            draw_toolbar(
+                &mut canvas,
+                &tc,
+                &mut gfx,
+                font.as_mut(),
+                (lw, lh),
+                (mouse.0, mouse.1),
+                options_open,
+                interpolation_mode,
+                present_scale,
+                vsync_active,
+                fps_meter_enabled,
+                export_status.as_deref(),
+            );
+        }
+        if draw_fps {
+            draw_fps_meter(
+                &mut canvas,
+                &tc,
+                &mut gfx,
+                font.as_mut(),
+                fps_value,
+                refresh_rate,
+                vm_time_ms,
+                scene_time_ms,
+                present_time_ms,
+                vm_steps_per_frame,
+                vm.budget_location(),
+            );
         }
         if texture_memory_log.elapsed() >= std::time::Duration::from_secs(5) {
             texture_memory_log = Instant::now();
-            let stats = texture_memory_stats(&gfx, (lw, lh));
+            let frame_size = scene_frame.query();
+            let stats = texture_memory_stats(&gfx, (frame_size.width, frame_size.height));
             let total_bytes = stats
                 .image_bytes
                 .saturating_add(stats.video_bytes)
@@ -1251,19 +1215,7 @@ pub fn run(
             break;
         }
         let present_started = Instant::now();
-        if use_sharp_present {
-            let source = if sharp_needs_overlay {
-                sharp_compose.as_mut().unwrap_or(&mut scene_frame)
-            } else {
-                &mut scene_frame
-            };
-            if let Err(error) = present_sharp_frame(&mut canvas, source, (lw, lh)) {
-                log::warn!("sharp present failed; using SDL letterbox: {error}");
-                canvas.present();
-            }
-        } else {
-            canvas.present();
-        }
+        canvas.present();
         let present_ms = present_started.elapsed().as_secs_f64() * 1000.0;
         fps_present_count = fps_present_count.saturating_add(1);
         vm_time_sum_ms += vm_update_ms;

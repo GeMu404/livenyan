@@ -7,6 +7,7 @@ fullscreen = false
 vsync = true
 interpolate_animations = false # funde cuadros en GAL animados grandes de escena
 scale_filter = "sharp"    # "linear" | "nearest" | "sharp" | "native" (1x/ls) | "off" (=linear)
+# El texto de contorno se rasteriza al tamaño de la ventana. native lo deja a 1x.
 
 [game]
 # duración (ms) del placeholder de vídeo (Cinema); un clic lo salta

@@ -281,6 +281,7 @@ pub(super) fn draw_menu(
     (lw, lh): (u32, u32),
     filter: ScaleMode,
     font_override: bool,
+    text_scale: f32,
 ) {
     let visible_range = menu_visible_range(
         choices.len(),
@@ -403,6 +404,7 @@ pub(super) fn draw_menu(
         normal,
         hover,
         visible_sel as i64,
+        (text_scale * 1024.0).round() as i64,
     ];
     if gfx.menu.as_ref().is_none_or(|cache| {
         cache.name != menu.map_or("", |object| object.name.as_str())
@@ -431,6 +433,7 @@ pub(super) fn draw_menu(
                 visible_sel,
                 halign,
                 filter,
+                text_scale,
             )
         } else if let Some(f) = font {
             render_menu_textures(
@@ -445,6 +448,7 @@ pub(super) fn draw_menu(
                 visible_sel,
                 halign,
                 filter,
+                text_scale,
             )
         } else {
             Vec::new()
@@ -577,6 +581,7 @@ fn render_menu_textures(
     sel: usize,
     halign: u8,
     filter: ScaleMode,
+    text_scale: f32,
 ) -> Vec<Option<Texture>> {
     choices
         .iter()
@@ -592,16 +597,17 @@ fn render_menu_textures(
                 .saturating_sub(margin_x.saturating_mul(2))
                 .max(1);
             let font_size = font.size_for_cell_height(font_height as f32);
-            let img = font.render_aligned(
-                &items,
+            let raster = outline_raster(
+                font.is_pixel_font(),
+                text_scale,
+                font_size,
                 text_w,
                 row.h as u32,
-                font_size,
-                color,
-                false,
-                halign,
+                filter,
             );
-            upload(tc, img.w, img.h, &img.rgba, filter)
+            let img =
+                font.render_aligned(&items, raster.w, raster.h, raster.px, color, false, halign);
+            upload(tc, img.w, img.h, &img.rgba, raster.filter)
         })
         .collect()
 }

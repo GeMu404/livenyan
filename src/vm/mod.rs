@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 mod click;
 mod engine;
+pub(crate) use engine::resample_nearest;
 mod media;
 mod menu;
 mod screen;
