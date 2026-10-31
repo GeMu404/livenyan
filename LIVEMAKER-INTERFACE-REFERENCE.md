@@ -28,6 +28,10 @@ De `docs/livenovel/interface.html` (secciones Menu / Scrollbar):
 - `SCROLLSOURCE`: imagen de la barra del menú; el manual lista las partes en orden: arriba, arriba pulsado, abajo, abajo pulsado, fondo, fondo pulsado, grip. **fuente primaria**
 - `X` / `Y` del menú: relativos al padre, no coordenadas absolutas de pantalla. **fuente primaria**
 - Alineación horizontal (`HA_CENTER`): alineación del texto dentro del menú, no «centrar el menú en pantalla». **fuente primaria**
+- `FONTHOVERCOLOR` y `HOVERCOLOR`: color del texto y del fondo solo cuando el cursor está sobre el ítem (interface.html, 「項目の上にマウスカーソルがある時」). **fuente primaria**
+- `FONTBORDER`: ancho del contorno del texto (interface.html, 「フォントの縁の幅」). En el menú se dibuja igual que en el mensaje: 1 px si el valor no es 0. **fuente primaria** el ancho; el raster de 1 px es el mismo que el del mensaje.
+- `CHECKSOURCE`: tira de dos estados, check normal y check con el cursor encima, a la izquierda del ítem (interface.html). El hueco reservado es el ancho de un estado (**interpretación**: ancho del archivo / 2).
+- `IndexOfMenu`: índice del texto entre los ítems, o -1 (calc.html). **fuente primaria**
 
 ## Menú — no confirmado (el manual calla o se queda corto)
 

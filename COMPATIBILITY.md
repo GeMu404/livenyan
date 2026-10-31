@@ -92,7 +92,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 22 | ClrHist | `ok` | Limpiar historial | | |
 | 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
 | 24 | Caption | `ok` | Caption | | |
-| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | Ver interface reference | |
+| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto | interface.html |
 | 27 | Comment | `ok` | Ignorar | | |
 | 28 | TextClr | `ok` | Vaciar texto caja | | |
 | 29 | CallHist | `ok` | Volcar historial | | |
@@ -201,6 +201,8 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | COPYFILE | `ok` | mem:/save:/host (calc.html) |
 | FIXSTR | `ok` | Quita lead SJIS huérfano / `U+FFFD` tras Copy por bytes |
 | COPY (bytes) | `ok` | Índices CP932; JCopy = caracteres (**fuente primaria** calc.html) |
+| ADDDELIMITER | `ok` | Si la cadena no está vacía, añade el separador al final (**fuente primaria** calc.html) |
+| INDEXOFMENU | `ok` | Índice del texto en el menú, o -1 (**fuente primaria** calc.html) |
 | GETDISPLAYMODE | `ok` | Siempre 0 (**I10**) |
 | DB* | `ok` / `partial` | Subset en `src/db.rs` |
 | Resto unimpl | `unimpl` | `unimpl:func …` en `--trace` |

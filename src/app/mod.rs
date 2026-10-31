@@ -15,7 +15,7 @@ use crate::scene::{
 };
 use crate::slider::{SliderPart, slider_size};
 use crate::text::{TextRenderer, tcolor};
-use crate::vm::{Event as VmEvent, State, Vm};
+use crate::vm::{Event as VmEvent, Vm};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Mod;
 use sdl3::mouse::{MouseButton, MouseWheelDirection};
@@ -532,7 +532,7 @@ pub fn run(
                         Some(Action::MenuUp) => menu_sel = menu_sel.saturating_sub(1),
                         Some(Action::MenuDown) => menu_sel += 1,
                         Some(Action::Advance) => {
-                            if let State::Menu { choices, .. } = &vm.state {
+                            if let Some((_, choices)) = vm.modal_menu() {
                                 let i = menu_sel.min(choices.len().saturating_sub(1));
                                 vm.choose(i);
                             } else {
@@ -721,18 +721,20 @@ pub fn run(
                         options_open = false;
                         toolbar_open = false;
                         vm.set_mouse_button(false, true);
-                        if let State::Menu { name, choices, .. } = &vm.state {
+                        if let Some((name, choices)) = vm.modal_menu() {
                             if let Some(i) = menu_hit_cached(
                                 &gfx,
-                                name,
-                                choices,
+                                &name,
+                                &choices,
                                 lw,
                                 lh,
                                 x,
                                 y,
-                                vm.scene.get(name),
+                                vm.scene.get(&name),
                             ) {
-                                vm.choose(i);
+                                vm.choose_at(i, x as f64, y as f64);
+                            } else {
+                                vm.log_menu_miss(x as f64, y as f64);
                             }
                         } else {
                             vm.click_at(x as f64, y as f64, false);
@@ -775,12 +777,7 @@ pub fn run(
                     };
                     vm.set_mouse_wheel(y > 0.0, y < 0.0);
                     if y != 0.0 {
-                        let menu_context = match &vm.state {
-                            State::Menu { name, choices, .. } => {
-                                Some((name.clone(), choices.clone()))
-                            }
-                            _ => None,
-                        };
+                        let menu_context = vm.modal_menu();
                         if let Some((name, choices)) = menu_context
                             && menu_hit_cached(
                                 &gfx,
@@ -807,11 +804,11 @@ pub fn run(
                 _ => {}
             }
         }
-        let menu_selection_context = match &vm.state {
-            State::Menu { name, choices, .. } => Some((name.clone(), choices.len())),
-            _ => None,
-        };
-        if let State::Menu { name, choices, .. } = &vm.state {
+        let opened_menu = vm.modal_menu();
+        let menu_selection_context = opened_menu
+            .as_ref()
+            .map(|(name, choices)| (name.clone(), choices.len()));
+        if let Some((name, choices)) = &opened_menu {
             if active_menu.as_deref() != Some(name.as_str()) {
                 active_menu = Some(name.clone());
                 menu_sel = vm
@@ -870,11 +867,11 @@ pub fn run(
             vm.update(now, 20_000)
         };
         let vm_update_ms = vm_update_started.elapsed().as_secs_f64() * 1000.0;
-        let menu_selection_context = match &vm.state {
-            State::Menu { name, choices, .. } => Some((name.clone(), choices.len())),
-            _ => None,
-        };
-        if let State::Menu { name, choices, .. } = &vm.state {
+        let opened_menu = vm.modal_menu();
+        let menu_selection_context = opened_menu
+            .as_ref()
+            .map(|(name, choices)| (name.clone(), choices.len()));
+        if let Some((name, choices)) = &opened_menu {
             if active_menu.as_deref() != Some(name.as_str()) {
                 active_menu = Some(name.clone());
                 menu_sel = vm
@@ -998,7 +995,19 @@ pub fn run(
                         interpolation_mode,
                         text_scale,
                     );
-                    if let State::Menu { name, choices, .. } = &vm.state {
+                    if let Some((name, choices)) = vm.modal_menu() {
+                        // interface.html: FONTHOVERCOLOR solo con el cursor sobre el ítem.
+                        let menu_hover = menu_hit_cached(
+                            &gfx,
+                            &name,
+                            &choices,
+                            lw,
+                            lh,
+                            mouse.0,
+                            mouse.1,
+                            vm.scene.get(&name),
+                        )
+                        .unwrap_or(usize::MAX);
                         draw_menu(
                             scene_canvas,
                             &tc,
@@ -1006,9 +1015,9 @@ pub fn run(
                             &vm,
                             &mut gfx,
                             font.as_mut(),
-                            choices,
-                            vm.scene.get(name),
-                            menu_sel,
+                            &choices,
+                            vm.scene.get(&name),
+                            menu_hover,
                             (lw, lh),
                             filter,
                             cfg.text.font.is_some(),

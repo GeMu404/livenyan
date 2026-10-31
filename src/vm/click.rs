@@ -281,7 +281,7 @@ impl Vm {
             .collect()
     }
 
-    fn log_click(
+    pub(super) fn log_click(
         &self,
         x: f64,
         y: f64,
@@ -508,6 +508,9 @@ impl Vm {
                 extra.push_str(&format!(" then={on_play_end}"));
             }
             self.log_click(x, y, false, &n, kind, "ONSELECT", false, &extra);
+            // Consumir el edge: si queda @LClick, アイドル時 cancela オート/スキップ y
+            // 閉じる sale del Wait Not(@LClick) con el mismo clic.
+            self.mouse_left_click = false;
             self.fire(&n, Prop::ONSELECT, p.clone());
             self.fire(&n, Prop::ONPLAYEND, p);
             return;

@@ -34,7 +34,7 @@ mod text_hist;
 mod wipe;
 use engine::*;
 
-use menu::{MenuItemKey, menu_item_key};
+use menu::{MenuItemKey, prevmenu_item_keys};
 
 fn translate_component_text(
     kind: CmdType,
@@ -331,6 +331,9 @@ pub struct Vm {
     global_scopes: HashMap<String, u32>,
     pub scene: Scene,
     pub state: State,
+    /// Menús `Menu` abiertos. El último es el que recibe el clic. Sobrevive a un
+    /// `Wait`/`Flip`: el comando no congela el script, solo deja el menú modal.
+    modal_menus: Vec<State>,
     pub now: f64,
     pub opts: Options,
     pub events: Vec<Event>,
@@ -656,6 +659,76 @@ impl Vm {
             .is_some_and(|object| object.kind == Kind::Menu && self.scene.effective_visible(object))
     }
 
+    fn push_modal_menu(&mut self, menu: State) {
+        if let State::Menu { name, .. } = &menu {
+            let name = name.clone();
+            self.modal_menus.retain(
+                |state| !matches!(state, State::Menu { name: existing, .. } if existing == &name),
+            );
+        }
+        self.modal_menus.push(menu.clone());
+        self.state = menu;
+    }
+
+    /// Si hay un menú modal vivo, vuelve a ser el estado. Si el estado apunta a
+    /// uno que ya no está, sigue el script.
+    fn reapply_modal_menu(&mut self) {
+        let names: Vec<String> = self
+            .modal_menus
+            .iter()
+            .filter_map(|state| match state {
+                State::Menu { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let live: Vec<String> = names
+            .into_iter()
+            .filter(|name| self.menu_still_modal(name))
+            .collect();
+        self.modal_menus.retain(|state| match state {
+            State::Menu { name, .. } => live.iter().any(|kept| kept == name),
+            _ => false,
+        });
+        if !matches!(self.state, State::Running | State::Menu { .. }) {
+            return;
+        }
+        if let Some(menu) = self.modal_menus.last().cloned() {
+            self.state = menu;
+            return;
+        }
+        let dead = match &self.state {
+            State::Menu { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        if dead.is_some_and(|name| !self.menu_still_modal(&name)) {
+            self.state = State::Running;
+        }
+    }
+
+    fn script_can_step(&self) -> bool {
+        matches!(self.state, State::Running | State::Menu { .. })
+    }
+
+    /// Menú que debe recibir el clic: el estado modal, o el que quedó abierto
+    /// mientras un `Flip`/`Wait` usa el estado.
+    pub fn modal_menu(&self) -> Option<(String, Vec<String>)> {
+        let (name, choices) = match &self.state {
+            State::Menu { name, choices, .. } => (name.clone(), choices.clone()),
+            _ => match self.modal_menus.last() {
+                Some(State::Menu { name, choices, .. }) => (name.clone(), choices.clone()),
+                _ => return None,
+            },
+        };
+        self.menu_still_modal(&name).then_some((name, choices))
+    }
+
+    fn current_modal_menu(&self) -> Option<State> {
+        match &self.state {
+            menu @ State::Menu { .. } => Some(menu.clone()),
+            _ => self.modal_menus.last().cloned(),
+        }
+    }
+
     pub fn new(assets: Arc<Assets>, entry: &str, opts: Options) -> Result<Self, String> {
         let script = assets
             .script(entry)
@@ -674,6 +747,7 @@ impl Vm {
             global_scopes: HashMap::new(),
             scene: Scene::default(),
             state: State::Running,
+            modal_menus: Vec::new(),
             now: 0.0,
             opts,
             events: vec![],
@@ -981,6 +1055,7 @@ impl Vm {
         {
             self.state = State::Running;
             self.finish_flip_wait();
+            self.reapply_modal_menu();
         }
     }
 
@@ -1126,18 +1201,43 @@ impl Vm {
         }
     }
 
+    /// Clic en una fila del menú modal. Deja constancia en el log de clics.
+    pub fn choose_at(&mut self, index: usize, x: f64, y: f64) {
+        if let Some((name, choices)) = self.modal_menu() {
+            let item = choices.get(index).cloned().unwrap_or_default();
+            self.log_click(
+                x,
+                y,
+                false,
+                &name,
+                "Menu",
+                "ONSELECT",
+                false,
+                &format!("item={item}"),
+            );
+        }
+        self.choose(index);
+    }
+
+    /// El clic no cayó en ninguna fila. El menú modal se queda el evento.
+    pub fn log_menu_miss(&self, x: f64, y: f64) {
+        if let Some((name, _)) = self.modal_menu() {
+            self.log_click(x, y, false, &name, "Menu", "miss", false, "");
+        }
+    }
+
     /// Elección de menú (índice).
     pub fn choose(&mut self, i: usize) {
-        let State::Menu {
+        let Some(State::Menu {
             name,
             choices: _,
             values,
             var,
-        } = &self.state
+        }) = self.current_modal_menu()
         else {
             return;
         };
-        let (name, var, value) = (name.clone(), var.clone(), values.get(i).cloned());
+        let (name, var, value) = (name, var, values.get(i).cloned());
         let Some(value) = value else { return };
         if self.opts.trace {
             println!(
@@ -1165,7 +1265,11 @@ impl Vm {
             vec![Value::Str(value), Value::Int(i as i64)],
         );
         if !has_handler {
+            self.modal_menus.retain(
+                |state| !matches!(state, State::Menu { name: existing, .. } if existing == &name),
+            );
             self.state = State::Running;
+            self.reapply_modal_menu();
             if self.component_auto_scrap(&name) {
                 self.scrap_component(&name);
             }
@@ -1266,7 +1370,47 @@ impl Vm {
         self.dispatch_events_with_nesting(true);
     }
 
+    /// `true` si hay que despachar. Con un menú modal, un `ONPLAYEND` u otro
+    /// evento delante no puede tapar el `ONSELECT`/`ONOPENING`: si no, los clics
+    /// se acumulan y salen todos al cerrar.
+    fn menu_is_modal(&self) -> bool {
+        if matches!(self.state, State::Menu { .. }) {
+            return true;
+        }
+        let names: Vec<String> = self
+            .modal_menus
+            .iter()
+            .filter_map(|state| match state {
+                State::Menu { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        names.iter().any(|name| self.menu_still_modal(name))
+    }
+
+    fn promote_menu_event(&mut self) -> bool {
+        if !self.menu_is_modal() {
+            return true;
+        }
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|ev| matches!(ev.prop, Prop::ONOPENING | Prop::ONSELECT))
+        else {
+            return !matches!(self.state, State::Menu { .. });
+        };
+        if index > 0
+            && let Some(ev) = self.queue.remove(index)
+        {
+            self.queue.push_front(ev);
+        }
+        true
+    }
+
     fn dispatch_events_with_nesting(&mut self, allow_nested: bool) {
+        if !self.promote_menu_event() {
+            return;
+        }
         let menu_event = self
             .queue
             .front()
@@ -1354,6 +1498,7 @@ impl Vm {
             if now >= until || (self.skip && skippable) {
                 self.state = State::Running;
                 self.finish_flip_wait();
+                self.reapply_modal_menu();
             }
         }
         self.update_timers();
@@ -1366,7 +1511,7 @@ impl Vm {
         let mut n = 0;
         let mut budget_location = None;
         let mut sampled_locations: HashMap<String, u64> = HashMap::new();
-        while matches!(self.state, State::Running) && n < budget && !self.yielded {
+        while self.script_can_step() && n < budget && !self.yielded {
             if !self.opts.trace
                 && n % 16 == 0
                 && let Some(location) = self.current_instruction_location()
@@ -1382,12 +1527,11 @@ impl Vm {
                 self.dispatch_events();
             }
         }
-        self.budget_location =
-            if n == budget && matches!(self.state, State::Running) && !self.yielded {
-                budget_location
-            } else {
-                None
-            };
+        self.budget_location = if n == budget && self.script_can_step() && !self.yielded {
+            budget_location
+        } else {
+            None
+        };
         if self.budget_location.is_some() && now - self.last_budget_report_ms >= 1000.0 {
             self.last_budget_report_ms = now;
             let mut hottest: Vec<_> = sampled_locations.into_iter().collect();
@@ -1924,6 +2068,7 @@ impl Vm {
                     }
                     other => other,
                 };
+                self.reapply_modal_menu();
                 if !idle {
                     self.yielded = true;
                 }
@@ -1940,6 +2085,7 @@ impl Vm {
     fn scrap_component(&mut self, name: &str) {
         let gone = self.scene.delete_names(name);
         self.retire_objects(gone);
+        self.reapply_modal_menu();
     }
 
     fn retire_objects(&mut self, objects: Vec<crate::scene::Obj>) {

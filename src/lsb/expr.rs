@@ -470,6 +470,15 @@ fn call_func(f: u8, a: &[Value], raw: &[Param], env: &mut dyn Env) -> Value {
             let i = n(2);
             Value::Bool(i >= 1 && (i as usize) <= c.len() && s(0).contains(c[i as usize - 1]))
         }
+        // calc.html: si la cadena no está vacía, le añade el separador al final.
+        Func::ADDDELIMITER => {
+            let text = s(1);
+            if text.is_empty() {
+                Value::Str(String::new())
+            } else {
+                Value::Str(text + &s(0))
+            }
+        }
         Func::ORD => Value::Int(s(0).chars().next().map(|c| c as i64).unwrap_or(0)),
         Func::EXTRACTFILENAME => {
             Value::Str(s(0).rsplit(['\\', '/']).next().unwrap_or("").to_string())
@@ -805,6 +814,29 @@ mod tests {
             )],
         };
         assert_eq!(eval(&concat, &mut env), Value::Str("500306".into()));
+    }
+
+    #[test]
+    fn add_delimiter_appends_only_when_the_string_is_not_empty() {
+        let mut env = E(HashMap::new());
+        let empty = LiveParser {
+            entries: vec![od(
+                op::FUNC,
+                "result",
+                Some(Func::ADDDELIMITER),
+                vec![Param::Str("+".into()), Param::Str(String::new())],
+            )],
+        };
+        assert_eq!(eval(&empty, &mut env), Value::Str(String::new()));
+        let appended = LiveParser {
+            entries: vec![od(
+                op::FUNC,
+                "result",
+                Some(Func::ADDDELIMITER),
+                vec![Param::Str("\r\n".into()), Param::Str("item".into())],
+            )],
+        };
+        assert_eq!(eval(&appended, &mut env), Value::Str("item\r\n".into()));
     }
 
     #[test]

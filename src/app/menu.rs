@@ -295,8 +295,21 @@ pub(super) fn draw_menu(
         .checked_sub(visible_range.start)
         .filter(|index| *index < visible_choices.len())
         .unwrap_or(usize::MAX);
-    let (left_inset, right_inset, top_inset, bottom_inset) =
+    let (border_left, right_inset, top_inset, bottom_inset) =
         menu_border_insets(tc, assets, vm, gfx, menu, filter);
+    let check_source = menu
+        .map(|object| object.str(Prop::CHECKSOURCE))
+        .unwrap_or_default();
+    let check_key = (!check_source.is_empty())
+        .then(|| image_for(tc, assets, vm, gfx, &check_source, filter))
+        .flatten();
+    let check_cell = check_key.as_ref().and_then(|key| {
+        gfx.images.get(key).and_then(|(_, width, height)| {
+            (*height > 0 && *width >= 2).then_some((*width / 2, *height))
+        })
+    });
+    let check_width = check_cell.map(|(width, _)| width as f32).unwrap_or(0.0);
+    let left_inset = border_left + check_width;
     let scrollbar_key = if visible_choices.len() < choices.len() {
         menu.map(|object| object.str(Prop::SCROLLSOURCE))
             .filter(|source| !source.is_empty())
@@ -331,6 +344,18 @@ pub(super) fn draw_menu(
     let hover = menu
         .map(|o| o.int(Prop::FONTHOVERCOLOR, normal))
         .unwrap_or(normal);
+    // interface.html: el contorno es PR_FONTBORDER; el color de hover solo con el cursor encima.
+    let border = menu.is_some_and(|object| object.get(Prop::FONTBORDER).is_some_and(Value::truthy));
+    let border_color = menu
+        .map(|object| object.int(Prop::FONTBORDERCOLOR, 0))
+        .unwrap_or(0);
+    let hover_border = menu
+        .and_then(|object| object.get(Prop::FONTHOVERBORDER))
+        .map(Value::truthy)
+        .unwrap_or(border);
+    let hover_border_color = menu
+        .map(|object| object.int(Prop::FONTHOVERBORDERCOLOR, border_color))
+        .unwrap_or(border_color);
     let hover_bg = menu.map(|o| o.int(Prop::HOVERCOLOR, -1)).unwrap_or(-1);
     let fill = menu.map(|o| o.int(Prop::COLOR, -1)).unwrap_or(-1);
     let prefer_pixel = !font_family.is_empty() && gfx.pixel_fonts.get(&font_family).is_some();
@@ -357,6 +382,7 @@ pub(super) fn draw_menu(
         font.as_deref_mut()
             .map(|renderer| renderer.size_for_cell_height(font_height as f32))
     };
+    let border_pad = if border { 2.0 } else { 0.0 };
     let measured_text_width = font_size.and_then(|font_size| {
         let renderer = if use_named {
             gfx.menu_fonts
@@ -378,6 +404,8 @@ pub(super) fn draw_menu(
             + right_inset
             + scrollbar_width
             + scrollbar_gap
+            + check_width
+            + border_pad
             + font_height as f32 * 0.5)
             .min((lw as f32 - left_inset - right_inset).max(1.0))
     });
@@ -404,6 +432,10 @@ pub(super) fn draw_menu(
         normal,
         hover,
         visible_sel as i64,
+        border as i64,
+        border_color,
+        hover_border as i64,
+        hover_border_color,
         (text_scale * 1024.0).round() as i64,
     ];
     if gfx.menu.as_ref().is_none_or(|cache| {
@@ -431,6 +463,10 @@ pub(super) fn draw_menu(
                 normal,
                 hover,
                 visible_sel,
+                border,
+                border_color,
+                hover_border,
+                hover_border_color,
                 halign,
                 filter,
                 text_scale,
@@ -446,6 +482,10 @@ pub(super) fn draw_menu(
                 normal,
                 hover,
                 visible_sel,
+                border,
+                border_color,
+                hover_border,
+                hover_border_color,
                 halign,
                 filter,
                 text_scale,
@@ -496,6 +536,30 @@ pub(super) fn draw_menu(
                     ),
                 );
             }
+        }
+    }
+    if let (Some(key), Some((cell_width, cell_height))) = (check_key, check_cell)
+        && let Some(menu_name) = menu.map(|object| object.name.as_str())
+        && let Some((texture, _, _)) = gfx.images.get_mut(&key)
+    {
+        texture.set_alpha_mod(alpha);
+        for (index, row) in content_rows.iter().enumerate() {
+            let choice = visible_range.start + index;
+            if !vm.menu_item_checked(menu_name, choice) {
+                continue;
+            }
+            // interface.html: el segundo estado es el check con el cursor encima.
+            let frame = u32::from(index == visible_sel);
+            let _ = canvas.copy(
+                texture,
+                sdl3::rect::Rect::new((frame * cell_width) as i32, 0, cell_width, cell_height),
+                FRect::new(
+                    row.x - check_width,
+                    row.y + (row.h - cell_height as f32) / 2.0,
+                    cell_width as f32,
+                    cell_height as f32,
+                ),
+            );
         }
     }
     if let (Some(key), Some((cell_width, cell_height))) = (scrollbar_key, scrollbar_cell)
@@ -579,6 +643,10 @@ fn render_menu_textures(
     normal: i64,
     hover: i64,
     sel: usize,
+    border: bool,
+    border_color: i64,
+    hover_border: bool,
+    hover_border_color: i64,
     halign: u8,
     filter: ScaleMode,
     text_scale: f32,
@@ -592,7 +660,8 @@ fn render_menu_textures(
                 .chars()
                 .map(|ch| TextItem::Char(ch.to_string()))
                 .collect();
-            let color = tcolor(if i == sel { hover } else { normal }, 255);
+            let hovered = i == sel;
+            let color = tcolor(if hovered { hover } else { normal }, 255);
             let text_w = (row.w as u32)
                 .saturating_sub(margin_x.saturating_mul(2))
                 .max(1);
@@ -605,8 +674,28 @@ fn render_menu_textures(
                 row.h as u32,
                 filter,
             );
-            let img =
-                font.render_aligned(&items, raster.w, raster.h, raster.px, color, false, halign);
+            let outline = if hovered { hover_border } else { border };
+            let outline_color = tcolor(
+                if hovered {
+                    hover_border_color
+                } else {
+                    border_color
+                },
+                255,
+            );
+            let img = font.render_aligned_with_images(
+                &items,
+                raster.w,
+                raster.h,
+                raster.px,
+                color,
+                false,
+                [0, 0, 0, 0],
+                outline,
+                outline_color,
+                halign,
+                &std::collections::HashMap::new(),
+            );
             upload(tc, img.w, img.h, &img.rgba, raster.filter)
         })
         .collect()

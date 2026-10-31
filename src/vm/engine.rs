@@ -66,14 +66,11 @@ impl Env for Vm {
                 Value::Bool(self.lookup(&n).is_some())
             }
             Func::GETVISIBLE => Value::Bool(if let Some(item) = a.get(1) {
-                match item {
-                    Value::Str(_) => self.menu_item_visible_key(&s(0), &menu_item_key(Some(item))),
-                    _ => {
-                        let Ok(index) = usize::try_from(item.as_int()) else {
-                            return Some(Value::Bool(false));
-                        };
-                        self.menu_item_visible(&s(0), index)
-                    }
+                if matches!(item, Value::Str(_)) || usize::try_from(item.as_int()).is_ok() {
+                    self.menu_item_flag(&self.visible, &s(0), Some(item), true)
+                        && self.scene.get(&s(0)).is_some_and(|o| o.visible())
+                } else {
+                    false
                 }
             } else {
                 self.scene.get(&s(0)).is_some_and(|o| o.visible())
@@ -83,8 +80,7 @@ impl Env for Vm {
                     if !matches!(index, Value::Str(_)) && usize::try_from(index.as_int()).is_err() {
                         return Some(Value::Bool(false));
                     }
-                    self.visible
-                        .insert((s(0), menu_item_key(Some(index))), value.truthy());
+                    self.set_menu_item_visible_flag(&s(0), Some(index), value.truthy());
                     Value::Bool(true)
                 } else {
                     Value::Bool(self.scene.set(
@@ -120,12 +116,16 @@ impl Env for Vm {
                         .unwrap_or(0),
                 )
             }
-            // ListCompo(arr, modo, objeto): nombres de los componentes hijos de `objeto`
-            // en orden de creación (modo != 0: también descendientes; semántica inferida).
+            // docs/livenovel/calc.html: ListCompo(var[, tipo[, padre[, recursivo]]]).
+            // Sin padre (o "ALL"): todos. Padre "": frente. Tipo 0 / omitido: todas las clases.
             Func::LISTCOMPO => {
-                let list = self
-                    .scene
-                    .children(&s(2), a.get(1).map(|v| v.as_int() != 0).unwrap_or(false));
+                let recursive = a.get(3).map(|v| v.truthy()).unwrap_or(false);
+                let parent = a.get(2).map(|v| v.as_str());
+                let list = match parent {
+                    None => self.scene.names(),
+                    Some(p) if p.eq_ignore_ascii_case("ALL") => self.scene.names(),
+                    Some(p) => self.scene.children(&p, recursive),
+                };
                 let n = list.len() as i64;
                 if let Some(Param::Var(var)) = raw.first() {
                     let var = var.clone();
@@ -136,50 +136,38 @@ impl Env for Vm {
                 }
                 Value::Int(n)
             }
-            // Ítems de PrevMenu/menú: (objeto, índice[, valor]). Semántica inferida.
+            // Ítems de PrevMenu: (objeto, índice|nombre[, valor]). Nombre e índice a la vez
+            // (GetSelected/SetSelected del novel system: オート/スキップ/閉じる).
             Func::SETENABLED | Func::SETSELECTED => {
-                let k = (s(0), menu_item_key(a.get(1)));
                 let v = a.get(2).map(|v| v.truthy()).unwrap_or(true);
+                let menu = s(0);
                 if f == Func::SETENABLED {
-                    self.enabled.insert(k, v)
+                    self.set_menu_item_enabled(&menu, a.get(1), v);
                 } else {
-                    self.selected.insert(k, v)
-                };
+                    self.set_menu_item_selected(&menu, a.get(1), v);
+                }
                 Value::Bool(true)
             }
-            Func::GETENABLED => Value::Bool(
-                *self
-                    .enabled
-                    .get(&(s(0), menu_item_key(a.get(1))))
-                    .unwrap_or(&true),
-            ),
-            Func::ADDDELIMITER => {
-                let has_content = match a.get(1) {
-                    None | Some(Value::Empty) => false,
-                    Some(Value::Array(values)) => !values.is_empty(),
-                    Some(value) => !value.as_str().is_empty(),
-                };
-                Value::Str(if has_content { s(0) } else { String::new() })
+            Func::GETENABLED => {
+                Value::Bool(self.menu_item_flag(&self.enabled, &s(0), a.get(1), true))
             }
-            Func::GETSELECTED => Value::Bool(
-                *self
-                    .selected
-                    .get(&(s(0), menu_item_key(a.get(1))))
-                    .unwrap_or(&false),
-            ),
+            Func::GETSELECTED => {
+                Value::Bool(self.menu_item_flag(&self.selected, &s(0), a.get(1), false))
+            }
+            // calc.html: índice del texto en el menú, o -1 si no está.
+            Func::INDEXOFMENU => Value::Int(self.menu_label_index(&s(0), &s(1))),
             // Menú: checkmark por índice/nombre (manual LiveNovel GetCheck/SetCheck).
             Func::SETCHECK => {
-                let k = (s(0), menu_item_key(a.get(1)));
+                let keys = prevmenu_item_keys(self.prevmenus.get(&s(0)), a.get(1));
                 let v = a.get(2).map(|v| v.truthy()).unwrap_or(true);
-                self.checked.insert(k, v);
+                for key in keys {
+                    self.checked.insert((s(0), key), v);
+                }
                 Value::Bool(true)
             }
-            Func::GETCHECK => Value::Bool(
-                *self
-                    .checked
-                    .get(&(s(0), menu_item_key(a.get(1))))
-                    .unwrap_or(&false),
-            ),
+            Func::GETCHECK => {
+                Value::Bool(self.menu_item_flag(&self.checked, &s(0), a.get(1), false))
+            }
             // InPrimary: no documentada; se asume "ventana principal activa" -> verdadero.
             Func::INPRIMARY => Value::Bool(true),
             Func::GETHISTORYMAXCOUNT => Value::Int(self.history_max),

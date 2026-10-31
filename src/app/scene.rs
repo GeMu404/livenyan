@@ -429,8 +429,8 @@ pub(super) fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Ob
                 }
             }
         }
-        if let State::Menu { name, .. } = &vm.state
-            && let Some(menu) = vm.scene.get(name)
+        if let Some((name, _)) = vm.modal_menu()
+            && let Some(menu) = vm.scene.get(&name)
         {
             for prop in [
                 Prop::BORDERSOURCETL,

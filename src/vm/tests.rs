@@ -152,6 +152,63 @@ fn set_check_and_get_check_track_menu_item_state() {
 }
 
 #[test]
+fn index_of_menu_returns_the_matching_item_or_minus_one() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+    let data = GameData::open(&path).unwrap();
+    let assets = Arc::new(Assets::new(data, 2, 64));
+    let mut vm = Vm::new(
+        assets,
+        "ゲームメイン.lsb",
+        Options {
+            screen: (800, 600),
+            cinema_ms: 0.0,
+            text_cps: 0.0,
+            lookahead: 0,
+            trace: false,
+            trace_conds: false,
+            pick: None,
+            show_text: false,
+        },
+    )
+    .unwrap();
+    vm.scene.create(
+        "menu",
+        Kind::Menu,
+        std::collections::HashMap::from([(Prop::TEXT, Value::Str("one\r\ntwo".into()))]),
+    );
+    assert_eq!(
+        vm.call_engine(
+            Func::INDEXOFMENU,
+            &[Value::Str("menu".into()), Value::Str("two".into())],
+            &[]
+        ),
+        Some(Value::Int(1))
+    );
+    assert_eq!(
+        vm.call_engine(
+            Func::INDEXOFMENU,
+            &[Value::Str("menu".into()), Value::Str("missing".into())],
+            &[]
+        ),
+        Some(Value::Int(-1))
+    );
+    vm.state = State::Menu {
+        name: "menu".into(),
+        choices: vec!["only".into()],
+        values: vec!["only".into()],
+        var: String::new(),
+    };
+    assert_eq!(
+        vm.call_engine(
+            Func::INDEXOFMENU,
+            &[Value::Str("menu".into()), Value::Str("only".into())],
+            &[]
+        ),
+        Some(Value::Int(0))
+    );
+}
+
+#[test]
 fn wipe_flash_peaks_mid_for_white_black() {
     let f = wipe::WipeFlash::white_black(0.0, 1000.0, true);
     assert_eq!(f.rgba(0.0).map(|c| c.3), Some(0));
@@ -1192,6 +1249,71 @@ fn stay_open_menu_restores_modal_after_onselect() {
 }
 
 #[test]
+fn menu_select_runs_ahead_of_a_queued_play_end() {
+    let mut vm = fixture_vm();
+    vm.scene.create(
+        "menu",
+        Kind::Menu,
+        HashMap::from([(Prop::ONSELECT, Value::Str("ゲームメイン.lsb".into()))]),
+    );
+    vm.state = State::Menu {
+        name: "menu".into(),
+        choices: vec!["a".into()],
+        values: vec!["a".into()],
+        var: String::new(),
+    };
+    vm.queue.push_back(ObjEvent {
+        obj: "other".into(),
+        prop: Prop::ONPLAYEND,
+        script: "ゲームメイン.lsb".into(),
+        params: vec![],
+    });
+    vm.choose(0);
+    vm.dispatch_events();
+    assert_eq!(vm.frames.last().unwrap().event_prop, Some(Prop::ONSELECT));
+}
+
+#[test]
+fn menu_does_not_freeze_the_script_that_opened_it() {
+    let mut vm = fixture_vm();
+    vm.assign("hold", Value::Int(1));
+    let calc = wait_then_flag(int_expr(0)).pop().unwrap();
+    let wait = wait_then_flag(var_expr("hold")).remove(0);
+    install_script(&mut vm, vec![calc, wait]);
+    vm.scene.create("menu", Kind::Menu, HashMap::new());
+    vm.push_modal_menu(State::Menu {
+        name: "menu".into(),
+        choices: vec!["a".into()],
+        values: vec!["a".into()],
+        var: String::new(),
+    });
+    vm.update(0.0, 32);
+    assert_eq!(vm.var("done"), Some(&Value::Int(1)));
+    assert!(matches!(vm.state, State::Menu { .. }));
+    assert_eq!(vm.frames.last().map(|frame| frame.pc), Some(1));
+}
+
+#[test]
+fn flip_wait_returns_to_the_open_menu() {
+    let mut vm = fixture_vm();
+    vm.assign("hold", Value::Int(1));
+    install_script(&mut vm, wait_then_flag(var_expr("hold")));
+    vm.scene.create("menu", Kind::Menu, HashMap::new());
+    vm.push_modal_menu(State::Menu {
+        name: "menu".into(),
+        choices: vec!["a".into()],
+        values: vec!["a".into()],
+        var: String::new(),
+    });
+    vm.state = State::WaitUntil {
+        until: 0.0,
+        skippable: true,
+    };
+    vm.update(1.0, 16);
+    assert!(matches!(vm.state, State::Menu { name, .. } if name == "menu"));
+}
+
+#[test]
 fn higher_priority_button_wins_over_overlapping_prevmenu() {
     let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
     let data = GameData::open(&p).unwrap();
@@ -1709,11 +1831,26 @@ fn prevmenu_group_minus_one_toggles_and_reports_its_group() {
         },
     );
 
+    vm.set_mouse_button(false, true);
+    assert_eq!(vm.system_var("@LClick"), Some(Value::Bool(true)));
     vm.click_at(10.0, 10.0, false);
+    assert_eq!(
+        vm.system_var("@LClick"),
+        Some(Value::Bool(false)),
+        "PrevMenu ONSELECT must consume @LClick"
+    );
     assert_eq!(
         vm.call_engine(
             Func::GETSELECTED,
             &[Value::Str("menu".into()), Value::Str("オート".into())],
+            &[],
+        ),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        vm.call_engine(
+            Func::GETSELECTED,
+            &[Value::Str("menu".into()), Value::Int(0)],
             &[],
         ),
         Some(Value::Bool(true))
@@ -1726,6 +1863,37 @@ fn prevmenu_group_minus_one_toggles_and_reports_its_group() {
         ),
         Some(Value::Int(-1))
     );
+    // 許可設定: SetSelected por nombre apaga también el índice (dibujo + GetSelected).
+    assert_eq!(
+        vm.call_engine(
+            Func::SETSELECTED,
+            &[
+                Value::Str("menu".into()),
+                Value::Str("オート".into()),
+                Value::Bool(false),
+            ],
+            &[],
+        ),
+        Some(Value::Bool(true))
+    );
+    assert!(!vm.prevmenu_item_selected("menu", 0, "オート"));
+    assert_eq!(
+        vm.call_engine(
+            Func::GETSELECTED,
+            &[Value::Str("menu".into()), Value::Int(0)],
+            &[],
+        ),
+        Some(Value::Bool(false))
+    );
+    vm.click_at(10.0, 10.0, false);
+    assert_eq!(
+        vm.call_engine(
+            Func::GETSELECTED,
+            &[Value::Str("menu".into()), Value::Str("オート".into())],
+            &[],
+        ),
+        Some(Value::Bool(true))
+    );
     vm.click_at(10.0, 10.0, false);
     assert_eq!(
         vm.call_engine(
@@ -1735,6 +1903,27 @@ fn prevmenu_group_minus_one_toggles_and_reports_its_group() {
         ),
         Some(Value::Bool(false))
     );
+}
+
+#[test]
+fn listcompo_without_parent_lists_all_live_components() {
+    let mut vm = fixture_vm();
+    vm.scene.create("a", Kind::Box, HashMap::new());
+    vm.scene.create(
+        "b",
+        Kind::Box,
+        HashMap::from([(Prop::PARENT, Value::Str("a".into()))]),
+    );
+    vm.scene.create("c", Kind::Image, HashMap::new());
+    // ListCompo(ss): docs/livenovel/calc.html — sin padre enumera todos.
+    let n = vm.call_engine(Func::LISTCOMPO, &[], &[Param::Var("ss".into())]);
+    assert_eq!(n, Some(Value::Int(3)));
+    let Some(Value::Array(names)) = vm.lookup("ss").cloned() else {
+        panic!("ss");
+    };
+    let mut got: Vec<_> = names.iter().map(Value::as_str).collect();
+    got.sort();
+    assert_eq!(got, vec!["a", "b", "c"]);
 }
 
 #[test]
@@ -1842,4 +2031,80 @@ fn load_text_file_stores_one_array_entry_per_line() {
     assert_eq!(missing, Value::Bool(false));
     assert!(vm.var("missing").is_none());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn options_menu_click_opens_the_speed_slider() {
+    let path = std::path::PathBuf::from("/home/gemu/Desktop/test2/test2.exe");
+    if !path.exists() {
+        return;
+    }
+    let data = GameData::open(&path).unwrap();
+    let assets = Arc::new(Assets::new(data, 1, 8));
+    let mut vm = Vm::new(
+        assets,
+        "ノベルシステム\\■オプションメニュー.lsb",
+        Options {
+            screen: (800, 600),
+            cinema_ms: 0.0,
+            text_cps: 0.0,
+            lookahead: 0,
+            trace: false,
+            trace_conds: false,
+            pick: None,
+            show_text: false,
+        },
+    )
+    .unwrap();
+    vm.assign(
+        "システムメニュー項目名",
+        Value::Array(vec![
+            Value::Str("テキスト速度".into()),
+            Value::Str("音量調節".into()),
+        ]),
+    );
+    vm.assign(
+        "システムメニュー項目値",
+        Value::Array(vec![
+            Value::Str("オプション_テキスト速度".into()),
+            Value::Str("オプション_音量調節".into()),
+        ]),
+    );
+    let mut now = 0.0;
+    for _ in 0..8 {
+        vm.update(now, 20_000);
+        now += 1000.0;
+        if vm.scene.get("システムオプションメニュー").is_some() {
+            break;
+        }
+    }
+    let menu = vm.scene.get("システムオプションメニュー");
+    let onselect = menu.map(|o| o.str(Prop::ONSELECT)).unwrap_or_default();
+    let scrap = menu.map(|o| o.int(Prop::RCLICKSCRAP, -1)).unwrap_or(-2);
+    let top = menu.map(|o| o.int(Prop::TOP, -1)).unwrap_or(-2);
+    let left = menu.map(|o| o.int(Prop::LEFT, -1)).unwrap_or(-2);
+    let opened = vm.modal_menu();
+    let index = opened
+        .as_ref()
+        .and_then(|(_, choices)| choices.iter().position(|c| c == "テキスト速度"))
+        .unwrap_or(0);
+    vm.choose(index);
+    let queued: Vec<String> = vm
+        .queue
+        .iter()
+        .map(|ev| format!("{}:{}", crate::lsb::prop_name(ev.prop), ev.script))
+        .collect();
+    vm.update(now, 20_000);
+    let speed = vm.scene.get("スライダーテキスト速度").is_some();
+    let bg = vm.scene.get("テキスト速度背景").is_some();
+    let ignore = vm
+        .scene
+        .get("システムオプションメニュー")
+        .map(|o| o.int(Prop::IGNOREMOUSE, -1))
+        .unwrap_or(-2);
+    assert!(
+        speed,
+        "onselect={onselect:?} scrap={scrap} left={left} top={top} opened={opened:?} queued={queued:?} bg={bg} ignore={ignore} state={:?}",
+        vm.state
+    );
 }

@@ -43,6 +43,7 @@ impl Vm {
                 }
             }
         }
+        self.reapply_modal_menu();
         detail
     }
 
@@ -122,13 +123,15 @@ impl Vm {
             .or_insert(Value::Int(menu_height));
         self.scene.create(&name, Kind::Menu, props);
         self.fire(&name, Prop::ONOPENING, vec![]);
+        // El script sigue: SetCheck, el título y el Flip van después del Menu.
+        // El menú queda modal (el clic entra por choose) sin congelar la VM.
         if !choices.is_empty() {
-            self.state = State::Menu {
+            self.push_modal_menu(State::Menu {
                 name,
                 choices,
                 values,
                 var: "選択値".into(),
-            };
+            });
         }
         detail
     }

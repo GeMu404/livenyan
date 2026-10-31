@@ -23,6 +23,52 @@ pub(crate) fn menu_item_key(value: Option<&Value>) -> MenuItemKey {
     }
 }
 
+/// Índice y nombre del ítem PrevMenu al que apunta `item` (docs/livenovel/calc.html:
+/// GetSelected/SetSelected aceptan índice o nombre). Sin PrevMenu, solo la clave pedida.
+pub(crate) fn prevmenu_item_keys(
+    menu: Option<&PrevMenu>,
+    item: Option<&Value>,
+) -> Vec<MenuItemKey> {
+    let primary = menu_item_key(item);
+    let Some(menu) = menu else {
+        return vec![primary];
+    };
+    let index = match item {
+        Some(Value::Str(name)) => name
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .or_else(|| menu.buttons.iter().position(|button| button.name == *name)),
+        Some(value) => usize::try_from(value.as_int()).ok(),
+        None => None,
+    };
+    let Some(index) = index else {
+        return vec![primary];
+    };
+    let Some(button) = menu.buttons.get(index) else {
+        return vec![primary];
+    };
+    let index_key = MenuItemKey::Index(index as i64);
+    let name_key = MenuItemKey::Name(button.name.clone());
+    if index_key == name_key {
+        vec![index_key]
+    } else {
+        vec![index_key, name_key]
+    }
+}
+
+fn menu_text_lines(text: &str) -> Vec<String> {
+    text.split(['\n'])
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// interface.html: `CHECKSOURCE` es la tira [normal, cursor encima]. El hueco es un estado.
+fn menu_check_width(width: u32, height: u32) -> Option<f32> {
+    (height > 0 && width >= 2).then_some((width / 2) as f32)
+}
+
 fn menu_image_size(assets: &Assets, source: &str) -> Option<(u32, u32)> {
     if source.is_empty() {
         return None;
@@ -45,6 +91,101 @@ impl Vm {
                 .visible
                 .get(&(name.to_string(), key.clone()))
                 .unwrap_or(&true)
+    }
+
+    /// calc.html: índice de `label` entre los ítems del menú. `-1` si no está.
+    pub(crate) fn menu_label_index(&self, name: &str, label: &str) -> i64 {
+        self.menu_labels(name)
+            .iter()
+            .position(|item| item == label)
+            .map(|index| index as i64)
+            .unwrap_or(-1)
+    }
+
+    pub(crate) fn menu_item_checked(&self, name: &str, index: usize) -> bool {
+        self.menu_item_flag(&self.checked, name, Some(&Value::Int(index as i64)), false)
+    }
+
+    fn menu_labels(&self, name: &str) -> Vec<String> {
+        if let super::State::Menu {
+            name: active,
+            choices,
+            ..
+        } = &self.state
+            && active == name
+        {
+            return choices.clone();
+        }
+        if let Some(menu) = self.prevmenus.get(name) {
+            return menu
+                .buttons
+                .iter()
+                .map(|button| button.name.clone())
+                .collect();
+        }
+        let Some(object) = self.scene.get(name) else {
+            return Vec::new();
+        };
+        match object.get(Prop::TEXT) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(Value::as_str)
+                .filter(|item| !item.is_empty())
+                .collect(),
+            Some(value) => menu_text_lines(&value.as_str()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Lee el flag de un ítem PrevMenu. `default == false` → OR (selected);
+    /// `default == true` → AND (enabled/visible). Nombre e índice quedan alineados
+    /// tras SetSelected/SetEnabled/SetVisible.
+    pub(crate) fn menu_item_flag(
+        &self,
+        map: &HashMap<(String, MenuItemKey), bool>,
+        menu: &str,
+        item: Option<&Value>,
+        default: bool,
+    ) -> bool {
+        let keys = prevmenu_item_keys(self.prevmenus.get(menu), item);
+        let mut values = keys.iter().map(|key| {
+            *map.get(&(menu.to_string(), key.clone()))
+                .unwrap_or(&default)
+        });
+        let Some(first) = values.next() else {
+            return default;
+        };
+        if default {
+            values.fold(first, |a, b| a && b)
+        } else {
+            values.fold(first, |a, b| a || b)
+        }
+    }
+
+    pub(crate) fn set_menu_item_selected(&mut self, menu: &str, item: Option<&Value>, value: bool) {
+        let keys = prevmenu_item_keys(self.prevmenus.get(menu), item);
+        for key in keys {
+            self.selected.insert((menu.to_string(), key), value);
+        }
+    }
+
+    pub(crate) fn set_menu_item_enabled(&mut self, menu: &str, item: Option<&Value>, value: bool) {
+        let keys = prevmenu_item_keys(self.prevmenus.get(menu), item);
+        for key in keys {
+            self.enabled.insert((menu.to_string(), key), value);
+        }
+    }
+
+    pub(crate) fn set_menu_item_visible_flag(
+        &mut self,
+        menu: &str,
+        item: Option<&Value>,
+        value: bool,
+    ) {
+        let keys = prevmenu_item_keys(self.prevmenus.get(menu), item);
+        for key in keys {
+            self.visible.insert((menu.to_string(), key), value);
+        }
     }
 
     /// Imagen a dibujar. Un ítem deshabilitado se muestra igual
@@ -191,6 +332,19 @@ impl Vm {
             .map(Value::as_int)
             .unwrap_or(0)
             .max(0) as f32;
+        let check_width = props
+            .get(&Prop::CHECKSOURCE)
+            .map(Value::as_str)
+            .filter(|source| !source.is_empty())
+            .and_then(|source| menu_image_size(&self.assets, &source))
+            .and_then(|(width, height)| menu_check_width(width, height))
+            .unwrap_or(0.0);
+        // interface.html: PR_FONTBORDER es el ancho del contorno. El raster lo dibuja a 1 px.
+        let border_pad = if props.get(&Prop::FONTBORDER).is_some_and(Value::truthy) {
+            2.0
+        } else {
+            0.0
+        };
         Some(
             (text_width
                 + 2.0 * margin_x
@@ -198,6 +352,8 @@ impl Vm {
                 + right_inset
                 + scrollbar_width
                 + scrollbar_gap
+                + check_width
+                + border_pad
                 + font_height as f32 * 0.5)
                 .min((self.opts.screen.0 as f32 - left_inset - right_inset).max(1.0)),
         )
@@ -674,20 +830,34 @@ mod tests {
             ),
             Some(Value::Bool(false))
         );
+        // Nombre e índice del mismo botón PrevMenu quedan alineados.
+        assert_eq!(
+            vm.call_engine(
+                Func::SETSELECTED,
+                &[
+                    Value::Str("menu".into()),
+                    Value::Str("first".into()),
+                    Value::Bool(true),
+                ],
+                &[],
+            ),
+            Some(Value::Bool(true))
+        );
         assert_eq!(
             vm.call_engine(
                 Func::GETSELECTED,
                 &[Value::Str("menu".into()), Value::Int(0)],
                 &[]
             ),
-            Some(Value::Bool(false))
+            Some(Value::Bool(true))
         );
+        assert!(vm.prevmenu_item_selected("menu", 0, "first"));
         assert_eq!(
             vm.call_engine(
                 Func::SETENABLED,
                 &[
                     Value::Str("menu".into()),
-                    Value::Str("オート".into()),
+                    Value::Str("first".into()),
                     Value::Bool(false),
                 ],
                 &[]
@@ -697,7 +867,7 @@ mod tests {
         assert_eq!(
             vm.call_engine(
                 Func::GETENABLED,
-                &[Value::Str("menu".into()), Value::Str("オート".into())],
+                &[Value::Str("menu".into()), Value::Str("first".into())],
                 &[]
             ),
             Some(Value::Bool(false))
@@ -705,7 +875,7 @@ mod tests {
         assert_eq!(
             vm.call_engine(
                 Func::GETENABLED,
-                &[Value::Str("menu".into()), Value::Str("スキップ".into())],
+                &[Value::Str("menu".into()), Value::Str("second".into())],
                 &[]
             ),
             Some(Value::Bool(true))
@@ -716,34 +886,11 @@ mod tests {
                 &[Value::Str("menu".into()), Value::Int(0)],
                 &[]
             ),
-            Some(Value::Bool(true))
+            Some(Value::Bool(false))
         );
-        assert!(!vm.prevmenu_item_enabled("menu", 0, "オート"));
-        assert!(vm.prevmenu_item_enabled("menu", 0, "スキップ"));
-        assert_eq!(
-            vm.call_engine(
-                Func::ADDDELIMITER,
-                &[Value::Str("\r\n".into()), Value::Str(String::new())],
-                &[]
-            ),
-            Some(Value::Str(String::new()))
-        );
-        assert_eq!(
-            vm.call_engine(
-                Func::ADDDELIMITER,
-                &[Value::Str("\r\n".into()), Value::Str("0".into())],
-                &[]
-            ),
-            Some(Value::Str("\r\n".into()))
-        );
-        assert_eq!(
-            vm.call_engine(
-                Func::ADDDELIMITER,
-                &[Value::Str(", ".into()), Value::Array(vec![Value::Int(1)])],
-                &[]
-            ),
-            Some(Value::Str(", ".into()))
-        );
+        assert!(!vm.prevmenu_item_enabled("menu", 0, "first"));
+        assert!(vm.prevmenu_item_enabled("menu", 1, "second"));
+        // AddDelimiter es calc de expresión (expr.rs / calc.html), no call_engine.
         assert!(vm.scene.get("menu").unwrap().visible());
         let skip = PmButton {
             x: 0,
@@ -753,18 +900,10 @@ mod tests {
             src: "skip.gal".into(),
             src_selected: "skip-on.gal".into(),
             src_disabled: "skip-off.gal".into(),
-            name: "スキップ".into(),
+            name: "first".into(),
             group: -1,
         };
-        vm.call_engine(
-            Func::SETENABLED,
-            &[
-                Value::Str("menu".into()),
-                Value::Str("スキップ".into()),
-                Value::Bool(false),
-            ],
-            &[],
-        );
+        // first ya está deshabilitado arriba; imagen de inválido.
         assert_eq!(
             vm.prevmenu_button_image("menu", 0, &skip, true),
             "skip-off.gal"
@@ -773,7 +912,7 @@ mod tests {
             Func::SETENABLED,
             &[
                 Value::Str("menu".into()),
-                Value::Str("スキップ".into()),
+                Value::Str("first".into()),
                 Value::Bool(true),
             ],
             &[],

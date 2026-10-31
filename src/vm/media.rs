@@ -516,6 +516,7 @@ impl Vm {
                 }
                 if matches!(&self.state, State::WaitText { target } if *target == n) {
                     self.state = State::Running;
+                    self.reapply_modal_menu();
                 }
             }
         }
@@ -523,6 +524,7 @@ impl Vm {
             && self.play_of(target).is_none()
         {
             self.state = State::Running;
+            self.reapply_modal_menu();
         }
     }
 
