@@ -246,6 +246,19 @@ pub(crate) fn resolve_system_sound(
 impl CinemaPlayback {
     pub fn playhead_ms(&self, now: f64) -> f64 {
         let elapsed = (now - self.started_at).max(0.0);
+        // REPEAT de un cine de imágenes no rebobina los clips ya vistos.
+        // El último GAL se queda y su ciclo (duración del clip) vuelve a empezar.
+        // Un cine de texto (cuenta atrás) sigue dando la vuelta a toda la línea.
+        if self.repeat
+            && let Some((start, len)) = self.movie.image_tail_loop()
+        {
+            let start_ms = f64::from(start) * 1000.0 / 60.0;
+            let len_ms = f64::from(len) * 1000.0 / 60.0;
+            if elapsed > start_ms && len_ms > 0.0 {
+                return start_ms + (elapsed - start_ms).rem_euclid(len_ms);
+            }
+            return elapsed;
+        }
         if self.repeat && self.duration_ms.is_finite() && self.duration_ms > 0.0 {
             elapsed.rem_euclid(self.duration_ms)
         } else {

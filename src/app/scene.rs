@@ -1039,7 +1039,20 @@ pub(super) fn draw_scene(
                 let Some(key) = image_for(tc, assets, vm, gfx, &sprite.media, filter) else {
                     continue;
                 };
-                let Some((texture, iw, ih)) = gfx.images.get_mut(&key) else {
+                // Reloj del clip: las duraciones del GAL, desde que ese clip
+                // está en pantalla. No el reloj del menú ni el de la escena.
+                let frame = match assets.try_get(&key) {
+                    Some(Asset::Image(image)) => {
+                        gal_animation_frame(&image.delays, sprite.shown_ms)
+                    }
+                    _ => None,
+                };
+                let frame_key = frame
+                    .filter(|frame| *frame > 0)
+                    .map(|frame| format!("{key}#{frame}"))
+                    .filter(|key| gfx.images.contains_key(key))
+                    .unwrap_or(key);
+                let Some((texture, iw, ih)) = gfx.images.get_mut(&frame_key) else {
                     continue;
                 };
                 let (iw, ih) = (*iw, *ih);

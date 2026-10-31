@@ -31,6 +31,9 @@ pub struct Track {
     pub scale_curve: [u8; 2],
     pub opacity_start: i32,
     pub opacity_end: i32,
+    /// Campo de tiempo del clip, leído del LCM y aún no usado por el reloj.
+    pub period: u32,
+    pub flags: [bool; 3],
     pub content: TrackContent,
 }
 
@@ -54,6 +57,20 @@ pub struct Sprite {
     pub scale_x: f32,
     pub scale_y: f32,
     pub alpha: u8,
+    /// Tiempo dentro de este clip, en ms. El GAL usa sus propias duraciones
+    /// a partir de aquí, no el reloj del menú ni el del resto de la escena.
+    pub shown_ms: f64,
+}
+
+struct ActiveTrack<'a> {
+    index: usize,
+    track: &'a Track,
+    x: i32,
+    y: i32,
+    alpha: u8,
+    scale_x: f64,
+    scale_y: f64,
+    shown_ms: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,8 +285,8 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
         let authored_start = r.int()?;
         let period = r.int()?;
         let _clip_parameter = r.int()?;
-        // Flags de clip: leídos y omitidos (no bloquean; semántica no confirmada).
-        let _flags = [r.flag()?, r.flag()?, r.flag()?];
+        // Flags de clip: leídos. La semántica no está en el manual que tenemos.
+        let flags = [r.flag()?, r.flag()?, r.flag()?];
         if !(1..=MAX_FRAMES as i32).contains(&duration)
             || !(0..=MAX_FRAMES as i32).contains(&period)
         {
@@ -320,6 +337,8 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
                 scale_curve: [0, 0],
                 opacity_start: 255,
                 opacity_end: 255,
+                period: period as u32,
+                flags,
                 content: TrackContent::Opaque,
             });
             if index + 1 < count as usize {
@@ -413,6 +432,8 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
             scale_curve: [scale_x_curve, scale_y_curve],
             opacity_start,
             opacity_end,
+            period: period as u32,
+            flags,
             content,
         });
         if is_text && index + 1 < count as usize {
@@ -439,24 +460,41 @@ pub fn parse(bytes: &[u8]) -> Result<Movie, String> {
 }
 
 impl Movie {
+    /// Último clip de imagen que llega al final de la línea, si lo hay.
+    /// `REPEAT` repite ese tramo; los clips anteriores no vuelven.
+    /// Un cine solo de texto no entra aquí y la línea se repite entera.
+    pub fn image_tail_loop(&self) -> Option<(u32, u32)> {
+        let clip = self.clips.iter().rev().find(|clip| {
+            matches!(clip.content, TrackContent::Image(_))
+                && clip.start.saturating_add(clip.duration) >= self.duration_frames
+        })?;
+        let len = if clip.period > 0 {
+            clip.period
+        } else {
+            clip.duration
+        };
+        (len > 0).then_some((clip.start, len))
+    }
+
     pub fn sprites_at(&self, elapsed_ms: f64) -> Vec<Sprite> {
         let mut sprites: Vec<_> = self
             .active_tracks(elapsed_ms)
             .into_iter()
-            .filter_map(|(index, t, x, y, alpha, scale_x, scale_y)| {
-                let TrackContent::Image(media) = &self.clips[index].content else {
+            .filter_map(|active| {
+                let TrackContent::Image(media) = &self.clips[active.index].content else {
                     return None;
                 };
                 Some((
-                    t.order,
-                    index,
+                    active.track.order,
+                    active.index,
                     Sprite {
                         media: media.clone(),
-                        x: x as f32,
-                        y: y as f32,
-                        scale_x: scale_x as f32,
-                        scale_y: scale_y as f32,
-                        alpha,
+                        x: active.x as f32,
+                        y: active.y as f32,
+                        scale_x: active.scale_x as f32,
+                        scale_y: active.scale_y as f32,
+                        alpha: active.alpha,
+                        shown_ms: active.shown_ms,
                     },
                 ))
             })
@@ -469,13 +507,13 @@ impl Movie {
         let mut texts: Vec<_> = self
             .active_tracks(elapsed_ms)
             .into_iter()
-            .filter_map(|(index, _, x, y, alpha, _, _)| {
+            .filter_map(|active| {
                 let TrackContent::Text {
                     value,
                     font_height,
                     font_style,
                     color,
-                } = &self.clips[index].content
+                } = &self.clips[active.index].content
                 else {
                     return None;
                 };
@@ -483,13 +521,13 @@ impl Movie {
                     return None;
                 }
                 Some((
-                    self.clips[index].order,
-                    index,
+                    self.clips[active.index].order,
+                    active.index,
                     TextSprite {
                         value: value.clone(),
-                        x: x as f32,
-                        y: y as f32,
-                        alpha,
+                        x: active.x as f32,
+                        y: active.y as f32,
+                        alpha: active.alpha,
                         font_height: *font_height,
                         font_style: *font_style,
                         color: *color,
@@ -501,7 +539,7 @@ impl Movie {
         texts.into_iter().map(|(_, _, text)| text).collect()
     }
 
-    fn active_tracks(&self, elapsed_ms: f64) -> Vec<(usize, &Track, i32, i32, u8, f64, f64)> {
+    fn active_tracks(&self, elapsed_ms: f64) -> Vec<ActiveTrack<'_>> {
         let frame = ((elapsed_ms.max(0.0) * 60.0 / 1000.0).round() as u32)
             .min(self.duration_frames.saturating_sub(1));
         let mut superseded = vec![false; self.clips.len()];
@@ -576,7 +614,17 @@ impl Movie {
                 // Posición del track = dónde cae el pivot; el draw usa esquina superior-izquierda.
                 let x = (x as f64 - clip.pivot[0] as f64 * scale_x).round() as i32;
                 let y = (y as f64 - clip.pivot[1] as f64 * scale_y).round() as i32;
-                Some((index, clip, x, y, alpha, scale_x, scale_y))
+                let shown_ms = f64::from(t) * (1000.0 / 60.0);
+                Some(ActiveTrack {
+                    index,
+                    track: clip,
+                    x,
+                    y,
+                    alpha,
+                    scale_x,
+                    scale_y,
+                    shown_ms,
+                })
             })
             .collect()
     }
@@ -841,6 +889,40 @@ mod tests {
         let movie = parse(&legacy_opaque_movie()).unwrap();
         assert_eq!(movie.clips.len(), 1);
         assert!(matches!(movie.clips[0].content, TrackContent::Opaque));
+    }
+
+    #[test]
+    fn image_playlist_repeat_keeps_the_last_clip() {
+        let clip = |start: u32, dur: u32, name: &str| Track {
+            previous: None,
+            start,
+            duration: dur,
+            order: 1,
+            pivot: [0, 0],
+            position_start: [0, 0],
+            position_end: [0, 0],
+            position_curve: [0, 0],
+            scale_x: [1.0, 1.0],
+            scale_y: [1.0, 1.0],
+            scale_curve: [0, 0],
+            opacity_start: 255,
+            opacity_end: 255,
+            period: dur,
+            flags: [false, false, false],
+            content: TrackContent::Image(name.into()),
+        };
+        let movie = Movie {
+            width: 8,
+            height: 8,
+            duration_frames: 160,
+            clips: vec![clip(0, 96, "a.gal"), clip(96, 64, "b.gal")],
+        };
+        assert_eq!(movie.image_tail_loop(), Some((96, 64)));
+        assert_eq!(movie.sprites_at(0.0)[0].media, "a.gal");
+        assert_eq!(movie.sprites_at(0.0)[0].shown_ms, 0.0);
+        let into_b = 96.0 * 1000.0 / 60.0;
+        assert_eq!(movie.sprites_at(into_b)[0].media, "b.gal");
+        assert!(movie.sprites_at(into_b)[0].shown_ms < 1.0);
     }
 
     #[test]

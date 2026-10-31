@@ -852,8 +852,9 @@ impl Vm {
             .scene
             .get(object)
             .is_some_and(|o| o.get(Prop::REPEAT).is_some_and(Value::truthy));
-        // REPEAT no entra en el mapa de “una pasada”: no bloquea el clic ni dispara
-        // ONPLAYEND al terminar cada vuelta. El playhead hace rollover al muestrear.
+        // REPEAT en un GAL: bucle de frames. En un LCM de imágenes, los clips
+        // anteriores se reproducen una vez y el último sigue (playhead_ms).
+        // Un LCM de texto repite la línea entera. No es el reloj de los menús.
         let (mw, mh) = (movie.width, movie.height);
         self.clocks.insert(
             object.to_string(),
@@ -932,6 +933,8 @@ mod tests {
             scale_curve: [0, 0],
             opacity_start: 0,
             opacity_end: 0,
+            period: 0,
+            flags: [false, false, false],
             content: crate::lcm::TrackContent::Text {
                 value: value.to_string(),
                 font_height: 24,
@@ -1041,5 +1044,47 @@ mod tests {
             vm.cinema("once").unwrap().texts_at(vm.now)[0].value,
             "10:42"
         );
+    }
+
+    #[test]
+    fn repeating_image_cinema_keeps_the_last_gal() {
+        use super::CinemaPlayback;
+        use crate::lcm::{Movie, Track, TrackContent};
+
+        let clip = |start: u32, dur: u32, name: &str| Track {
+            previous: None,
+            start,
+            duration: dur,
+            order: 1,
+            pivot: [0, 0],
+            position_start: [0, 0],
+            position_end: [0, 0],
+            position_curve: [0, 0],
+            scale_x: [1.0, 1.0],
+            scale_y: [1.0, 1.0],
+            scale_curve: [0, 0],
+            opacity_start: 255,
+            opacity_end: 255,
+            period: dur,
+            flags: [false, false, false],
+            content: TrackContent::Image(name.into()),
+        };
+        let frame = 1000.0 / 60.0;
+        let playback = CinemaPlayback {
+            movie: Movie {
+                width: 8,
+                height: 8,
+                duration_frames: 160,
+                clips: vec![clip(0, 96, "a.gal"), clip(96, 64, "b.gal")],
+            },
+            started_at: 0.0,
+            duration_ms: 160.0 * frame,
+            repeat: true,
+        };
+        assert_eq!(playback.sprites_at(10.0)[0].media, "a.gal");
+        let late = 96.0 * frame + 64.0 * frame * 2.0 + 10.0;
+        let sprite = &playback.sprites_at(late)[0];
+        assert_eq!(sprite.media, "b.gal");
+        assert!(sprite.shown_ms < 64.0 * frame);
     }
 }

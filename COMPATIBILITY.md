@@ -90,7 +90,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 20 | TextIns | `ok` | Insertar texto TpWord | Plan Pending + plays | `<PG>` coalesce: `script.html` |
 | 21 | MovieStop | `ok` | Parar película | | |
 | 22 | ClrHist | `ok` | Limpiar historial | | |
-| 23 | Cinema | `placeholder` | LiveCinema | Timed placeholder si no hay LCM usable | `unimpl:cmd Cinema…` |
+| 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
 | 24 | Caption | `ok` | Caption | | |
 | 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | Ver interface reference | |
 | 27 | Comment | `ok` | Ignorar | | |
