@@ -881,6 +881,66 @@ mod tests {
     }
 
     #[test]
+    fn click_reveal_advances_message_caret() {
+        use super::super::Pending;
+        use std::collections::VecDeque;
+
+        let p =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");
+        let data = GameData::open(&p).unwrap();
+        let assets = Arc::new(Assets::new(data, 2, 64));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                pick: None,
+                trace_conds: false,
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                // Un glifo por tick: el clic tiene que volcar el resto y mover CARETX.
+                text_cps: 1.0,
+                lookahead: 50,
+                trace: false,
+                show_text: false,
+            },
+        )
+        .unwrap();
+        vm.scene.create(
+            "msg",
+            Kind::Message,
+            HashMap::from([
+                (Prop::FONTHEIGHT, Value::Int(22)),
+                (Prop::WIDTH, Value::Int(600)),
+                (Prop::TEXTDELAY, Value::Int(1000)),
+            ]),
+        );
+        let chars = ["あ", "い", "う", "え", "お", "か", "き", "く"];
+        let mut plan = VecDeque::new();
+        plan.push_back(Pending::Text {
+            items: chars
+                .iter()
+                .map(|ch| TextItem::Char((*ch).into()))
+                .collect(),
+            already_read: false,
+        });
+        plan.push_back(Pending::Click);
+        vm.scene.get_mut("msg").unwrap().play = Some(Playback {
+            plan,
+            ..Playback::default()
+        });
+        vm.now = 0.0;
+        vm.update(0.0, 0);
+        let mid = vm.get_prop("msg", Prop::CARETX).as_int();
+        assert!(mid > 0, "typewriter should have moved the caret a bit");
+        vm.click();
+        let after = vm.get_prop("msg", Prop::CARETX).as_int();
+        assert!(
+            after > mid,
+            "click reveal must sync CARETX past the mid-typewriter pen ({mid} -> {after})"
+        );
+    }
+
+    #[test]
     fn playmovie_resolves_wmv_path_to_existing_movie_source() {
         let p =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/game.exe");

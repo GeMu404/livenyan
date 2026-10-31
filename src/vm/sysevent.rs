@@ -163,6 +163,8 @@ impl Vm {
                 if let Some(obj) = self.scene.get_mut(boxname) {
                     obj.props.insert(Prop::TEXTPAUSED, Value::Bool(true));
                 }
+                // El ImgNew del cursor lee CARETX/CARETY en ONNOTIFY.
+                self.sync_message_text_prop(boxname);
                 // ONNOTIFY → イベント.lsb (cursor y TEXTPAUSED los lleva el script).
                 self.fire(boxname, Prop::ONNOTIFY, vec![Value::Str("PAUSE".into())]);
             }

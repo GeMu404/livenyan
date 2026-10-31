@@ -59,7 +59,7 @@ fn estimate_message_pen(text: &str, draw_h: f64, line_step: f64, max_w: f64) -> 
 impl Vm {
     /// La flecha del mensaje usa CARETX/CARETY. Tiene que coincidir con la pluma
     /// del raster, incluido el corte de línea; si no, queda fuera del cuadro.
-    fn sync_message_text_prop(&mut self, name: &str) {
+    pub(crate) fn sync_message_text_prop(&mut self, name: &str) {
         let Some(object) = self.scene.get(name) else {
             return;
         };

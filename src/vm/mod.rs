@@ -918,17 +918,10 @@ impl Vm {
                     o.text.extend(rest);
                     o.shown = o.text.len();
                     o.text_rev += 1;
-                    let text: String = o
-                        .text
-                        .iter()
-                        .map(|item| match item {
-                            TextItem::Char(ch) => ch.as_str(),
-                            TextItem::Newline => "\n",
-                            TextItem::Image { .. } => "",
-                        })
-                        .collect();
-                    o.props.insert(Prop::TEXT, Value::Str(text));
                 }
+                // Sin esto CARETX se queda a mitad del typewriter y la flecha
+                // del PAUSE/改ページ cae encima del texto (clic para revelar).
+                self.sync_message_text_prop(n);
                 revealed = true;
             }
         }
