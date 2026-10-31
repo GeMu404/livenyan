@@ -2,11 +2,22 @@ use super::{
     CinemaPlayback, Clock, Pending, State, TimerState, VIDEO_EXTS, VideoFrame, VideoFramePair,
     VideoPlayback, Vm, video_pair_progress,
 };
+use crate::archive::GameData;
 use crate::assets::{Asset, IMAGE_EXTS};
 use crate::lsb::expr::Value;
 use crate::lsb::names::Prop;
 use crate::scene::{Anim, Kind, TextItem};
 use std::collections::{HashMap, VecDeque};
+
+/// Prefiere GaleX con el mismo stem (Movie precocinado); si no, WMV/ffmpeg.
+fn resolve_movie_asset(data: &GameData, source: &str) -> Option<String> {
+    if let Some((stem, _)) = source.rsplit_once('.')
+        && let Some(name) = data.find(&format!("{stem}.gal"))
+    {
+        return Some(name.to_string());
+    }
+    data.resolve(source, VIDEO_EXTS)
+}
 
 /// GetProp(..., TEXT) lo usan 終了.lsb / PAUSE; debe reflejar el buffer de reproducción.
 /// CARETX/CARETY/CARETHEIGHT los lee el ImgNew del メッセージカーソル en ONNOTIFY(PAUSE).
@@ -210,10 +221,7 @@ impl Vm {
             .cloned()
             .ok_or_else(|| format!("movie object {name:?} does not exist"))?;
         let source = obj.str(Prop::SOURCE);
-        let file = self
-            .assets
-            .data()
-            .resolve(&source, VIDEO_EXTS)
+        let file = resolve_movie_asset(self.assets.data(), &source)
             .ok_or_else(|| format!("video asset not found: {source:?}"))?;
         let started = std::time::Instant::now();
         let data = self

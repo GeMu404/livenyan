@@ -81,7 +81,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 7 | Wait | `ok` / `no confirmado` | Espera tiempo / cond | Implementado; Wait 0 edge | Comentarios en `step_wait` |
 | 8–10 | BoxNew / ImgNew / MesNew | `ok` | Crear componentes | `step_obj_new`. Imagen y tile: `PR_BRIGHTNESS` 0 igual, 255 blanco, -255 negro | `graphic.html` 明るさ |
 | 11 | Timer | `ok` | Temporizador | Timers + eventos | |
-| 12 | Movie | `ok` / `partial` | Vídeo | ffmpeg; decode **nativo** (I1) | Manual size; **interpretación** latencia |
+| 12 | Movie | `ok` / `partial` | Vídeo | GaleX anim si magic/stem `.gal` (piso); si no ffmpeg CLI; decode **nativo** (I1, I15) | Manual size; **interpretación** latencia/port |
 | 13 | Flip | `partial` | Placa + wipe | Con targets: fundido y `Delete` solo de esos nombres. FL_OUT sin Delete → `back`; **experimento** (H3) MESOFF/FACE→再生中: `SetProp VISIBLE=1` desarchiva el objeto y su descendencia (sin Flip de entrada). Targets vacío: **interpretación** placa (I12), una pasada, sin framebuffer extra. NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6) | `graphic.html` / novel MESOFF |
 | 14 | Calc | `ok` | Evaluar expresión | | |
 | 15–16 | VarNew / VarDel | `ok` | Vars + Scope | Scope 0\|3 → globals; 1\|2 locals | Reset conserva scope 3 |
@@ -92,7 +92,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 22 | ClrHist | `ok` | Limpiar historial | | |
 | 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
 | 24 | Caption | `ok` | Caption | | |
-| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto | interface.html |
+| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto. `PR_IGNOREMOUSE` deja pasar el clic al panel. El texto se dibuja en el orden de la escena: un hermano con más prioridad (el deslizador) queda encima | interface.html; `graphic.html` マウス透過 |
 | 27 | Comment | `ok` | Ignorar | | |
 | 28 | TextClr | `ok` | Vaciar texto caja | | |
 | 29 | CallHist | `ok` | Volcar historial | | |
@@ -153,6 +153,7 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | ID | Área | LM / ingenuo | livenyan | Por qué |
 |----|------|--------------|----------|---------|
 | I1 | Decode Movie/Cinema frames | Escalar en ffmpeg al tamaño lógico/pantalla (latencia alta) | Decode a **tamaño nativo**; escala en present/SDL | Menos CPU al abrir; letterbox/sharp ya escalan |
+| I15 | Movie backends | Solo WMV + proceso `ffmpeg` | Dispatcher: GaleX multi-frame+delays (sin `Command`) o ffmpeg CLI si el host lo tiene; al resolver asset se prefiere `{stem}.gal` | Ports (Vita/etc.) y desktop sin PATH; scripts siguen apuntando a `.wmv` |
 | I2 | Present | Ventana GDI LiveMaker | SDL3 + letterbox + `scale_filter` | Portabilidad / nitidez moderna |
 | I2b | Present nativo | Ventana a tamaño de monitor / GDI | `scale_filter=native`: ventana = lógico, sin HiDPI ni letterbox; el escalado lo hace LS/Magpie/Gamescope | Un solo escalado externo (sin doble upscale) |
 | I3 | Tipografía host | ＭＳ ゴシック | Noto CJK u otra si falta | Linux/Windows sin fuentes JP |

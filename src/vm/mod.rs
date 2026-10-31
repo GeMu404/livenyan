@@ -71,7 +71,8 @@ pub(crate) fn caption_char_width(c: char) -> f64 {
     if wide { 1.0 } else { 0.55 }
 }
 
-const VIDEO_EXTS: &[&str] = &[".wmv"];
+/// GaleX anim precocinado primero (piso portable); WMV vía ffmpeg CLI si hace falta.
+const VIDEO_EXTS: &[&str] = &[".gal", ".wmv"];
 
 /// Eventos hacia el host (audio, vídeo…).
 #[derive(Debug, Clone)]

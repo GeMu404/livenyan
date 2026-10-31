@@ -1312,49 +1312,76 @@ pub fn decode(d: &[u8]) -> R<Image> {
 /// Codifica RGBA8 → GaleX200 24bpp zlib (CompType 0), legible por [`decode`].
 /// Formato de escritura mínimo de livenyan (**no** es el encoder del LiveMaker original).
 pub fn encode_galex_rgba(w: u32, h: u32, rgba: &[u8]) -> R<Vec<u8>> {
+    encode_galex_anim(w, h, &[rgba.to_vec()], &[0])
+}
+
+/// GaleX multi-frame con `Delay` por frame (ms). Piso portable para Movies precocinados.
+/// Cada entrada de `frames` es RGBA8; `delays.len()` debe coincidir con `frames.len()`.
+pub fn encode_galex_anim(w: u32, h: u32, frames: &[Vec<u8>], delays: &[u32]) -> R<Vec<u8>> {
     use std::io::Write;
-    let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-    if w == 0 || h == 0 || rgba.len() < need {
-        return err("invalid rgba for GaleX encode");
+    if frames.is_empty() || frames.len() != delays.len() {
+        return err("galex anim needs matching frames and delays");
     }
-    let st = stride(w, 24);
-    let mut bgr = vec![0u8; st.saturating_mul(h as usize)];
-    for y in 0..h as usize {
-        for x in 0..w as usize {
-            let i = (y * w as usize + x) * 4;
-            let o = y * st + x * 3;
-            bgr[o] = rgba[i + 2];
-            bgr[o + 1] = rgba[i + 1];
-            bgr[o + 2] = rgba[i];
+    let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    if w == 0 || h == 0 {
+        return err("invalid size for GaleX encode");
+    }
+    for (i, rgba) in frames.iter().enumerate() {
+        if rgba.len() < need {
+            return err(format!("invalid rgba for GaleX frame {i}"));
         }
     }
+    let st = stride(w, 24);
     let zlib = |data: &[u8]| -> R<Vec<u8>> {
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(data)
             .map_err(|e| GalError(format!("zlib: {e}")))?;
         enc.finish().map_err(|e| GalError(format!("zlib: {e}")))
     };
-    let xml = format!(
+    let mut xml = format!(
         concat!(
             r#"<?xml version="1.0"?>"#,
-            r#"<Frames Version="200" Width="{w}" Height="{h}" Bpp="24" Count="1" "#,
-            r#"Randomized="0" CompType="0" BlockWidth="0" BlockHeight="0">"#,
-            r#"<Frame TransColor="-1" Delay="0">"#,
-            r#"<Layers Count="1" Width="{w}" Height="{h}" Bpp="24">"#,
-            r#"<Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/>"#,
-            r#"</Layers></Frame></Frames>"#
+            r#"<Frames Version="200" Width="{w}" Height="{h}" Bpp="24" Count="{count}" "#,
+            r#"Randomized="0" CompType="0" BlockWidth="0" BlockHeight="0">"#
         ),
         w = w,
-        h = h
+        h = h,
+        count = frames.len()
     );
+    for delay in delays {
+        xml.push_str(&format!(
+            concat!(
+                r#"<Frame TransColor="-1" Delay="{delay}">"#,
+                r#"<Layers Count="1" Width="{w}" Height="{h}" Bpp="24">"#,
+                r#"<Layer Left="0" Top="0" Visible="1" TransColor="-1" Alpha="255" AlphaOn="0"/>"#,
+                r#"</Layers></Frame>"#
+            ),
+            delay = delay,
+            w = w,
+            h = h
+        ));
+    }
+    xml.push_str("</Frames>");
     let zx = zlib(xml.as_bytes())?;
-    let zpixels = zlib(&bgr)?;
     let mut out = b"GaleX200".to_vec();
     out.extend_from_slice(&(zx.len() as u32).to_le_bytes());
     out.extend(&zx);
-    out.extend_from_slice(&(zpixels.len() as u32).to_le_bytes());
-    out.extend(&zpixels);
-    out.extend_from_slice(&0u32.to_le_bytes()); // sin canal alfa
+    for rgba in frames {
+        let mut bgr = vec![0u8; st.saturating_mul(h as usize)];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let i = (y * w as usize + x) * 4;
+                let o = y * st + x * 3;
+                bgr[o] = rgba[i + 2];
+                bgr[o + 1] = rgba[i + 1];
+                bgr[o + 2] = rgba[i];
+            }
+        }
+        let zpixels = zlib(&bgr)?;
+        out.extend_from_slice(&(zpixels.len() as u32).to_le_bytes());
+        out.extend(&zpixels);
+        out.extend_from_slice(&0u32.to_le_bytes()); // sin canal alfa
+    }
     Ok(out)
 }
 
