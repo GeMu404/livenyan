@@ -4,7 +4,7 @@ use crate::lsb::names::Prop;
 use crate::lsb::{CmdType, Command};
 
 impl Vm {
-    /// SaveCabinet / LoadCabinet: guarda o restaura objetos de la escena.
+    /// SaveCabinet / LoadCabinet: mueve objetos de/hacia la superficie trasera.
     pub(crate) fn step_cabinet(&mut self, kind: CmdType, c: &Command) -> String {
         let props = self.props_of(c);
         let cab = props
@@ -20,15 +20,15 @@ impl Vm {
             .filter(|s| !s.is_empty())
             .collect();
         if kind == CmdType::SaveCabinet {
-            // Act=false: guarda los indicados; Act=true: todos menos los indicados
+            // El manual restringe SaveCabinet a componentes de la superficie trasera.
+            // Act=false: guarda los indicados; Act=true: todos menos los indicados.
+            let back = self.scene.back_names();
             let sel: Vec<String> = if act {
-                self.scene
-                    .names()
-                    .into_iter()
-                    .filter(|n| !targets.contains(n))
-                    .collect()
+                back.into_iter().filter(|n| !targets.contains(n)).collect()
             } else {
-                targets.clone()
+                back.into_iter()
+                    .filter(|name| targets.contains(name))
+                    .collect()
             };
             let mut saved = vec![];
             for n in &sel {
@@ -50,7 +50,9 @@ impl Vm {
             for o in objs {
                 let want = targets.is_empty() || targets.contains(&o.name) != act;
                 if want {
+                    let name = o.name.clone();
                     self.scene.put(o);
+                    self.scene.mark_back(&name);
                     n += 1;
                 } else {
                     keep.push(o);

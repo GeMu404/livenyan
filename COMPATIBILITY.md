@@ -82,7 +82,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 8–10 | BoxNew / ImgNew / MesNew | `ok` | Crear componentes | `step_obj_new`. Imagen y tile: `PR_BRIGHTNESS` 0 igual, 255 blanco, -255 negro | `graphic.html` 明るさ |
 | 11 | Timer | `ok` | Temporizador | Timers + eventos | |
 | 12 | Movie | `ok` / `partial` | Vídeo | GaleX anim si magic/stem `.gal` (piso); si no ffmpeg CLI; decode **nativo** (I1, I15) | Manual size; **interpretación** latencia/port |
-| 13 | Flip | `partial` | Placa + wipe | Con targets: fundido y `Delete` solo de esos nombres. FL_OUT sin Delete → `back`; **experimento** (H3) MESOFF/FACE→再生中: `SetProp VISIBLE=1` desarchiva el objeto y su descendencia (sin Flip de entrada). Targets vacío: **interpretación** placa (I12), una pasada, sin framebuffer extra. NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6) | `graphic.html` / novel MESOFF |
+| 13 | Flip | `partial` | Placa + wipe | Con targets: fundido y `Delete` solo de los nombres planificados; los objetos nuevos no presentados forman la superficie entrante (**interpretación livenyan**), mientras que los ya presentados pasan a ser salientes en el siguiente Flip. El árbol del cuadro de mensaje queda fuera de ese seguimiento; si un Flip anterior lo archivó, un cambio no dirigido al cuadro lo restaura y no lo elimina. El borrado no alcanza descendientes creados después del plan. FL_OUT sin Delete → `back`; **experimento** (H3) MESOFF/FACE→再生中: `SetProp VISIBLE=1` desarchiva el objeto y su descendencia (sin Flip de entrada). Targets vacío: **interpretación** placa (I12), una pasada, sin framebuffer extra. NONE/FADE; WHITE/BLACK/FLASH overlay (I7); resto fade (I6) | `graphic.html` / novel MESOFF |
 | 14 | Calc | `ok` | Evaluar expresión | | |
 | 15–16 | VarNew / VarDel | `ok` | Vars + Scope | Scope 0\|3 → globals; 1\|2 locals | Reset conserva scope 3 |
 | 17–18 | GetProp / SetProp | `ok` | Props objeto | Missing SetProp = no-op LM | |
@@ -90,9 +90,9 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 20 | TextIns | `ok` | Insertar texto TpWord | Plan Pending + plays | `<PG>` coalesce: `script.html` |
 | 21 | MovieStop | `ok` | Parar película | | |
 | 22 | ClrHist | `ok` | Limpiar historial | | |
-| 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
+| 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. El ancho del raster de texto se mide por su contenido, independiente de la posición animada del clip, para que la caché no recorte la marquesina al entrar. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
 | 24 | Caption | `ok` | Caption | | |
-| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto. `PR_IGNOREMOUSE` deja pasar el clic al panel. El texto se dibuja en el orden de la escena: un hermano con más prioridad (el deslizador) queda encima | interface.html; `graphic.html` マウス透過 |
+| 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto. Handlers de botón derecho en su rama visual (incluido el fondo padre) pueden ejecutarse durante la modalidad; eventos ajenos quedan retenidos. `PR_IGNOREMOUSE` deja pasar el clic al panel. livenyan interpreta 0–4 como los modos `IM_NONE`, `IM_ALL`, `IM_CLICK`, `IM_LCLICK`, `IM_RCLICK` (enumeración, no máscara); por eso 4 recibe clic izquierdo y omite el derecho. El texto se dibuja en el orden de la escena: un hermano con más prioridad (el deslizador) queda encima | interface.html; `graphic.html` マウス透過; el handler del fondo de sistema usa ONRBTNDOWN para cerrar |
 | 27 | Comment | `ok` | Ignorar | | |
 | 28 | TextClr | `ok` | Vaciar texto caja | | |
 | 29 | CallHist | `ok` | Volcar historial | | |
@@ -115,7 +115,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 56 | PrevMenuNew | `ok` | PrevMenu .lpm | | |
 | 57 | PropMotion | `ok` | Animar prop numérica | | |
 | 58 | FormatHist | `ok` | Formato historial | | |
-| 59–60 | SaveCabinet / LoadCabinet | `ok` | Guardar/restaurar objs | | |
+| 59–60 | SaveCabinet / LoadCabinet | `ok` | Guardar/restaurar objs | SaveCabinet mueve solo componentes de la superficie trasera al cabinet; LoadCabinet los devuelve a la superficie trasera | `object.html` キャビネット保存 / キャビネット復帰 |
 | 61–63 | IFDEF / IFNDEF / ENDIF | `noop` | Preprocesador chart | No-op si aparecen en LSB | Runtime **no confirmado** |
 
 ---
@@ -129,9 +129,9 @@ Dispatch: `system_text_event` en `src/vm/text_hist.rs`. Manual: `docs/livenovel/
 | PAUSE | `ok` | Clic / TEXTPAUSED + ONNOTIFY | Igual | `script.html` / novel system |
 | TEXTCLEAR | `ok` | Vaciar caja | Igual | |
 | MESON / MESOFF | `ok` | Visibilidad vía novel system | Solo ONNOTIFY | No hardcodear VISIBLE |
-| WAITPLAY | `ok` | Esperar efecto/obj | `wait_for` + click skip | |
+| WAITPLAY | `ok` | Esperar efecto/obj | `wait_for`; `CLICK` permite clic; Ctrl no corta un Movie activo | Borderline: `PLAYMOVIE` → `WAITPLAY Movie CLICK` → `STOPMOVIE`; comportamiento original reportado por usuario |
 | PLAYMOVIE / STOPMOVIE | `ok` / `partial` | Vídeo inline | Objeto `ムービー` + ffmpeg | |
-| CREATECG / CHANGECG / DELETECG | `partial` | CG / color / alín | Subset de args | Resto **sin verificar** |
+| CREATECG / CHANGECG / DELETECG | `partial` | CG / color / tamaño / posición / capa | `CREATECG`: tamaño intrínseco, coords numéricas o alineadas, `#n` como prioridad | Resto **sin verificar** |
 | PLAYSND / STOPSND | `ok` | SE/BGM canales | | |
 | TEXTSPD | `ok` / `partial` | TIME ms/char; ABSOLUTE | Override `text_char_ms` | Orden args **no confirmado**; relativo = **I8** |
 | TXSPF / TXSPN / TXSPS | `ok` | Fast / normal / slow | 0 ms / clear+256 / ×3 baseline | **I8** |
@@ -159,15 +159,15 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | I3 | Tipografía host | ＭＳ ゴシック | Noto CJK u otra si falta | Linux/Windows sin fuentes JP |
 | I4 | `TOSCREEN*` / coords | Espacio ventana Windows | Identidad en espacio lógico | El letterbox lo resuelve el present |
 | I5 | Renderer | DirectDraw/GDI/etc. | SDL auto (sin Vulkan/OF propio) | Mantenibilidad; OF archivado |
-| I6 | Flip wipe ≠ NONE/FADE/WHITE/BLACK/FLASH | Wipe geométrico LM | El mismo fundido de superficies que `WP_FADE` (sin `unimpl`) | Predecible; wipes clip=más adelante |
+| I6 | Flip wipe ≠ NONE/FADE/BLINDH/BLINDV/WHITE/BLACK/FLASH | Wipe geométrico LM | `WP_BLINDH` abre con franjas verticales y `WP_BLINDV` con franjas horizontales, también en cajas semitransparentes; el wipe recorta complementariamente las superficies entrante y saliente. Los demás wipes no implementados usan fundido de superficies (`WP_FADE`) | `graphic.html` (orientación, anchura y demora de franja); el resto queda como interpretación |
 | I7 | WP_WHITE/BLACK/FLASH | 表→色→裏 / 白→裏 | Overlay RGBA, sin tocar `ALPHA` | `graphic.html` + present SDL |
 | I8 | TEXTSPD relativo / TXSPS | ? | Baseline 60 cps; slow ×3 | Números estables livenyan |
 | I9 | QUAKE tipo Q | ? | Hash ruido acotado | Suficiente para “temblor” |
 | I10 | GETDISPLAYMODE | Modos Win32 | Siempre `0` (ventana lógica) | Sin exclusive FS LM |
 | I11 | Clic / hover | Rectángulo WIDTH×HEIGHT | Si la prop es ≤ 0, el tamaño del archivo (imagen, botón, tile) y luego zoom | El novel system no guarda esas props; si no, la miniatura se ve y no recibe el clic |
-| I12 | Flip sin targets | Dos pantallas y borrar la de atrás | Archivar lo ya presente y dejar lo creado en este frame. Sin objetos nuevos, vuelve la placa y `Delete` tira lo visible. La primera placa se conserva. Mensajes y sus padres no se archivan. El fundido es de las dos superficies durante el `Time` del comando; no escribe `ALPHA` | Un segundo framebuffer apaga el cuadro de mensaje y la pantalla recién armada |
-| I13 | Present al cambiar de escena | El cuadro anterior se queda hasta que decodifica cada imagen nueva (mapa, countdown, overlays) | Se presenta cuando está lista la banda de la imagen de fondo: prioridad mínima + 32. Menús y overlays entran en los frames siguientes | Un clic del mapa de escenas dispara la carga del clip y de toda la UI; esperar a todo deja la escena vieja en pantalla |
-| I14 | Texto de contorno al agrandar | Raster a `FONTHEIGHT` y estirar el framebuffer | El target de escena es el letterbox en píxeles. El texto de contorno se rasteriza a ese tamaño y se copia en coords lógicas (el estirado queda 1:1). `.lft` no se agranda. `scale_filter=native` se queda a 1×. SaveScreen baja el target a lógico con nearest | `text.html` (`フォントの高さ`). Ume/TTF se ve suave en ventana grande; Native deja un solo escalado externo |
+| I12 | Flip sin targets | `graphic.html`: `FL_OUT` mueve solo los targets al fondo; `FL_STAY` conserva solo los targets delante; `Delete` borra los componentes que sigan detrás tras el cambio | **Interpretación livenyan:** la cohorte agrupa objetos desde el Flip completado anterior; los objetos ya presentados pasan a ser salientes en el siguiente cambio. Esta marca se reinicia al completar cada Flip y al restaurar objetos de un gabinete, así cada transición A→B→A clasifica solo la escena vigente. La cohorte avanza al completar el Flip, no por cada frame. Mensajes y sus padres no se archivan; el fundido es de las dos superficies durante `Time`, sin escribir `ALPHA`. La superficie archivada que entra se compone detrás de la superficie frontal saliente, conservando el orden jerárquico | `graphic.html` (Flip: 表画面/裏画面, 処理); un `While` que cede frames partía la placa de un menú |
+| I13 | Present al cambiar de escena | El cuadro anterior se queda hasta que decodifica cada imagen nueva (mapa, countdown, overlays) | Se presenta cuando está lista la banda de la imagen de fondo: prioridad mínima + 32. Menús y overlays entran en los frames siguientes. Si un Flip activo no puede presentarse por recursos pendientes, se pausa su reloj y su espera | Un clic del mapa de escenas dispara la carga del clip y de toda la UI; esperar a todo deja la escena vieja en pantalla |
+| I14 | Texto de contorno al agrandar | Raster a `FONTHEIGHT` y estirar el framebuffer | El target de escena es el letterbox en píxeles. El texto de contorno se rasteriza a ese tamaño y se copia en coords lógicas (el estirado queda 1:1). `.lft` no se agranda. `scale_filter=native` se queda a 1×. SaveScreen hace readback fresco del último target presentado, conserva su resolución salvo resample explícito y mantiene layout lógico en la placa | `text.html` (`フォントの高さ`) y `calc.html` (`SaveScreen`: 実行画面を保存). Capturar antes del redibujado evita incluir el menú que el script acaba de abrir |
 
 ## Huecos / temporales (ejecución posible, deuda o duda)
 
@@ -199,6 +199,8 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | OPENURL | `ok` | Abre URL del SO |
 | SETWALLPAPER | `noop` | `false` + warn (sin API escritorio) |
 | SAVESCREEN | `ok` | GaleX200 desde framebuffer; mem:/save:/host; readback on-demand |
+| INPRIMARY | `ok` | Comprueba si el componente pertenece a la superficie delantera (`calc.html`) |
+| DELETESTACK | `ok` | Elimina el frame indicado por índice base cero; `@StackCount` informa cuántos frames hay (`calc.html`) |
 | COPYFILE | `ok` | mem:/save:/host (calc.html) |
 | FIXSTR | `ok` | Quita lead SJIS huérfano / `U+FFFD` tras Copy por bytes |
 | COPY (bytes) | `ok` | Índices CP932; JCopy = caracteres (**fuente primaria** calc.html) |
@@ -241,7 +243,7 @@ Cruce de este índice y de [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERF
 | H4 | Cinema sin LCM usa milisegundos fijos (**temporal**, W3) | Duración del placeholder | Con LCM usable, el clip y el tiempo sustituyen el placeholder |
 | H5 | `GameSave` guarda globals + page/label, no la escena | Qué restaura `GameLoad` | Un snapshot devolvería los objetos |
 | H6 | `IFDEF` / `IFNDEF` / `ENDIF` en el LSB son no-op (**no confirmado**, W7) | Esas ramas se ejecutan | Si el runtime los honra, la rama cortada deja de correr |
-| H7 | `CREATECG` / `CHANGECG` / `DELETECG`: subset de args; el resto **sin verificar** | Color, alineación y lo no leído | Esos args pasarían a pintar o colocar el CG |
+| H7 | `CREATECG` / `CHANGECG` / `DELETECG`: subset de args; para `CREATECG`, los slots 4/5 reconocen tokens de alineación (`C`/`R`, `C`/`B`); los valores numéricos no son coordenadas. Interpretarlos así desplazaba sprites y menús | Posición de CG | **Confirmado por el usuario en test2/testgame:** al ignorar esos valores numéricos, los menús vuelven a funcionar. Prueba sintética cubre `(500, 428)`. No usar offsets por juego |
 | H8 | Orden de args de `TEXTSPD` **no confirmado** | Qué número es TIME y cuál ABSOLUTE | El ritmo cambia si el orden está cruzado. La curva 60 cps / ×3 es I8 y se queda |
 | H9 | Orden de args de `QUAKE` **no confirmado** | Qué valor es Q, W o B | El tipo de temblor se asigna a otro eje. El hash de Q es I9 y se queda |
 | H10 | `<PS>` / `{PAUSE}` + `<PG>` se funden (**inventado**). `<PG>` con `cur` vacío solo hace Clear (**experimento**, tras STOPSND). TextIns sin caracteres: `<PG>` solo Clear (**experimento**, logo y título) | Clic de página frente a Clear | Si el original pide clic, el logo o el mensaje esperan o avanzan solos |
@@ -256,9 +258,11 @@ Cruce de este índice y de [`LIVEMAKER-INTERFACE-REFERENCE.md`](LIVEMAKER-INTERF
 | H19 | Una lista Save/Load midió 140×20 y se partió en siete celdas de 20×20. Un solo asset | Solo esa imagen | Reusarlo en otro menú parte mal la tira |
 | H20 | Layout `.lft` leído en versión `100` de un solo juego (**no confirmado** fuera). U+0020 ausente: el avance del espacio se sintetiza (**inventado**, W12) | Glifos y el ancho del espacio | Otra versión, o un espacio real en el `.lft`, cambian el avance |
 | H21 | Los exports de `live.dll` son la superficie nativa de media. Mapearlos 1:1 a comandos LSB o a nombres de prop: **no confirmado** | Qué símbolo atendería un comando de media | Ese mapeo cambiaría el dispatch. Hoy no se hace |
-| H22 | Botones `.lpm`: si los dos primeros enteros coinciden con el tamaño de la imagen son tamaño y la posición sale de unk15/unk16; si no, son la posición (**no confirmado**) | Dónde cae cada botón de PrevMenu | Si el criterio es otro, los botones se desplazan |
+| H22 | La semántica geométrica de los dos pares binarios `.lpm` sigue sin confirmarse. Se conserva la heurística previa: usar el segundo par como posición solo cuando el primero coincide con el tamaño leído desde un prefijo GAL sin descompresión. La hipótesis de que esto causara el menú desplazado quedó descartada por la corrección H7, confirmada por el usuario en test2/testgame. XML guarda `Left`/`Top` en el primer par y `PrevLeft`/`PrevTop` en el segundo; la semántica visual sigue sujeta a la misma heurística. La captura existente de testgame en `--debug-layout` muestra `背景` 800×600 en x=500 y `選択メニュー` en x=564; esto solo mide lo dibujado, no demuestra la semántica `.lpm`. Log del usuario: `縦メニュー表示ボタン` en (480,428), clic derecho `no-handler`, clic izquierdo `ONNOTIFY` a `00000086.lsc:00000180`; la ruta de clic izquierdo sí dispara | Confirmar la semántica de `.lpm` con evidencia independiente | Menú desplazado resuelto mediante H7; no compensar con offsets por juego. No ejecutar juegos ni generar capturas |
 | H23 | Gale binario: bytes 4..8 de la cabecera de frame = duración en ms (**experimento**, valores plausibles en un juego) | Ritmo de animaciones `.gal` | Si el campo es otra cosa, la animación corre a otro ritmo |
 | H24 | Índice numérico de `ObjProp` en base 0 (PropertyType = índice + 1) (**experimento**: PARENT, LEFT y TOP cuadran) | Qué prop lee un `GetProp` numérico | Con otra base se leería la prop vecina |
+| H25 | La captura ya existente de testgame reporta resolución `fallback 800×600`; contar GAL comprimidos para inferir la resolución lógica no es fiable porque el conjunto puede incluir CG y sprites grandes, no solo fondos | Resolución lógica que reciben `@ScrWidth/@ScrHeight`, que puede afectar posiciones calculadas por scripts | No inferirla de GAL comprimidos; mantener la ruta previa hasta que haya una fuente de resolución autoritativa. Esto no confirma el fallo de test2, cuyo LPB declara 800×600. No ejecutar juegos ni generar capturas |
+| H26 | En testgame, el menú de personalidad codifica la opción previamente elegida con `●` en el propio texto y usa U+3000 en la otra. Las cuatro traducciones correspondientes de `translations/es.toml` comienzan con `●`, incluso para las variantes fuente que comienzan con U+3000. `translate_menu_choices` sustituía la etiqueta completa y convertía ambas en marcadas. El menú dinámico usa `HOVERCOLOR=65280`, pero no `CHECKSOURCE`; la documentación define `HOVERCOLOR` como fondo de la fila bajo el cursor y `CHECKSOURCE` como una tira de check normal/hover | Conservar el marcador que el script establece al traducir la etiqueta; separar ese estado del hover visual | El script alterna el marcador entre A y B. La traducción debe traducir el cuerpo y preservar el prefijo fuente (`●`/U+3000); `CHECKSOURCE` no es el mecanismo para este menú |
 
 ## Mantenimiento
 

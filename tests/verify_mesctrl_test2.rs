@@ -4,6 +4,8 @@
 use livenyan::assets::Assets;
 use livenyan::config::Config;
 use livenyan::game::Game;
+use livenyan::lsb::expr::{Env, Value};
+use livenyan::lsb::names::Func;
 use livenyan::vm::{Options, State, Vm};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,7 +103,7 @@ fn btn_index(vm: &Vm, name: &str) -> usize {
         .unwrap_or_else(|| panic!("missing button {name}"))
 }
 
-fn click_btn(vm: &mut Vm, name: &str) {
+fn click_btn_once(vm: &mut Vm, name: &str) {
     let (ox, oy) = menu_origin(vm);
     let i = btn_index(vm, name);
     let b = vm.prevmenus["メッセージボックスコントロール"].buttons[i].clone();
@@ -117,6 +119,11 @@ fn click_btn(vm: &mut Vm, name: &str) {
     vm.set_mouse_button(false, true);
     vm.click_at(x, y, false);
     vm.set_mouse_button(false, false);
+}
+
+fn click_btn(vm: &mut Vm, name: &str) {
+    let i = btn_index(vm, name);
+    click_btn_once(vm, name);
     let base = vm.now;
     for k in 0..60 {
         vm.update(base + 16.0 * (k + 1) as f64, 50_000);
@@ -128,6 +135,22 @@ fn click_btn(vm: &mut Vm, name: &str) {
         var_truthy(vm, "メッセージスキップ"),
         vm.location()
     );
+}
+
+fn message_progress(vm: &Vm) -> Vec<(String, usize, usize, bool)> {
+    vm.scene
+        .live()
+        .filter_map(|object| {
+            object.play.as_ref().map(|play| {
+                (
+                    object.name.clone(),
+                    play.pos,
+                    play.cur.len(),
+                    play.waiting_click,
+                )
+            })
+        })
+        .collect()
 }
 
 fn var_truthy(vm: &Vm, name: &str) -> bool {
@@ -165,6 +188,36 @@ fn auto_skip_hide_on_test2() {
         vm.location()
     );
     eprintln!("reached wait at {}", vm.location());
+    for name in ["オート", "スキップ", "閉じる"] {
+        let index = btn_index(&vm, name);
+        let button = vm.prevmenus["メッセージボックスコントロール"].buttons[index].clone();
+        let hover = vm.prevmenus["メッセージボックスコントロール"].hover == Some(index);
+        let enabled = vm.call_engine(
+            Func::GETENABLED,
+            &[
+                Value::Str("メッセージボックスコントロール".into()),
+                Value::Str(name.into()),
+            ],
+            &[],
+        );
+        eprintln!(
+            "  control {name}: enabled={enabled:?} selected={} image={} cursor={} read={}",
+            vm.prevmenu_item_selected("メッセージボックスコントロール", index, name),
+            vm.prevmenu_button_image("メッセージボックスコントロール", index, &button, hover),
+            vm.scene.get("メッセージカーソル").is_some(),
+            var_truthy(&vm, "既読")
+        );
+        if name != "スキップ" {
+            assert_eq!(enabled, Some(Value::Bool(true)), "{name} should be enabled");
+        }
+        if name == "スキップ" {
+            assert_eq!(
+                enabled,
+                Some(Value::Bool(var_truthy(&vm, "既読"))),
+                "skip enablement should track read status"
+            );
+        }
+    }
 
     let auto_i = btn_index(&vm, "オート");
     assert!(!var_truthy(&vm, "自動送り"));
@@ -189,7 +242,29 @@ fn auto_skip_hide_on_test2() {
     assert!(reach_message_wait(&mut vm), "need wait before skip");
     let skip_i = btn_index(&vm, "スキップ");
     let already = var_truthy(&vm, "既読");
-    click_btn(&mut vm, "スキップ");
+    if already {
+        click_btn(&mut vm, "スキップ");
+    } else {
+        let progress_before = message_progress(&vm);
+        vm.skip = true;
+        vm.update(vm.now + 16.0, 20_000);
+        assert!(
+            !vm.skip,
+            "keyboard skip should be suppressed while disabled"
+        );
+        let progress_after_key = message_progress(&vm);
+        assert_eq!(
+            progress_after_key, progress_before,
+            "keyboard skip must not advance unread text"
+        );
+        let before_click = message_progress(&vm);
+        click_btn_once(&mut vm, "スキップ");
+        assert_eq!(
+            message_progress(&vm),
+            before_click,
+            "clicking disabled スキップ must not advance message"
+        );
+    }
     if already {
         assert!(
             vm.prevmenu_item_selected("メッセージボックスコントロール", skip_i, "スキップ"),

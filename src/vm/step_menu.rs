@@ -12,12 +12,27 @@ pub(crate) fn translate_menu_choices(
     source
         .iter()
         .map(|choice| {
-            translations
-                .get(&crate::text_export::menu_item_id(choice))
-                .cloned()
-                .unwrap_or_else(|| choice.clone())
+            let Some(translated) = translations.get(&crate::text_export::menu_item_id(choice))
+            else {
+                return choice.clone();
+            };
+            let Some(prefix) = menu_selection_prefix(choice) else {
+                return translated.clone();
+            };
+            let translated = translated
+                .strip_prefix('●')
+                .or_else(|| translated.strip_prefix('\u{3000}'))
+                .unwrap_or(translated);
+            format!("{prefix}{translated}")
         })
         .collect()
+}
+
+fn menu_selection_prefix(choice: &str) -> Option<char> {
+    choice
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '●' | '\u{3000}'))
 }
 
 impl Vm {

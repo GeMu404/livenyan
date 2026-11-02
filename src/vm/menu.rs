@@ -214,7 +214,9 @@ impl Vm {
     }
 
     pub fn prevmenu_item_visible(&self, name: &str, index: usize, item_name: &str) -> bool {
-        self.menu_item_visible(name, index)
+        let is_message_ui = self.scene.message_ui_names().contains(name);
+        !(is_message_ui && self.has_visible_video())
+            && self.menu_item_visible(name, index)
             && self.menu_item_visible_key(name, &MenuItemKey::Name(item_name.to_string()))
     }
 
@@ -242,6 +244,20 @@ impl Vm {
                 .enabled
                 .get(&(name.to_string(), MenuItemKey::Name(item_name.to_string())))
                 .unwrap_or(&true)
+    }
+
+    pub(crate) fn skip_blocked_by_disabled_menu_item(&self) -> bool {
+        self.prevmenus.iter().any(|(menu_name, menu)| {
+            let Some(object) = self.scene.get(menu_name) else {
+                return false;
+            };
+            self.scene.effective_visible(object)
+                && menu.buttons.iter().enumerate().any(|(index, button)| {
+                    (button.name == "スキップ" || button.name.eq_ignore_ascii_case("skip"))
+                        && self.prevmenu_item_visible(menu_name, index, &button.name)
+                        && !self.prevmenu_item_enabled(menu_name, index, &button.name)
+                })
+        })
     }
 
     fn menu_text_width(
@@ -384,9 +400,7 @@ impl Vm {
         }
     }
 
-    /// Carga los botones de un .lpm. Posición: si los dos primeros enteros del botón
-    /// coinciden con el tamaño de su imagen son tamaño y la posición son unk15/unk16; si no,
-    /// son la posición (**no confirmado**, H22; los números van a debug).
+    /// Carga botones de .lpm. La heurística geométrica binaria sigue sin estar confirmada (H22).
     pub(crate) fn load_prevmenu(&mut self, name: &str, src: &str) {
         let data = self.assets.data().clone();
         let Some(file) = data.resolve(src, &[".lpm"]) else {
@@ -418,7 +432,7 @@ impl Vm {
             let size = res
                 .as_ref()
                 .and_then(|r| data.read_prefix(r, 4096))
-                .and_then(|d| crate::gal::peek_size(&d))
+                .and_then(|bytes| crate::gal::peek_size(&bytes))
                 .map(|(w, h)| (w as i64, h as i64));
             if let Some(r) = &res {
                 self.assets.request(r);
@@ -468,6 +482,19 @@ impl Vm {
     /// `PR_IGNOREMOUSE` (manual: マウス透過 / `IM_*`) afecta si el objeto recibe
     /// eventos de ratón — **no** la visibilidad del dibujo. No usarlo para ocultar chrome.
     pub(crate) fn prevmenu_hit(&self, x: f64, y: f64) -> Option<(String, usize)> {
+        self.prevmenu_hit_with_enabled(x, y, true)
+    }
+
+    pub(crate) fn prevmenu_hit_for_click(&self, x: f64, y: f64) -> Option<(String, usize)> {
+        self.prevmenu_hit_with_enabled(x, y, false)
+    }
+
+    fn prevmenu_hit_with_enabled(
+        &self,
+        x: f64,
+        y: f64,
+        enabled_only: bool,
+    ) -> Option<(String, usize)> {
         let mut best: Option<(i64, u64, String, usize)> = None;
         for (n, pm) in &self.prevmenus {
             let Some(o) = self.scene.get(n) else { continue };
@@ -477,7 +504,7 @@ impl Vm {
             let (ox, oy) = self.scene.abs_pos(o);
             for (i, b) in pm.buttons.iter().enumerate() {
                 if !self.prevmenu_item_visible(n, i, &b.name)
-                    || !self.prevmenu_item_enabled(n, i, &b.name)
+                    || (enabled_only && !self.prevmenu_item_enabled(n, i, &b.name))
                 {
                     continue;
                 }
@@ -498,13 +525,85 @@ impl Vm {
 mod tests {
     use super::super::step_menu::translate_menu_choices;
     use super::super::{Options, PmButton, PrevMenu, State, Vm};
-    use crate::archive::GameData;
+    use crate::archive::{GameData, write_vf_archive};
     use crate::assets::Assets;
     use crate::lsb::expr::{Env, Value};
     use crate::lsb::names::{Func, Prop};
     use crate::scene::Kind;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn compressed_prevmenu_asset_keeps_previous_coordinate_heuristic() {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend((value.len() as u32).to_le_bytes());
+            bytes.extend(value.as_bytes());
+        }
+
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let image = crate::gal::encode_galex_rgba(200, 60, &vec![0; 200 * 60 * 4]).unwrap();
+        let script = std::fs::read(fixtures.join("ゲームメイン.lsb")).unwrap();
+        let mut lpm = b"LivePrevMenu106".to_vec();
+        lpm.extend([0; 8]);
+        lpm.extend(1u32.to_le_bytes());
+        lpm.extend(200u32.to_le_bytes());
+        lpm.extend(60u32.to_le_bytes());
+        string(&mut lpm, "bg.gal");
+        lpm.push(0);
+        string(&mut lpm, "start");
+        string(&mut lpm, "bg.gal");
+        string(&mut lpm, "");
+        for _ in 0..1 + 1 + 2 + 3 + 2 {
+            string(&mut lpm, "");
+        }
+        lpm.extend(17u32.to_le_bytes());
+        lpm.extend(29u32.to_le_bytes());
+        string(&mut lpm, "");
+        for _ in 0..5 {
+            string(&mut lpm, "");
+        }
+        lpm.extend(0u32.to_le_bytes());
+        string(&mut lpm, "");
+        string(&mut lpm, "");
+
+        let archive = write_vf_archive(&[
+            ("bg.gal", image.as_slice()),
+            ("ui.lpm", lpm.as_slice()),
+            ("ゲームメイン.lsb", script.as_slice()),
+        ])
+        .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "livenyan-prevmenu-layout-{}.dat",
+            std::process::id()
+        ));
+        std::fs::write(&path, archive).unwrap();
+        let data = GameData::open(&path).unwrap();
+        assert!(data.read_prefix("bg.gal", 4096).is_none());
+        let assets = Arc::new(Assets::new(data, 1, 8));
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 0,
+                trace: false,
+                trace_conds: false,
+                show_text: false,
+                pick: None,
+            },
+        )
+        .unwrap();
+
+        vm.load_prevmenu("menu", "ui.lpm");
+        let button = &vm.prevmenus["menu"].buttons[0];
+        assert_eq!((button.x, button.y), (200, 60));
+        assert_eq!((button.w, button.h), (200, 60));
+
+        drop(vm);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn menu_width_is_measured_before_opening_handlers_run() {
@@ -558,6 +657,31 @@ mod tests {
             vec!["Guardar", "ロード"]
         );
         assert_eq!(source, vec!["セーブ", "ロード"]);
+    }
+
+    #[test]
+    fn menu_translations_preserve_script_selection_markers() {
+        let source = vec![
+            "●性格：従順".to_string(),
+            "　性格：従順".to_string(),
+            "　性格：メス豚".to_string(),
+            "●性格：メス豚".to_string(),
+        ];
+        let translations = source
+            .iter()
+            .zip(["●First", "●First", "●Second", "●Second"])
+            .map(|(choice, translated)| {
+                (
+                    crate::text_export::menu_item_id(choice),
+                    translated.to_string(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            translate_menu_choices(&source, &translations),
+            vec!["●First", "　First", "　Second", "●Second"]
+        );
     }
 
     #[test]
@@ -679,7 +803,12 @@ mod tests {
             },
         )
         .unwrap();
-        vm.scene.create("menu", Kind::Menu, HashMap::new());
+        vm.scene.create("message", Kind::Message, HashMap::new());
+        vm.scene.create(
+            "menu",
+            Kind::Menu,
+            HashMap::from([(Prop::PARENT, Value::Str("message".into()))]),
+        );
         vm.prevmenus.insert(
             "menu".into(),
             PrevMenu {
@@ -776,6 +905,93 @@ mod tests {
         // IGNOREMOUSE (IM_*) = passthrough de eventos, no oculta el dibujo.
         vm.scene.set("menu", Prop::IGNOREMOUSE, Value::Int(4));
         assert!(vm.prevmenu_item_visible("menu", 0, "オート"));
+        vm.scene.create(
+            "movie",
+            Kind::Movie,
+            HashMap::from([(Prop::PLAYING, Value::Bool(true))]),
+        );
+        vm.clocks.insert(
+            "movie".into(),
+            super::super::Clock::Video(super::super::VideoPlayback {
+                decoder: None,
+                frames: Default::default(),
+                frame_seq: 0,
+                generation: 1,
+                width: 1,
+                height: 1,
+                started_at_ms: 0.0,
+                first_pts_seconds: None,
+                paused_at_ms: None,
+            }),
+        );
+        assert!(!vm.prevmenu_item_visible("menu", 0, "オート"));
+        assert!(!vm.prevmenu_item_visible("menu", 0, "first"));
+        vm.scene.set("movie", Prop::PLAYING, Value::Bool(false));
+        assert!(vm.prevmenu_item_visible("menu", 0, "オート"));
+        vm.scene.set("movie", Prop::PLAYING, Value::Bool(true));
+        vm.scene.set("movie", Prop::VISIBLE, Value::Bool(false));
+        assert!(vm.prevmenu_item_visible("menu", 0, "オート"));
+        vm.scene.set("movie", Prop::VISIBLE, Value::Bool(true));
+        vm.scene.set("movie", Prop::PLAYING, Value::Bool(false));
+        vm.scene.create(
+            "skip_control",
+            Kind::Menu,
+            HashMap::from([(Prop::LEFT, Value::Int(10)), (Prop::TOP, Value::Int(20))]),
+        );
+        vm.prevmenus.insert(
+            "skip_control".into(),
+            PrevMenu {
+                buttons: vec![PmButton {
+                    x: 2,
+                    y: 3,
+                    w: 8,
+                    h: 9,
+                    src: String::new(),
+                    src_selected: String::new(),
+                    src_disabled: String::new(),
+                    name: "スキップ".into(),
+                    group: -1,
+                }],
+                hover: None,
+            },
+        );
+        assert_eq!(
+            vm.call_engine(
+                Func::SETENABLED,
+                &[
+                    Value::Str("skip_control".into()),
+                    Value::Str("スキップ".into()),
+                    Value::Bool(false),
+                ],
+                &[],
+            ),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(vm.prevmenu_hit(15.0, 25.0), None);
+        assert_eq!(
+            vm.prevmenu_hit_for_click(15.0, 25.0),
+            Some(("skip_control".into(), 0))
+        );
+        assert!(vm.skip_blocked_by_disabled_menu_item());
+        vm.scene.create("other_menu", Kind::Menu, HashMap::new());
+        vm.prevmenus.insert(
+            "other_menu".into(),
+            PrevMenu {
+                buttons: vec![PmButton {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                    src: String::new(),
+                    src_selected: String::new(),
+                    src_disabled: String::new(),
+                    name: "other".into(),
+                    group: 0,
+                }],
+                hover: None,
+            },
+        );
+        assert!(vm.prevmenu_item_visible("other_menu", 0, "other"));
         for (item, selected) in [("オート", true), ("スキップ", false)] {
             assert_eq!(
                 vm.call_engine(

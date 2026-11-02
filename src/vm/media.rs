@@ -341,7 +341,13 @@ impl Vm {
             let waiting_obj = self.play_of(&n).and_then(|p| p.wait_for.clone());
             if let Some((o, deadline)) = waiting_obj {
                 let busy = self.effect_busy(&o);
-                if busy && self.now < deadline && !self.skip {
+                let skip_interrupts_wait = self.skip
+                    && !self
+                        .scene
+                        .get(&o)
+                        .is_some_and(|object| object.kind == Kind::Movie);
+                // Ctrl can accelerate effect waits, but a playing Movie ends only by itself or CLICK.
+                if busy && self.now < deadline && !skip_interrupts_wait {
                     self.play_debug(&n, &format!("waiting-for-effect on {o:?}"));
                     continue;
                 }

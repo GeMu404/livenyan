@@ -92,7 +92,13 @@ fn set_check_and_get_check_track_menu_item_state() {
         ),
         Some(Value::Bool(true))
     );
-    // Sin captura aún → TRUE diferido (pedido encolado para el próximo render).
+    let stale_gal = crate::gal::encode_galex_rgba(1, 1, &[10, 20, 30, 255]).unwrap();
+    let stale_image = Arc::new(crate::gal::decode_any(&stale_gal).unwrap());
+    vm.mem_files.insert("__workscr.gal".into(), stale_gal);
+    vm.vfs_image_cache
+        .borrow_mut()
+        .insert("mem:__workscr.gal".into(), stale_image);
+    // SaveScreen siempre pide una captura nueva y descarta el `mem:` anterior.
     assert_eq!(
         vm.call_engine(
             Func::SAVESCREEN,
@@ -100,22 +106,20 @@ fn set_check_and_get_check_track_menu_item_state() {
             &[]
         ),
         Some(Value::Bool(true)),
-        "SaveScreen queues capture when no CPU frame yet"
+        "SaveScreen queues a fresh capture"
     );
-    assert!(vm.pending_savescreen.is_some());
-    let _ = vm.take_pending_savescreen();
+    assert!(!vm.mem_files.contains_key("__workscr.gal"));
+    assert!(
+        !vm.vfs_image_cache
+            .borrow()
+            .contains_key("mem:__workscr.gal")
+    );
+    assert_eq!(vm.pending_savescreen.len(), 1);
+    assert_eq!(vm.take_pending_savescreen().len(), 1);
     let tmp = std::env::temp_dir().join("livenyan_copyfile_vfs");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     vm.save_dir = tmp.clone();
-    // 2x2 rojo opaco → escribe en el acto
-    vm.set_screen_rgba(
-        2,
-        2,
-        vec![
-            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
-        ],
-    );
     assert_eq!(
         vm.call_engine(
             Func::SAVESCREEN,
@@ -124,7 +128,22 @@ fn set_check_and_get_check_track_menu_item_state() {
         ),
         Some(Value::Bool(true))
     );
+    let req = vm.take_pending_savescreen().pop().unwrap();
+    assert!(vm.complete_savescreen(
+        &req,
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ],
+    ));
     assert!(vm.mem_files.contains_key("__savescr.gal"));
+    assert_eq!(
+        vm.savescreen_layout("mem:__savescr.gal"),
+        Some(vm.opts.screen)
+    );
+    let saved = crate::gal::decode_any(vm.mem_files.get("__savescr.gal").unwrap()).unwrap();
+    assert_eq!((saved.w, saved.h), (2, 2));
     assert_eq!(
         vm.call_engine(
             Func::COPYFILE,
@@ -258,6 +277,43 @@ fn flip_command(act: i32, time: i32, delete: bool, wipe: i32, targets: &[&str]) 
     }
 }
 
+fn flip_command_with_reverse(
+    act: i32,
+    time: i32,
+    delete: bool,
+    wipe: i32,
+    targets: &[&str],
+    reverse: bool,
+) -> Command {
+    let mut command = flip_command(act, time, delete, wipe, targets);
+    command.fields.push((
+        "Reverse",
+        crate::lsb::Field::Expr(literal(Param::Int(i32::from(reverse)))),
+    ));
+    command
+}
+
+fn flip_command_with_params(
+    act: i32,
+    time: i32,
+    delete: bool,
+    wipe: i32,
+    targets: &[&str],
+    params: &[i32],
+) -> Command {
+    let mut command = flip_command(act, time, delete, wipe, targets);
+    command.fields.push((
+        "Param",
+        crate::lsb::Field::Exprs(
+            params
+                .iter()
+                .map(|value| literal(Param::Int(*value)))
+                .collect(),
+        ),
+    ));
+    command
+}
+
 #[test]
 fn click_uses_the_image_file_when_width_and_height_are_unset() {
     let mut vm = fixture_vm();
@@ -277,36 +333,243 @@ fn click_uses_the_image_file_when_width_and_height_are_unset() {
 }
 
 #[test]
-fn empty_stay_parks_the_old_plate_and_keeps_this_frame() {
+fn button_with_ignore_mouse_4_receives_left_click_only() {
+    let mut vm = fixture_vm();
+    vm.scene.create(
+        "dialog-ok",
+        Kind::Button,
+        HashMap::from([
+            (Prop::LEFT, Value::Int(0)),
+            (Prop::TOP, Value::Int(0)),
+            (Prop::WIDTH, Value::Int(100)),
+            (Prop::HEIGHT, Value::Int(40)),
+            (Prop::IGNOREMOUSE, Value::Int(4)),
+            (Prop::ONNOTIFY, Value::Str("dialog.lsc:ok".into())),
+            (Prop::ONRBTNDOWN, Value::Str("dialog.lsc:right".into())),
+        ]),
+    );
+
+    vm.click_at(10.0, 10.0, false);
+    assert_eq!(vm.queue.len(), 1);
+    assert_eq!(vm.queue.front().unwrap().script, "dialog.lsc:ok");
+
+    vm.queue.clear();
+    vm.click_at(10.0, 10.0, true);
+    assert!(vm.queue.is_empty());
+}
+
+#[test]
+fn flip_cohort_spans_yielded_frames_and_advances_on_completion() {
     let mut vm = fixture_vm();
     vm.scene.set_cohort(1);
-    vm.scene.create("title", Kind::Image, HashMap::new());
-    vm.scene.create("box", Kind::Message, HashMap::new());
+    vm.scene.create("old", Kind::Image, HashMap::new());
     vm.scene.set_cohort(2);
-    vm.scene.create("gallery", Kind::Image, HashMap::new());
-    vm.scene.set_cohort(2);
-    vm.step_flip(&flip_command(1, 0, true, 0, &[]));
-    assert!(vm.scene.get("title").is_some());
-    assert!(!vm.scene.names().iter().any(|name| name == "title"));
-    assert!(vm.scene.names().iter().any(|name| name == "gallery"));
-    assert!(vm.scene.names().iter().any(|name| name == "box"));
+    vm.scene.create("plate", Kind::Image, HashMap::new());
 
+    vm.update(0.0, 0);
+    vm.update(16.0, 0);
+    assert_eq!(vm.scene.cohort(), 2);
+
+    vm.step_flip(&flip_command(1, 0, false, 0, &[]));
+
+    assert!(vm.scene.names().iter().any(|name| name == "plate"));
+    assert!(!vm.scene.names().iter().any(|name| name == "old"));
+    assert_eq!(vm.scene.cohort(), 3);
+}
+
+#[test]
+fn delayed_flip_keeps_its_cohort_until_the_surface_switch() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("plate", Kind::Image, HashMap::new());
+
+    vm.step_flip(&flip_command(1, 100, false, 0, &[]));
+    assert_eq!(vm.scene.cohort(), 2);
+
+    vm.finish_flip_wait();
+
+    assert_eq!(vm.scene.cohort(), 3);
+    assert!(vm.scene.names().iter().any(|name| name == "plate"));
+    assert!(!vm.scene.names().iter().any(|name| name == "old"));
+}
+
+#[test]
+fn stay_keeps_targets_and_delete_removes_only_the_back_surface() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("actor", Kind::Image, HashMap::new());
+    vm.scene.create("background", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("fresh", Kind::Image, HashMap::new());
+    vm.step_flip(&flip_command(1, 0, true, 0, &["actor"]));
+
+    assert!(vm.scene.names().iter().any(|name| name == "actor"));
+    assert!(vm.scene.names().iter().any(|name| name == "fresh"));
+    assert!(vm.scene.get("background").is_none());
+}
+
+#[test]
+fn delete_flip_removes_current_surface_objects_after_they_were_presented() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene
+        .create("recall_background", Kind::Image, HashMap::new());
+    vm.scene.create("recall_menu", Kind::Menu, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene
+        .create("CGサムネイル0", Kind::Image, HashMap::new());
+    vm.scene
+        .create("CGサムネイル1", Kind::Image, HashMap::new());
+    vm.scene.mark_presented(&[
+        "recall_background".into(),
+        "recall_menu".into(),
+        "CGサムネイル0".into(),
+        "CGサムネイル1".into(),
+    ]);
+
+    vm.step_flip(&flip_command(1, 0, true, 0, &[]));
+
+    assert!(vm.scene.get("recall_background").is_none());
+    assert!(vm.scene.get("recall_menu").is_none());
+    assert!(vm.scene.get("CGサムネイル0").is_none());
+    assert!(vm.scene.get("CGサムネイル1").is_none());
+}
+
+#[test]
+fn presented_tracking_preserves_message_and_control_menu_tree() {
+    let mut vm = fixture_vm();
+    vm.scene.create("message-root", Kind::Box, HashMap::new());
+    vm.scene.create(
+        "message",
+        Kind::Message,
+        HashMap::from([(Prop::PARENT, Value::Str("message-root".into()))]),
+    );
+    vm.scene.create(
+        "message-controls",
+        Kind::Menu,
+        HashMap::from([(Prop::PARENT, Value::Str("message-root".into()))]),
+    );
+    vm.scene
+        .create("scene-recall-menu", Kind::Menu, HashMap::new());
+    vm.scene.mark_presented(&[
+        "message-root".into(),
+        "message".into(),
+        "message-controls".into(),
+        "scene-recall-menu".into(),
+    ]);
+
+    assert!(!vm.scene.was_presented("message-root"));
+    assert!(!vm.scene.was_presented("message"));
+    assert!(!vm.scene.was_presented("message-controls"));
+    assert!(vm.scene.was_presented("scene-recall-menu"));
+}
+
+#[test]
+fn targeted_flip_restores_archived_message_ui_without_deleting_it() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("message-root", Kind::Box, HashMap::new());
+    vm.scene.create(
+        "message",
+        Kind::Message,
+        HashMap::from([(Prop::PARENT, Value::Str("message-root".into()))]),
+    );
+    vm.scene.create(
+        "message-controls",
+        Kind::Menu,
+        HashMap::from([(Prop::PARENT, Value::Str("message-root".into()))]),
+    );
+    vm.scene
+        .create("selection-menu", Kind::Menu, HashMap::new());
+    vm.scene.mark_back("message-root");
+    vm.scene.set_cohort(2);
+
+    vm.step_flip(&flip_command(0, 0, true, 0, &["selection-menu"]));
+
+    assert!(vm.scene.get("selection-menu").is_none());
+    for name in ["message-root", "message", "message-controls"] {
+        assert!(vm.scene.get(name).is_some(), "{name} must survive the flip");
+        assert!(
+            !vm.scene.on_back(name),
+            "{name} must be restored to the active surface"
+        );
+    }
+}
+
+#[test]
+fn presented_surface_tracking_resets_after_each_flip_in_a_scene_chain() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("scene-a", Kind::Image, HashMap::new());
+    vm.scene.mark_presented(&["scene-a".into()]);
+
+    vm.scene.set_cohort(2);
+    vm.scene.create("scene-b", Kind::Image, HashMap::new());
+    vm.step_flip(&flip_command(1, 0, true, 0, &[]));
+    assert!(vm.scene.get("scene-a").is_none());
+    assert!(vm.scene.get("scene-b").is_some());
+    assert!(!vm.scene.was_presented("scene-b"));
+
+    vm.scene.mark_presented(&["scene-b".into()]);
     vm.scene.set_cohort(3);
-    vm.scene.create("thumb", Kind::Image, HashMap::new());
-    vm.scene.set_cohort(4);
+    vm.scene.create("scene-c", Kind::Image, HashMap::new());
     vm.step_flip(&flip_command(1, 0, true, 0, &[]));
-    assert!(vm.scene.names().iter().any(|name| name == "title"));
-    assert!(vm.scene.get("gallery").is_none());
-    assert!(vm.scene.get("thumb").is_none());
-    assert!(vm.scene.get("box").is_some());
+    assert!(vm.scene.get("scene-b").is_none());
+    assert!(vm.scene.get("scene-c").is_some());
+    assert!(!vm.scene.was_presented("scene-c"));
 
-    vm.scene.set_cohort(5);
-    vm.scene.create("gallery", Kind::Image, HashMap::new());
-    vm.scene.set_cohort(5);
+    vm.scene.mark_presented(&["scene-c".into()]);
+    vm.scene.set_cohort(4);
+    vm.scene.create("scene-d", Kind::Image, HashMap::new());
     vm.step_flip(&flip_command(1, 0, true, 0, &[]));
-    assert!(vm.scene.get("thumb").is_none());
-    assert!(vm.scene.names().iter().any(|name| name == "gallery"));
-    assert!(!vm.scene.names().iter().any(|name| name == "title"));
+    assert!(vm.scene.get("scene-c").is_none());
+    assert!(vm.scene.get("scene-d").is_some());
+    assert!(!vm.scene.was_presented("scene-d"));
+}
+
+#[test]
+fn restored_cabinet_objects_start_a_new_presented_surface() {
+    let mut vm = fixture_vm();
+    vm.scene.create("scene-a", Kind::Image, HashMap::new());
+    vm.scene.mark_presented(&["scene-a".into()]);
+
+    let saved = vm.scene.take("scene-a").unwrap();
+    vm.scene.put(saved);
+
+    assert!(!vm.scene.was_presented("scene-a"));
+}
+
+#[test]
+fn out_moves_only_targets_and_reverse_does_not_change_surface_membership() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("actor", Kind::Image, HashMap::new());
+    vm.scene.create("background", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("fresh", Kind::Image, HashMap::new());
+
+    vm.step_flip(&flip_command_with_reverse(0, 0, false, 1, &["actor"], true));
+
+    assert!(!vm.scene.names().iter().any(|name| name == "actor"));
+    assert!(vm.scene.names().iter().any(|name| name == "background"));
+    assert!(vm.scene.names().iter().any(|name| name == "fresh"));
+}
+
+#[test]
+fn out_without_targets_restores_the_back_surface_and_keeps_the_front() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("current", Kind::Image, HashMap::new());
+    vm.step_flip(&flip_command(1, 0, false, 0, &[]));
+
+    vm.step_flip(&flip_command(0, 0, false, 0, &[]));
+
+    assert!(vm.scene.names().iter().any(|name| name == "old"));
+    assert!(vm.scene.names().iter().any(|name| name == "current"));
 }
 
 #[test]
@@ -329,19 +592,308 @@ fn enter_fade_lasts_the_whole_flip_time() {
 }
 
 #[test]
+fn blind_flip_reveals_new_surface_in_strips_and_syncs_to_savescreen() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("plate", Kind::Image, HashMap::new());
+
+    vm.step_flip(&flip_command_with_params(1, 200, false, 2, &[], &[20, 1]));
+    let fade = vm.wipe_fade.as_ref().unwrap();
+    assert!(matches!(
+        fade.kind,
+        super::wipe::WipeKind::Blind {
+            horizontal: false,
+            span: 20,
+            appear_ms: 1.0,
+            reverse: false,
+        }
+    ));
+    assert_eq!(vm.wipe_alpha_factor("plate"), None);
+    assert!(vm.wipe_blind_strips("plate", 800, 600).unwrap().is_empty());
+
+    vm.now = 100.0;
+    let strips = vm.wipe_blind_strips("plate", 800, 600).unwrap();
+    assert_eq!(strips.len(), 40);
+    assert!(strips.iter().all(|strip| strip.w <= 20 && strip.h == 600));
+
+    let request = SaveScreenRequest {
+        path: "mem:__wipe_capture.gal".into(),
+        resample_w: 0,
+        resample_h: 0,
+    };
+    assert!(vm.complete_savescreen(&request, 1, 1, vec![255, 0, 0, 255],));
+    vm.update(120.0, 0);
+    assert_eq!(vm.wipe_fade.as_ref().unwrap().started_at, 120.0);
+}
+
+#[test]
+fn blindv_flip_reveals_horizontal_strips() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("plate", Kind::Image, HashMap::new());
+
+    vm.step_flip(&flip_command_with_params(1, 200, false, 3, &[], &[20, 1]));
+    let fade = vm.wipe_fade.as_ref().unwrap();
+    assert!(matches!(
+        fade.kind,
+        super::wipe::WipeKind::Blind {
+            horizontal: true,
+            span: 20,
+            appear_ms: 1.0,
+            reverse: false,
+        }
+    ));
+
+    vm.now = 100.0;
+    let strips = vm.wipe_blind_strips("plate", 800, 600).unwrap();
+    assert_eq!(strips.len(), 30);
+    assert!(strips.iter().all(|strip| strip.w == 800 && strip.h <= 20));
+}
+
+#[test]
+fn blindv_exit_clips_the_outgoing_menu_while_restoring_the_plate() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("saved_scene", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("menu_plate", Kind::Image, HashMap::new());
+
+    vm.step_flip(&flip_command_with_params(1, 200, false, 2, &[], &[20, 1]));
+    vm.finish_flip_wait();
+
+    vm.step_flip(&flip_command_with_params(
+        0,
+        200,
+        true,
+        3,
+        &["menu_plate"],
+        &[20, 1],
+    ));
+    let fade = vm.wipe_fade.as_ref().unwrap();
+    assert!(fade.out.contains("menu_plate"));
+    assert!(fade.inn.contains("saved_scene"));
+
+    assert_eq!(
+        vm.wipe_blind_strips("menu_plate", 800, 600).unwrap().len(),
+        30
+    );
+    vm.now = 100.0;
+    let outgoing = vm.wipe_blind_strips("menu_plate", 800, 600).unwrap();
+    let incoming = vm.wipe_blind_strips("saved_scene", 800, 600).unwrap();
+    assert_eq!(outgoing.len(), 30);
+    assert_eq!(incoming.len(), 30);
+    assert!(outgoing.iter().all(|strip| strip.h < 20));
+    assert!(incoming.iter().all(|strip| strip.h < 20));
+    let area = |strips: &[super::wipe::Strip]| {
+        strips
+            .iter()
+            .map(|strip| i64::from(strip.w) * i64::from(strip.h))
+            .sum::<i64>()
+    };
+    assert_eq!(area(&outgoing) + area(&incoming), 800 * 600);
+
+    vm.now = 200.0;
+    assert!(
+        vm.wipe_blind_strips("menu_plate", 800, 600)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        vm.wipe_blind_strips("saved_scene", 800, 600).unwrap().len(),
+        30
+    );
+}
+
+#[test]
+fn blind_flip_clock_pauses_while_scene_assets_are_not_ready() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
+    vm.scene.create("plate", Kind::Image, HashMap::new());
+    vm.step_flip(&flip_command_with_params(1, 200, false, 3, &[], &[20, 1]));
+    vm.hold_wipe_until_scene_ready();
+
+    vm.update(100.0, 0);
+    assert_eq!(vm.wipe_fade.as_ref().unwrap().started_at, 100.0);
+    assert!(matches!(vm.state, State::WaitUntil { until: 300.0, .. }));
+    assert!(vm.wipe_blind_strips("plate", 800, 600).unwrap().is_empty());
+
+    vm.hold_wipe_until_scene_ready();
+    vm.update(150.0, 0);
+    assert_eq!(vm.wipe_fade.as_ref().unwrap().started_at, 150.0);
+    assert!(matches!(vm.state, State::WaitUntil { until: 350.0, .. }));
+
+    vm.update(350.0, 0);
+    assert!(vm.wipe_fade.is_none());
+    assert!(matches!(vm.state, State::Running));
+}
+
+#[test]
+fn delayed_flip_delete_preserves_children_created_after_its_plan() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old_plate", Kind::Image, HashMap::new());
+    let mut old_child_props = HashMap::new();
+    old_child_props.insert(Prop::PARENT, Value::Str("old_plate".into()));
+    vm.scene.create("old_child", Kind::Image, old_child_props);
+    vm.scene.mark_back("old_plate");
+    vm.scene.set_cohort(2);
+
+    vm.step_flip(&flip_command(0, 100, true, 0, &[]));
+    assert!(
+        vm.flip_plan
+            .as_ref()
+            .is_some_and(|plan| plan.scrap.iter().any(|name| name == "old_plate"))
+    );
+
+    let mut menu_props = HashMap::new();
+    menu_props.insert(Prop::PARENT, Value::Str("old_plate".into()));
+    menu_props.insert(Prop::LEFT, Value::Int(20));
+    menu_props.insert(Prop::TOP, Value::Int(30));
+    vm.scene.create("menu", Kind::Menu, menu_props);
+    let mut slider_props = HashMap::new();
+    slider_props.insert(Prop::PARENT, Value::Str("menu".into()));
+    slider_props.insert(Prop::LEFT, Value::Int(5));
+    slider_props.insert(Prop::TOP, Value::Int(7));
+    vm.scene.create("slider", Kind::Slider, slider_props);
+
+    vm.finish_flip_wait();
+
+    let menu = vm.scene.get("menu").expect("new menu survives Flip Delete");
+    assert_eq!(menu.str(Prop::PARENT), "");
+    assert_eq!(menu.int(Prop::LEFT, 0), 20);
+    assert_eq!(menu.int(Prop::TOP, 0), 30);
+    assert_eq!(
+        vm.scene.abs_pos(vm.scene.get("slider").unwrap()),
+        (25.0, 37.0)
+    );
+    assert!(vm.scene.get("old_plate").is_none());
+    assert!(vm.scene.get("old_child").is_none());
+}
+
+#[test]
+fn flip_delete_keeps_fresh_descendants_of_an_archived_surface() {
+    let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
+    vm.scene.create("old_plate", Kind::Image, HashMap::new());
+    vm.scene.mark_back("old_plate");
+    vm.scene.set_cohort(2);
+    let mut menu_props = HashMap::new();
+    menu_props.insert(Prop::PARENT, Value::Str("old_plate".into()));
+    vm.scene.create("menu", Kind::Menu, menu_props);
+    let mut slider_props = HashMap::new();
+    slider_props.insert(Prop::PARENT, Value::Str("menu".into()));
+    vm.scene.create("slider", Kind::Slider, slider_props);
+
+    vm.step_flip(&flip_command(0, 100, true, 0, &[]));
+    let plan = vm.flip_plan.as_ref().unwrap();
+    assert!(plan.fade_in.iter().any(|name| name == "menu"));
+    assert!(plan.fade_in.iter().any(|name| name == "slider"));
+    assert!(!plan.scrap.iter().any(|name| name == "menu"));
+    assert!(!plan.scrap.iter().any(|name| name == "slider"));
+
+    vm.finish_flip_wait();
+
+    assert!(vm.scene.get("menu").is_some());
+    assert!(vm.scene.get("slider").is_some());
+    assert!(vm.scene.names().iter().any(|name| name == "menu"));
+    assert!(vm.scene.names().iter().any(|name| name == "slider"));
+    assert!(vm.scene.get("old_plate").is_none());
+}
+
+#[test]
+fn cabinet_saves_only_back_surface_and_loads_it_back() {
+    let mut vm = fixture_vm();
+    vm.scene.create("front_menu", Kind::Menu, HashMap::new());
+    vm.scene.create("front_plate", Kind::Image, HashMap::new());
+    vm.scene.create("back_plate", Kind::Image, HashMap::new());
+    vm.scene.create(
+        "back_child",
+        Kind::Image,
+        HashMap::from([(Prop::PARENT, Value::Str("back_plate".into()))]),
+    );
+    vm.scene.mark_back("back_plate");
+
+    let cabinet_command = |kind| Command {
+        kind: kind as u8,
+        indent: 0,
+        mute: false,
+        not_update: false,
+        line_no: 0,
+        fields: vec![
+            (
+                "components",
+                crate::lsb::Field::Props(vec![(Prop::NAME, literal(Param::Str("system".into())))]),
+            ),
+            ("Act", crate::lsb::Field::Expr(literal(Param::Flag(true)))),
+            ("Targets", crate::lsb::Field::Exprs(vec![])),
+        ],
+    };
+
+    vm.step_cabinet(CmdType::SaveCabinet, &cabinet_command(CmdType::SaveCabinet));
+    assert!(vm.scene.get("front_menu").is_some());
+    assert!(vm.scene.get("front_plate").is_some());
+    assert!(vm.scene.get("back_plate").is_none());
+    assert!(vm.scene.get("back_child").is_none());
+    assert!(
+        vm.cabinets["system"]
+            .iter()
+            .any(|object| object.name == "back_plate")
+    );
+    assert!(
+        vm.cabinets["system"]
+            .iter()
+            .any(|object| object.name == "back_child")
+    );
+    assert!(
+        !vm.cabinets["system"]
+            .iter()
+            .any(|object| object.name == "front_menu" || object.name == "front_plate")
+    );
+
+    vm.step_cabinet(CmdType::LoadCabinet, &cabinet_command(CmdType::LoadCabinet));
+    assert!(vm.scene.get("front_menu").is_some());
+    assert!(vm.scene.get("front_plate").is_some());
+    assert!(vm.scene.get("back_plate").is_some());
+    assert!(vm.scene.get("back_child").is_some());
+    assert!(
+        vm.scene
+            .back_names()
+            .iter()
+            .any(|name| name == "back_plate")
+    );
+    assert!(
+        vm.scene
+            .back_names()
+            .iter()
+            .any(|name| name == "back_child")
+    );
+    assert!(!vm.scene.names().iter().any(|name| name == "back_plate"));
+    assert!(!vm.scene.names().iter().any(|name| name == "back_child"));
+}
+
+#[test]
 fn named_flip_only_fades_or_deletes_its_targets() {
     let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
     vm.scene.create("actor", Kind::Image, HashMap::new());
     let mut child = HashMap::new();
     child.insert(Prop::PARENT, Value::Str("actor".into()));
     vm.scene.create("face", Kind::Image, child);
     vm.scene.create("bg", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
     vm.step_flip(&flip_command(0, 0, true, 0, &["actor"]));
     assert!(vm.scene.get("actor").is_none());
     assert!(vm.scene.get("face").is_none());
     assert!(vm.scene.names().iter().any(|name| name == "bg"));
 
     vm.scene.create("actor", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(4);
     vm.step_flip(&flip_command(0, 0, false, 0, &["actor"]));
     assert!(vm.scene.get("actor").is_some());
     assert!(!vm.scene.names().iter().any(|name| name == "actor"));
@@ -353,7 +905,9 @@ fn named_flip_only_fades_or_deletes_its_targets() {
 #[test]
 fn setprop_visible_true_unmarks_flip_back_surface() {
     let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
     vm.scene.create("土台", Kind::Image, HashMap::new());
+    vm.scene.set_cohort(2);
     vm.step_flip(&flip_command(0, 0, false, 0, &["土台"]));
     assert!(!vm.scene.names().iter().any(|name| name == "土台"));
     let cmd = Command {
@@ -386,10 +940,12 @@ fn setprop_visible_true_unmarks_flip_back_surface() {
 #[test]
 fn setprop_visible_unmarks_back_descendants() {
     let mut vm = fixture_vm();
+    vm.scene.set_cohort(1);
     vm.scene.create("土台", Kind::Box, HashMap::new());
     let mut child = HashMap::new();
     child.insert(Prop::PARENT, Value::Str("土台".into()));
     vm.scene.create("メッセージボックス", Kind::Message, child);
+    vm.scene.set_cohort(2);
     vm.step_flip(&flip_command(
         0,
         0,
@@ -1113,6 +1669,52 @@ fn right_click_scraps_after_menu_handler_finishes() {
     vm.do_return(Value::Empty);
 
     assert!(vm.scene.get("menu").is_none());
+}
+
+#[test]
+fn right_click_handler_on_modal_menu_parent_runs_without_dispatching_unrelated_events() {
+    let mut vm = fixture_vm();
+    let handler = Value::Str("ゲームメイン.lsb".into());
+    vm.scene.create(
+        "outside",
+        Kind::Box,
+        HashMap::from([(Prop::ONRBTNDOWN, handler.clone())]),
+    );
+    vm.scene.create(
+        "plate",
+        Kind::Box,
+        HashMap::from([(Prop::ONRBTNDOWN, handler)]),
+    );
+    vm.scene.create(
+        "menu",
+        Kind::Menu,
+        HashMap::from([(Prop::PARENT, Value::Str("plate".into()))]),
+    );
+    vm.push_modal_menu(State::Menu {
+        name: "menu".into(),
+        choices: vec!["choice".into()],
+        values: vec!["choice".into()],
+        var: String::new(),
+    });
+
+    vm.fire("outside", Prop::ONRBTNDOWN, vec![]);
+    vm.fire("plate", Prop::ONRBTNDOWN, vec![]);
+    vm.dispatch_events();
+
+    assert_eq!(vm.frames.last().unwrap().sender.as_deref(), Some("plate"));
+    assert!(matches!(
+        vm.frames.last().unwrap().saved_state,
+        Some(State::Menu { ref name, .. }) if name == "menu"
+    ));
+    assert_eq!(
+        vm.queue.front().map(|event| event.obj.as_str()),
+        Some("outside")
+    );
+
+    vm.do_return(Value::Empty);
+    assert!(matches!(vm.state, State::Menu { ref name, .. } if name == "menu"));
+    vm.dispatch_events();
+    assert_eq!(vm.queue.len(), 1);
 }
 
 #[test]
@@ -1927,6 +2529,52 @@ fn listcompo_without_parent_lists_all_live_components() {
 }
 
 #[test]
+fn inprimary_checks_the_front_surface() {
+    let mut vm = fixture_vm();
+    vm.scene.create("front", Kind::Image, HashMap::new());
+    vm.scene.create("back", Kind::Image, HashMap::new());
+    vm.scene.mark_back("back");
+
+    assert_eq!(
+        vm.call_engine(Func::INPRIMARY, &[Value::Str("front".into())], &[]),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        vm.call_engine(Func::INPRIMARY, &[Value::Str("back".into())], &[]),
+        Some(Value::Bool(false))
+    );
+}
+
+#[test]
+fn delete_stack_uses_zero_based_frame_indices_and_stack_count() {
+    let mut vm = fixture_vm();
+    let mut upper = vm.frames[0].clone();
+    upper.script = Arc::new(Lsb {
+        name: "upper.lsb".into(),
+        version: 117,
+        flags: 0,
+        command_params: vec![],
+        commands: vec![],
+    });
+    upper.pc = 7;
+    vm.frames.push(upper);
+    assert_eq!(vm.system_var("@StackCount"), Some(Value::Int(2)));
+
+    assert_eq!(
+        vm.call_engine(Func::DELETESTACK, &[Value::Int(0)], &[Param::Int(0)]),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(vm.system_var("@StackCount"), Some(Value::Int(1)));
+    assert_eq!(vm.frames[0].script.name, "upper.lsb");
+    assert_eq!(vm.frames[0].pc, 7);
+    assert_eq!(
+        vm.call_engine(Func::DELETESTACK, &[Value::Int(-1)], &[Param::Int(-1)]),
+        Some(Value::Bool(false))
+    );
+    assert_eq!(vm.system_var("@StackCount"), Some(Value::Int(1)));
+}
+
+#[test]
 fn mouse_and_key_edges_are_system_variables() {
     let mut vm = fixture_vm();
     vm.set_mouse_button(false, true);
@@ -1971,6 +2619,33 @@ fn already_read_text_reports_one_on_play_start() {
     vm.run_text("msg", &text, false, false, true);
     vm.update_plays();
     assert_eq!(vm.queue[0].params, vec![Value::Int(1)]);
+}
+
+#[test]
+fn ctrl_does_not_interrupt_movie_waitplay_but_click_still_can() {
+    let mut vm = fixture_vm();
+    vm.scene.create("movie", Kind::Movie, HashMap::new());
+    vm.scene.get_mut("movie").unwrap().anim = Some(crate::scene::Anim {
+        source: "movie.avi".into(),
+        started: Some(0.0),
+    });
+    vm.scene.create("msg", Kind::Message, HashMap::new());
+    vm.scene.get_mut("msg").unwrap().play = Some(crate::scene::Playback {
+        wait_for: Some(("movie".into(), 1_000.0)),
+        click_skips_wait: true,
+        ..Default::default()
+    });
+    vm.skip = true;
+    vm.now = 100.0;
+
+    vm.update_plays();
+    assert_eq!(
+        vm.play_of("msg").unwrap().wait_for,
+        Some(("movie".into(), 1_000.0))
+    );
+
+    vm.click();
+    assert!(vm.play_of("msg").unwrap().wait_for.is_none());
 }
 
 #[test]

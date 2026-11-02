@@ -256,9 +256,10 @@ impl LivePixelFont {
         // oy: top del bitmap relativo a baseline (bearing_y hacia arriba → oy negativo).
         let oy = (-f32::from(info.bearing_y) * scale).round() as i32;
 
+        // LivePixelFont stores glyph scanlines bottom-up; raster output is top-down.
         if (scale - 1.0).abs() < f32::EPSILON {
             let mut cov = Vec::with_capacity(src_w * src_h);
-            for y in 0..src_h {
+            for y in (0..src_h).rev() {
                 cov.extend_from_slice(&src[y * stride..y * stride + src_w]);
             }
             return RasterGlyph {
@@ -275,7 +276,7 @@ impl LivePixelFont {
         let dst_h = ((src_h as f32) * scale).round().max(1.0) as usize;
         let mut cov = vec![0u8; dst_w * dst_h];
         for y in 0..dst_h {
-            let sy = ((y as f32) / scale).floor() as usize;
+            let sy = src_h - 1 - ((y as f32) / scale).floor() as usize;
             if sy >= src_h {
                 continue;
             }
@@ -418,10 +419,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_synthetic_and_rasters_glyph() {
-        let cov = [
-            0u8, 255, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 255, 0,
-        ];
+    fn parses_synthetic_and_rasterizes_bottom_up_glyph() {
+        let cov = [255u8, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255];
         let bytes = build_synthetic_lft(b"TestFace", &[(b'A' as u16, 5, &cov)]);
         let font = LivePixelFont::parse(&bytes).expect("parse");
         assert_eq!(font.name, "TestFace");
@@ -431,7 +430,15 @@ mod tests {
         assert_eq!(g.w, 4);
         assert_eq!(g.h, 4);
         assert_eq!(g.advance, 5.0);
-        assert_eq!(g.cov, cov);
+        assert_eq!(
+            g.cov,
+            cov.chunks(4).rev().flatten().copied().collect::<Vec<_>>()
+        );
+        let scaled = font.raster('A', 16.0);
+        assert_eq!(scaled.w, 8);
+        assert_eq!(scaled.h, 8);
+        assert_eq!(&scaled.cov[..8], &[0, 0, 0, 0, 0, 0, 255, 255]);
+        assert_eq!(&scaled.cov[56..], &[255, 255, 0, 0, 0, 0, 0, 0]);
         let space = font.raster(' ', 8.0);
         assert_eq!(space.advance, 4.0);
         assert!(space.cov.is_empty());

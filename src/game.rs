@@ -376,6 +376,28 @@ pub fn parse_forms(b: &[u8]) -> Vec<ExeForm> {
 #[cfg(test)]
 mod form_tests {
     #[test]
+    fn image_resolution_guess_does_not_infer_from_compressed_archive_assets() {
+        let rgba = vec![0; 1280 * 720 * 4];
+        let image = crate::gal::encode_galex_rgba(1280, 720, &rgba).unwrap();
+        let archive = crate::archive::write_vf_archive(&[
+            ("background-a.gal", image.as_slice()),
+            ("background-b.gal", image.as_slice()),
+        ])
+        .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "livenyan-image-resolution-{}.dat",
+            std::process::id()
+        ));
+        std::fs::write(&path, archive).unwrap();
+        let data = crate::archive::GameData::open(&path).unwrap();
+
+        assert_eq!(super::guess_from_images(&data), None);
+
+        drop(data);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn lpb_header_resolution() {
         let mut p = super::Project {
             unk: [1024, 768, 1024, 768],

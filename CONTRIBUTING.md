@@ -1,42 +1,46 @@
 # Contribuir a livenyan
 
-## Commits
+## Cómo colaborar (lo importante)
 
-- Español, imperativo, asunto de 72 caracteres como máximo.
-- Prefijo de ámbito en minúsculas: `vm:`, `gal:`, `lpm:`, `lcm:`, `texto:`, `render:`,
-  `audio:`, `video:`, `docs:`, `tests:`, `build:`.
-- Un asunto por commit. El cuerpo explica **por qué** y cita el manual
-  (`docs/livenovel/…`) o la entrada H\*/I\* de [`COMPATIBILITY.md`](COMPATIBILITY.md).
-- Se permiten trailers de coautoría (`Co-authored-by: Cursor`, Copilot…). Lo que no va son
-  rastros de herramientas en los comentarios del código.
-- Plantilla: `git config commit.template .gitmessage`.
+1. Jugá un juego hecho con LiveMaker en el runtime original y en livenyan.
+2. Sacá capturas de **la misma escena** en ambos: original y livenyan.
+3. Indicá qué falla (texto, menú, imagen, salto, audio, etc.).
+4. Abrí un [issue](../../issues) con esas capturas y una descripción corta.
 
-Ejemplo:
+No hace falta un informe de ingeniería ni un prompt para la IA. Eso alcanza.
+
+Nunca subas al repo el juego, assets extraídos ni dumps con nombres/textos de un título concreto.
+Las capturas del issue sirven para mostrar el fallo; no las metas en commits ni en fixtures.
+
+## Herramientas de IA
+
+Cursor y GitHub Copilot se usaron **de forma extensiva** en el desarrollo.
+No hace falta (ni conviene) poner `Co-authored-by: Cursor` / `Copilot` en cada commit:
+el log se llena de ruido. Bastá con esta nota. En el código: cero menciones a la herramienta.
+
+## Commits (si mandás código)
+
+- Español, imperativo, asunto ≤72 caracteres.
+- Prefijo de ámbito en minúsculas: `vm:`, `gal:`, `texto:`, `render:`, `video:`, `docs:`, …
+- Un asunto por commit. El cuerpo dice **por qué** y cita `docs/livenovel/…` o una entrada
+  H\*/I\* de [`COMPATIBILITY.md`](COMPATIBILITY.md).
+- Plantilla opcional: `git config commit.template .gitmessage`.
 
 ```
 gal: leer la duración del frame de la cabecera Gale
 
-Los bytes 4..8 tras la máscara dan valores de ms plausibles (H23).
+Los bytes 4..8 tras la máscara dan ms plausibles (H23).
 Sin ellos las animaciones iban a ritmo fijo.
 ```
 
-## Comentarios
+## Comentarios en código
 
-- Un comentario dice lo que el código no puede decir: el porqué, la fuente o la duda.
-- Toda suposición sin fuente lleva su etiqueta (`no confirmado`, `inventado`, `experimento`…)
-  y, si puede mover comportamiento, su H\* en `COMPATIBILITY.md`.
-- Nada de banners de sección, pasos numerados que repiten el código ni historias de
-  «antes pasaba X» (eso va en el mensaje del commit).
-- `unsafe` siempre con `// SAFETY:` y el invariante que lo hace correcto.
-- `#[allow(clippy::…)]` siempre con el motivo en la misma línea.
+- Solo lo que el código no dice: porqué, fuente o duda.
+- Suposición sin fuente → etiqueta (`no confirmado`, `inventado`, `experimento`…) y H\* si mueve comportamiento.
+- `unsafe` con `// SAFETY:`; `#[allow(…)]` con motivo en la misma línea.
+- Sin banners, sin “antes pasaba X” (eso va en el commit).
 
-## Contenido del juego
-
-Nunca se sube contenido de un juego: textos, imágenes, capturas, assets extraídos ni nombres
-de scripts u objetos de un juego concreto. Tests con fixtures sintéticos; lo que necesite un
-juego real va con `#[ignore]` y una variable de entorno (ver README → Pruebas).
-
-## Antes de subir
+## Antes de abrir un PR
 
 ```
 cargo fmt --check

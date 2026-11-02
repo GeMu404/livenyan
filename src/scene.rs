@@ -140,8 +140,10 @@ pub struct Obj {
     pub frame: usize,
     /// Archivado por Flip: el script lo ve; el dibujo y el clic no.
     archived: bool,
-    /// Frame en que se creó. Lo usa el cambio de placa.
+    /// Cohorte de pantalla en que se creó. La usa el cambio de placa.
     born: u64,
+    /// Si el objeto ya apareció en una escena presentada por el renderer.
+    presented: bool,
     /// Texto en curso. Muere con el objeto.
     pub play: Option<Playback>,
     pub anim: Option<Anim>,
@@ -164,6 +166,7 @@ impl Obj {
             frame: 0,
             archived: false,
             born: 0,
+            presented: false,
             play: None,
             anim: None,
             placeholder: false,
@@ -193,19 +196,15 @@ impl Obj {
         zoom_xy_from_props(&self.props)
     }
 
-    /// `docs/livenovel/graphic.html` (マウス透過) nombra IM_NONE / IM_ALL /
-    /// IM_CLICK / IM_LCLICK / IM_RCLICK y no da los enteros. El novel system
-    /// escribe 0 (recibe), 1 (ignora todo) y 4 (ignora el clic izquierdo).
-    /// 2 = ambos clics y 8 = clic derecho: no confirmado.
+    /// `docs/livenovel/graphic.html` (マウス透過) enumera IM_NONE, IM_ALL,
+    /// IM_CLICK, IM_LCLICK e IM_RCLICK como modos, no como flags combinables.
     pub fn ignores_mouse(&self, hit: MouseHit) -> bool {
-        let flags = self.int(Prop::IGNOREMOUSE, 0);
-        if flags & 1 != 0 {
-            return true;
-        }
-        match hit {
-            MouseHit::Hover => false,
-            MouseHit::Left => flags & 0b0110 != 0,
-            MouseHit::Right => flags & 0b1010 != 0,
+        match self.int(Prop::IGNOREMOUSE, 0) {
+            1 => true,
+            2 => matches!(hit, MouseHit::Left | MouseHit::Right),
+            3 => hit == MouseHit::Left,
+            4 => hit == MouseHit::Right,
+            _ => false,
         }
     }
 }
@@ -292,7 +291,7 @@ pub struct Scene {
     slots: HashMap<String, Slot>,
     /// Capa `\x01`. No entra en el orden de dibujo.
     root: Obj,
-    /// Frame actual. Los objetos creados ahora nacen con este valor.
+    /// Cohorte de pantalla actual. Avanza al completar un Flip, no en cada frame renderizado.
     cohort: u64,
     seq: u64,
     pub motions: Vec<Motion>,
@@ -514,6 +513,18 @@ impl Scene {
         out
     }
 
+    /// Borra solo los nombres indicados, sin cascada por PR_PARENT.
+    pub fn delete_names_exact(&mut self, names: &[String]) -> Vec<Obj> {
+        let mut out = vec![];
+        for name in names {
+            if let Some(Slot::Live(object)) = self.slots.remove(name) {
+                out.push(object);
+            }
+            self.motions.retain(|motion| motion.obj != *name);
+        }
+        out
+    }
+
     /// Hijos (PR_PARENT == name) en orden de creación; `recursive` incluye descendientes.
     pub fn children(&self, name: &str, recursive: bool) -> Vec<String> {
         let mut out = vec![];
@@ -531,11 +542,82 @@ impl Scene {
         out
     }
 
+    pub fn message_lineage(&self) -> std::collections::HashSet<String> {
+        let mut keep = std::collections::HashSet::new();
+        for object in self.live().filter(|object| object.kind == Kind::Message) {
+            let mut current = object.name.clone();
+            for _ in 0..64 {
+                if !keep.insert(current.clone()) {
+                    break;
+                }
+                let Some(parent) = self
+                    .get(&current)
+                    .map(|object| object.str(Prop::PARENT))
+                    .filter(|parent| !parent.is_empty())
+                else {
+                    break;
+                };
+                current = parent;
+            }
+        }
+        keep
+    }
+
+    pub fn message_ui_names(&self) -> std::collections::HashSet<String> {
+        let mut keep = self.message_lineage();
+        for object in self.live() {
+            let mut current = object.name.as_str();
+            for _ in 0..64 {
+                if keep.contains(current) {
+                    keep.insert(object.name.clone());
+                    break;
+                }
+                let Some(parent) = self.get(current).map(|object| object.str(Prop::PARENT)) else {
+                    break;
+                };
+                if parent.is_empty() {
+                    break;
+                }
+                current = self
+                    .live_ref(&parent)
+                    .map(|parent| parent.name.as_str())
+                    .unwrap_or("");
+            }
+        }
+        keep
+    }
+
+    pub fn mark_presented(&mut self, names: &[String]) {
+        let protected = self.message_ui_names();
+        for name in names {
+            if protected.contains(name) {
+                continue;
+            }
+            if let Some(object) = self.live_mut(name) {
+                object.presented = true;
+            }
+        }
+    }
+
+    pub fn reset_presented(&mut self) {
+        for slot in self.slots.values_mut() {
+            if let Slot::Live(object) = slot {
+                object.presented = false;
+            }
+        }
+    }
+
+    pub fn was_presented(&self, name: &str) -> bool {
+        !self.message_ui_names().contains(name)
+            && self.live_ref(name).is_some_and(|object| object.presented)
+    }
+
     /// Saca objetos de la escena (para SaveCabinet). Sale de la placa de atrás.
     pub fn take(&mut self, name: &str) -> Option<Obj> {
         match self.slots.remove(name) {
             Some(Slot::Live(mut object)) => {
                 object.archived = false;
+                object.presented = false;
                 Some(object)
             }
             Some(gone) => {
@@ -546,7 +628,8 @@ impl Scene {
         }
     }
 
-    pub fn put(&mut self, object: Obj) {
+    pub fn put(&mut self, mut object: Obj) {
+        object.presented = false;
         self.slots.insert(object.name.clone(), Slot::Live(object));
     }
 
@@ -732,6 +815,15 @@ impl Scene {
     /// Orden de dibujo jerárquico: cada objeto se dibuja después de su padre y sus hijos
     /// justo encima de él; entre hermanos manda PRIORITY y luego el orden de creación.
     pub fn draw_order(&self) -> Vec<&Obj> {
+        self.draw_order_inner(false)
+    }
+
+    /// Orden de dibujo jerárquico incluyendo los objetos archivados en la superficie trasera.
+    pub fn draw_order_with_back(&self) -> Vec<&Obj> {
+        self.draw_order_inner(true)
+    }
+
+    fn draw_order_inner(&self, include_back: bool) -> Vec<&Obj> {
         let mut kids: HashMap<&str, Vec<&Obj>> = HashMap::new();
         let mut roots = vec![];
         let live: Vec<&Obj> = self.live().collect();
@@ -760,7 +852,7 @@ impl Scene {
             if out.len() > live.len() {
                 break; // ciclo de padres
             }
-            if self.on_back(&o.name) {
+            if !include_back && self.on_back(&o.name) {
                 continue;
             }
             out.push(o);
@@ -909,6 +1001,33 @@ mod tests {
         assert_eq!(order, ["background", "logo"]);
     }
 
+    #[test]
+    fn draw_order_with_back_preserves_parent_child_order_across_surfaces() {
+        let mut scene = Scene::default();
+        scene.create("back", Kind::Image, HashMap::new());
+        scene.create(
+            "back_child",
+            Kind::Image,
+            HashMap::from([(Prop::PARENT, Value::Str("back".into()))]),
+        );
+        scene.mark_back("back");
+        scene.create("front", Kind::Image, HashMap::new());
+
+        let normal: Vec<_> = scene
+            .draw_order()
+            .into_iter()
+            .map(|object| object.name.as_str())
+            .collect();
+        let both: Vec<_> = scene
+            .draw_order_with_back()
+            .into_iter()
+            .map(|object| object.name.as_str())
+            .collect();
+
+        assert_eq!(normal, vec!["front"]);
+        assert_eq!(both, vec!["back", "back_child", "front"]);
+    }
+
     fn thumb(zoom: i64) -> Obj {
         let mut props = HashMap::new();
         props.insert(Prop::LEFT, Value::Int(150));
@@ -932,6 +1051,7 @@ mod tests {
             frame: 0,
             archived: false,
             born: 0,
+            presented: false,
             play: None,
             anim: None,
             placeholder: false,
@@ -970,7 +1090,39 @@ mod tests {
     }
 
     #[test]
-    fn left_click_passes_through_ignore_mouse_4_to_the_object_below() {
+    fn ignore_mouse_modes_select_expected_events() {
+        let mut scene = Scene::default();
+        scene.create(
+            "object",
+            Kind::Image,
+            HashMap::from([(Prop::IGNOREMOUSE, Value::Int(0))]),
+        );
+        for hit in [MouseHit::Hover, MouseHit::Left, MouseHit::Right] {
+            assert!(!scene.get("object").unwrap().ignores_mouse(hit));
+        }
+
+        for (mode, expected) in [
+            (1, [true, true, true]),
+            (2, [false, true, true]),
+            (3, [false, true, false]),
+            (4, [false, false, true]),
+        ] {
+            scene.set("object", Prop::IGNOREMOUSE, Value::Int(mode));
+            for (hit, ignores) in [MouseHit::Hover, MouseHit::Left, MouseHit::Right]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    scene.get("object").unwrap().ignores_mouse(hit),
+                    ignores,
+                    "mode {mode}, hit {hit:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ignore_mouse_4_receives_left_click_and_passes_through_right_click() {
         let mut scene = Scene::default();
         let mut cover = HashMap::new();
         cover.insert(Prop::LEFT, Value::Int(0));
@@ -1002,13 +1154,13 @@ mod tests {
                     MouseHit::Left
                 )
                 .map(|o| o.name.as_str()),
-            Some("thumb")
+            Some("box")
         );
         assert_eq!(
             scene
                 .hit_handler(20.0, 20.0, &[Prop::ONRBTNDOWN], MouseHit::Right)
                 .map(|o| o.name.as_str()),
-            Some("box")
+            Some("thumb")
         );
     }
 }

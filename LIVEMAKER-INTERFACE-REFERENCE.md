@@ -33,6 +33,15 @@ De `docs/livenovel/interface.html` (secciones Menu / Scrollbar):
 - `CHECKSOURCE`: tira de dos estados, check normal y check con el cursor encima, a la izquierda del ítem (interface.html). El hueco reservado es el ancho de un estado (**interpretación**: ancho del archivo / 2).
 - `IndexOfMenu`: índice del texto entre los ítems, o -1 (calc.html). **fuente primaria**
 
+Para `.lpm` binario, pylivemaker identifica los dos primeros enteros de cada botón como
+`width` / `height`, pero su semántica visual no está confirmada. Se conserva la heurística previa:
+unk15/unk16 solo se usan como posición cuando el primer par coincide con el tamaño leído desde el
+prefijo del GAL; si no, se usa el primer par. Los GAL comprimidos no se leen completos para esta
+decisión, porque eso cambió la rama geométrica y probablemente desplazó menús. En XML, el primer
+par se toma de `Left` / `Top` y el segundo de `PrevLeft` / `PrevTop`, sujetos a la misma heurística.
+El test sintético solo valida que la heurística previa se mantiene; no prueba el layout correcto en
+test2/testgame.
+
 ## Menú — no confirmado (el manual calla o se queda corto)
 
 - Ancho automático / significado de `WIDTH` ausente o cero. **H16**
@@ -83,3 +92,7 @@ Antes de cambiar geometría de menú, troceado de la barra, scroll o valores por
 1. Mirar `docs/livenovel/` (el HTML que toque) y este archivo.
 2. Etiquetar el cambio (primaria / no confirmado / inventado). Si aún puede mover comportamiento, añadir o citar una **H\*** en `COMPATIBILITY.md`.
 3. Preferir el texto del manual o una comparación controlada con el motor original; anotar la duda en vez de inventar una especificación.
+
+La resolución lógica determina `@ScrWidth/@ScrHeight` y, con ello, las coordenadas que calculan
+los scripts. Si LPB/settings no aportan resolución, la heurística de fondos debe poder leer la
+cabecera GAL incluso cuando el recurso está comprimido en VF (H25).

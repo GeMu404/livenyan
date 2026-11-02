@@ -138,7 +138,7 @@ fn cinema_and_prevmenu_autoselect() {
         "event mv.ONPLAYEND -> mvend.lsc",
         "auto-select menu title[1]",
         "event title.ONSELECT -> sel.lsc",
-        "Calc primary = 1",
+        "If -> false",
         "state=ended",
     ] {
         assert!(s.contains(want), "missing {want:?}\n{s}");

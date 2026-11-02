@@ -5,6 +5,26 @@ use crate::lsb::names::Prop;
 use crate::scene::{Kind, Motion};
 use std::collections::HashMap;
 
+fn cg_position(
+    value: Option<&String>,
+    screen_extent: i64,
+    image_extent: i64,
+    center: &str,
+    end: &str,
+) -> i64 {
+    match value.map(String::as_str) {
+        Some(value) if value == center => (screen_extent - image_extent) / 2,
+        Some(value) if value == end => screen_extent - image_extent,
+        _ => 0,
+    }
+}
+
+fn cg_layer_priority(value: Option<&String>) -> Option<i64> {
+    value?
+        .strip_prefix('#')
+        .and_then(|layer| layer.parse::<i64>().ok())
+}
+
 impl Vm {
     /// Nombre del componente que el sistema LiveNovel usa para `{PLAYMOVIE archivo.wmv}`.
     const TEXT_MOVIE: &'static str = "ムービー";
@@ -355,6 +375,9 @@ impl Vm {
                 let mut props: HashMap<u8, Value> = HashMap::new();
                 props.insert(Prop::NAME, Value::Str(obj.clone()));
                 props.extend(keep);
+                if let Some(priority) = cg_layer_priority(args.get(3)) {
+                    props.insert(Prop::PRIORITY, Value::Int(priority));
+                }
                 let target_alpha = alpha.unwrap_or(255);
                 props.insert(
                     Prop::ALPHA,
@@ -378,12 +401,10 @@ impl Vm {
                             }
                         };
                         let resolved = self.assets.data().resolve(src, IMAGE_EXTS);
-                        let size = movie.as_ref().map(|m| (m.width, m.height)).or_else(|| {
-                            resolved
-                                .as_ref()
-                                .and_then(|r| self.assets.data().read_prefix(r, 4096))
-                                .and_then(|d| crate::gal::peek_size(&d))
-                        });
+                        let size = movie
+                            .as_ref()
+                            .map(|m| (m.width, m.height))
+                            .or_else(|| self.slider_asset_size(src));
                         if movie.is_none()
                             && let Some(r) = &resolved
                         {
@@ -392,21 +413,16 @@ impl Vm {
                             log::warn!("{name}: image not found: {src:?}");
                         }
                         let (iw, ih) = size.map(|(w, h)| (w as i64, h as i64)).unwrap_or((sw, sh));
-                        let x = match args.get(4).map(|s| s.as_str()) {
-                            Some("C") => (sw - iw) / 2,
-                            Some("R") => sw - iw,
-                            _ => 0,
-                        };
-                        let y = match args.get(5).map(|s| s.as_str()) {
-                            Some("C") => (sh - ih) / 2,
-                            Some("B") => sh - ih,
-                            _ => 0,
-                        };
+                        let x = cg_position(args.get(4), sw, iw, "C", "R");
+                        let y = cg_position(args.get(5), sh, ih, "C", "B");
                         props.insert(Prop::SOURCE, Value::Str(src.clone()));
                         props.insert(Prop::LEFT, Value::Int(x));
                         props.insert(Prop::TOP, Value::Int(y));
                         props.insert(Prop::WIDTH, Value::Int(iw));
                         props.insert(Prop::HEIGHT, Value::Int(ih));
+                        if let Some(priority) = cg_layer_priority(args.get(3)) {
+                            props.insert(Prop::PRIORITY, Value::Int(priority));
+                        }
                         Kind::Image
                     }
                 };
@@ -668,5 +684,111 @@ impl Vm {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Options, Vm};
+    use crate::archive::{GameData, write_vf_archive};
+    use crate::assets::Assets;
+    use crate::lsb::expr::Value;
+    use crate::lsb::names::Prop;
+    use crate::scene::Kind;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn createcg_uses_intrinsic_size_but_ignores_unknown_alignment_values() {
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let image = std::fs::read(fixtures.join("bg.gal")).unwrap();
+        let script = std::fs::read(fixtures.join("ゲームメイン.lsb")).unwrap();
+        let archive = write_vf_archive(&[
+            ("bg.gal", image.as_slice()),
+            ("ゲームメイン.lsb", script.as_slice()),
+        ])
+        .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "livenyan-createcg-compressed-{}.dat",
+            std::process::id()
+        ));
+        std::fs::write(&path, archive).unwrap();
+
+        let data = GameData::open(&path).unwrap();
+        let assets = Arc::new(Assets::new(data, 1, 8));
+        let expected = crate::gal::decode(&image).unwrap();
+        let mut vm = Vm::new(
+            assets,
+            "ゲームメイン.lsb",
+            Options {
+                screen: (800, 600),
+                cinema_ms: 0.0,
+                text_cps: 0.0,
+                lookahead: 0,
+                trace: false,
+                trace_conds: false,
+                show_text: false,
+                pick: None,
+            },
+        )
+        .unwrap();
+
+        vm.scene.create(
+            "dialogue_window",
+            Kind::Image,
+            HashMap::from([(Prop::PRIORITY, Value::Int(1100))]),
+        );
+        vm.system_text_event(
+            "message",
+            "CREATECG",
+            &[
+                "sprite".into(),
+                "bg.gal".into(),
+                "NORMAL".into(),
+                "#1".into(),
+                "500".into(),
+                "428".into(),
+            ],
+        );
+
+        let sprite = vm.scene.get("sprite").expect("CREATECG sprite");
+        assert_eq!(sprite.int(Prop::WIDTH, 0), i64::from(expected.w));
+        assert_eq!(sprite.int(Prop::HEIGHT, 0), i64::from(expected.h));
+        assert_eq!(sprite.int(Prop::LEFT, 0), 0);
+        assert_eq!(sprite.int(Prop::TOP, 0), 0);
+        assert_eq!(sprite.int(Prop::PRIORITY, 0), 1);
+        let order = vm
+            .scene
+            .draw_order()
+            .iter()
+            .map(|object| object.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            order.iter().position(|name| *name == "sprite")
+                < order.iter().position(|name| *name == "dialogue_window"),
+            "the CG layer should draw behind the dialogue window"
+        );
+
+        vm.system_text_event(
+            "message",
+            "CREATECG",
+            &[
+                "centered".into(),
+                "bg.gal".into(),
+                "NORMAL".into(),
+                "#0".into(),
+                "C".into(),
+                "B".into(),
+            ],
+        );
+        let centered = vm.scene.get("centered").expect("centered CREATECG");
+        assert_eq!(
+            centered.int(Prop::LEFT, 0),
+            (800 - i64::from(expected.w)) / 2
+        );
+        assert_eq!(centered.int(Prop::TOP, 0), 600 - i64::from(expected.h));
+
+        drop(vm);
+        std::fs::remove_file(path).unwrap();
     }
 }

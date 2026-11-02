@@ -33,6 +33,7 @@ mod sysevent;
 mod text_hist;
 mod wipe;
 use engine::*;
+pub(crate) use wipe::Strip;
 
 use menu::{MenuItemKey, prevmenu_item_keys};
 
@@ -309,11 +310,6 @@ pub(crate) struct FlipPlan {
     fade: Vec<String>,
     /// Entra desde negro en la segunda mitad del tiempo.
     fade_in: Vec<String>,
-    fade_out: bool,
-    /// La primera placa archivada es la base (el título) y se conserva.
-    remember_base: bool,
-    /// Frame de esa primera placa. Lo creado después se tira con `Delete`.
-    base_born: Option<u64>,
 }
 
 pub struct Vm {
@@ -404,15 +400,14 @@ pub struct Vm {
     pub visited: std::collections::HashSet<(usize, usize)>,
     /// Cambio de pantalla de un Flip, aplicado al terminar su espera.
     flip_plan: Option<FlipPlan>,
-    /// Fundido de Flip: dos superficies, sin tocar ALPHA.
+    /// Transición de Flip entre superficies.
     wipe_fade: Option<wipe::WipeFade>,
+    /// Inicio del intervalo en que el renderer no pudo presentar la escena del wipe.
+    wipe_hold_started_at: Option<f64>,
+    /// La captura de SaveScreen debe existir antes de que avance el wipe activo.
+    wipe_sync_capture: bool,
     /// Placas archivadas (no hay un segundo framebuffer: una sola pasada).
     plates: Vec<std::collections::HashSet<String>>,
-    /// Nombres de la primera placa. Al cubrir de nuevo no se archivan las sobras.
-    base_plate: Option<std::collections::HashSet<String>>,
-    /// Cohort de esa placa. Un `Delete` posterior borra lo nacido desde ahí.
-    base_born: Option<u64>,
-    frame_id: u64,
     /// `<TEXTSPD>` / `TXSP*`: ms/carácter y si es ABSOLUTE (script.html).
     /// Relativo: **interpretación** baseline [`TEXT_SPEED_BASELINE_CPS`].
     text_char_ms: HashMap<String, TextSpeedOverride>,
@@ -422,12 +417,12 @@ pub struct Vm {
     wipe_flash: Option<wipe::WipeFlash>,
     /// Archivos virtuales `mem:` (calc.html). Se descartan al salir del proceso.
     mem_files: HashMap<String, Vec<u8>>,
-    /// Última captura CPU (solo tras SaveScreen on-demand; no cada frame).
-    screen_rgba: Option<(u32, u32, Vec<u8>)>,
     /// SaveScreen diferido hasta el próximo render de escena (evita readback continuo).
-    pub pending_savescreen: Option<SaveScreenRequest>,
+    pub pending_savescreen: Vec<SaveScreenRequest>,
     /// Imágenes decodificadas desde mem:/save: (caché de draw; RefCell → draw con `&Vm`).
     vfs_image_cache: std::cell::RefCell<HashMap<String, std::sync::Arc<crate::gal::Image>>>,
+    /// Tamaño lógico de presentación de texturas SaveScreen almacenadas a tamaño del target.
+    vfs_layout: HashMap<String, (u32, u32)>,
 }
 
 /// Pedido de captura calc.html SaveScreen (path + resample opcional).
@@ -568,6 +563,17 @@ impl Vm {
                 Clock::Cinema { .. } => None,
             })
             .collect()
+    }
+
+    pub(crate) fn has_visible_video(&self) -> bool {
+        self.clocks.iter().any(|(name, clock)| {
+            matches!(clock, Clock::Video(_))
+                && self.scene.get(name).is_some_and(|object| {
+                    object.kind == Kind::Movie
+                        && object.get(Prop::PLAYING).is_some_and(Value::truthy)
+                        && self.scene.effective_visible(object)
+                })
+        })
     }
 
     pub fn cinema(&self, name: &str) -> Option<&CinemaPlayback> {
@@ -805,17 +811,16 @@ impl Vm {
             visited: Default::default(),
             flip_plan: None,
             wipe_fade: None,
+            wipe_hold_started_at: None,
+            wipe_sync_capture: false,
             plates: Vec::new(),
-            base_plate: None,
-            base_born: None,
-            frame_id: 0,
             text_char_ms: HashMap::new(),
             quake: None,
             wipe_flash: None,
             mem_files: HashMap::new(),
-            screen_rgba: None,
-            pending_savescreen: None,
+            pending_savescreen: Vec::new(),
             vfs_image_cache: std::cell::RefCell::new(HashMap::new()),
+            vfs_layout: HashMap::new(),
         };
         vm.prefetch_from(&script, 0);
         vm.frames.push(Frame {
@@ -1389,6 +1394,63 @@ impl Vm {
         names.iter().any(|name| self.menu_still_modal(name))
     }
 
+    fn modal_menu_tree_contains(&self, object: &str) -> bool {
+        let mut menu_names: Vec<&str> = self
+            .modal_menus
+            .iter()
+            .filter_map(|state| match state {
+                State::Menu { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        if let State::Menu { name, .. } = &self.state {
+            menu_names.push(name);
+        }
+        menu_names.into_iter().any(|name| {
+            if !self.menu_still_modal(name) {
+                return false;
+            }
+            let mut root = name.to_string();
+            for _ in 0..64 {
+                let Some(parent) = self
+                    .scene
+                    .get(&root)
+                    .map(|component| component.str(Prop::PARENT))
+                else {
+                    break;
+                };
+                if parent.is_empty() || self.scene.get(&parent).is_none() {
+                    break;
+                }
+                root = parent;
+            }
+            let mut current = object.to_string();
+            for _ in 0..64 {
+                if current == root {
+                    return true;
+                }
+                let Some(parent) = self
+                    .scene
+                    .get(&current)
+                    .map(|component| component.str(Prop::PARENT))
+                else {
+                    return false;
+                };
+                if parent.is_empty() || self.scene.get(&parent).is_none() {
+                    return false;
+                }
+                current = parent;
+            }
+            false
+        })
+    }
+
+    fn event_runs_during_menu(&self, event: &ObjEvent) -> bool {
+        matches!(event.prop, Prop::ONOPENING | Prop::ONSELECT)
+            || (matches!(event.prop, Prop::ONRBTNDOWN | Prop::ONRBTNUP)
+                && self.modal_menu_tree_contains(&event.obj))
+    }
+
     fn promote_menu_event(&mut self) -> bool {
         if !self.menu_is_modal() {
             return true;
@@ -1396,7 +1458,7 @@ impl Vm {
         let Some(index) = self
             .queue
             .iter()
-            .position(|ev| matches!(ev.prop, Prop::ONOPENING | Prop::ONSELECT))
+            .position(|event| self.event_runs_during_menu(event))
         else {
             return !matches!(self.state, State::Menu { .. });
         };
@@ -1415,7 +1477,7 @@ impl Vm {
         let menu_event = self
             .queue
             .front()
-            .is_some_and(|ev| matches!(ev.prop, Prop::ONOPENING | Prop::ONSELECT));
+            .is_some_and(|event| self.event_runs_during_menu(event));
         if matches!(self.state, State::Ended)
             || (matches!(self.state, State::Menu { .. }) && !menu_event)
             || self.frames.len() > 200
@@ -1475,10 +1537,27 @@ impl Vm {
     /// Avanza un frame: reloj, animaciones, texto, eventos y ejecución
     /// cooperativa (un While/Wait 0 cede el resto del frame).
     pub fn update(&mut self, now: f64, budget: usize) -> usize {
+        if let Some(held_at) = self.wipe_hold_started_at.take() {
+            let held_ms = (now - held_at).max(0.0);
+            if held_ms > 0.0 {
+                if let Some(fade) = self.wipe_fade.as_mut() {
+                    fade.started_at += held_ms;
+                }
+                if let State::WaitUntil { until, .. } = &mut self.state {
+                    *until += held_ms;
+                }
+            }
+        }
         self.now = now;
-        self.frame_id = self.frame_id.saturating_add(1);
-        self.scene.set_cohort(self.frame_id);
+        if self.wipe_sync_capture {
+            self.wipe_sync_capture = false;
+            self.rewind_active_wipe();
+        }
         self.scene.update(now);
+        if self.skip && self.skip_blocked_by_disabled_menu_item() {
+            log::debug!("ignoring skip input while a visible PrevMenu skip item is disabled");
+            self.skip = false;
+        }
         if self
             .quake
             .as_ref()
@@ -2273,6 +2352,7 @@ impl Vm {
                     .map(|f| f.params.len() as i64)
                     .unwrap_or(0),
             ),
+            "@StackCount" => Value::Int(self.frames.len() as i64),
             "@Year" => {
                 let s = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

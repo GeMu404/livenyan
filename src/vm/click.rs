@@ -430,7 +430,9 @@ impl Vm {
                 Prop::ONNOTIFY,
             ]
         };
-        let menu_hit = (!right).then(|| self.prevmenu_hit(x, y)).flatten();
+        let menu_hit = (!right)
+            .then(|| self.prevmenu_hit_for_click(x, y))
+            .flatten();
         let menu_key = menu_hit.as_ref().and_then(|(name, _)| {
             self.scene
                 .get(name)
@@ -455,8 +457,14 @@ impl Vm {
                     .is_none_or(|(_, object_key)| menu_key >= *object_key)
             })
         {
-            // selección: ONSELECT y, al terminar (sin animación de selección), ONPLAYEND
             let bname = self.prevmenus[&n].buttons[i].name.clone();
+            if !self.prevmenu_item_enabled(&n, i, &bname) {
+                self.mouse_left_click = false;
+                let kind = self.object_kind_name(&n);
+                self.log_click(x, y, false, &n, kind, "disabled", false, &bname);
+                return;
+            }
+            // selección: ONSELECT y, al terminar (sin animación de selección), ONPLAYEND
             let group = self.prevmenus[&n].buttons[i].group;
             log::debug!("PrevMenu {n}: selected button {i} group {group}");
             // Grupo distinto de 0: el motor alterna SELECTED antes del ONSELECT

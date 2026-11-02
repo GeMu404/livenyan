@@ -113,7 +113,7 @@ pub(super) fn image_texture_cache_evictions(
     evictions
 }
 
-fn evict_image_texture_sources(gfx: &mut Gfx, sources: &[String]) {
+pub(super) fn evict_image_texture_sources(gfx: &mut Gfx, sources: &[String]) {
     for source in sources {
         let frame_prefix = format!("{source}#");
         gfx.images

@@ -1,15 +1,46 @@
 use super::{
-    FRect, ImageTextureCacheEntry, add_rect_to_bounds, default_language_selection, edit_key_code,
-    estimated_texture_bytes, gal_animation_frame, image_texture_cache_evictions,
-    inferred_mask_group, interpolation_group_key, is_toolbar_visible, menu_content_rows,
-    menu_geometry, menu_geometry_with_width, menu_hit, menu_hit_rows, menu_scrollbar_geometry,
-    picture_present_floor, should_interpolate_gal, toolbar_contains, toolbar_hit,
-    toolbar_in_reveal_strip, update_toolbar_open, waits_for_picture,
+    FRect, ImageTextureCacheEntry, add_rect_to_bounds, blind_clip_rects, cinema_text_dimensions,
+    default_language_selection, edit_key_code, estimated_texture_bytes, gal_animation_frame,
+    image_texture_cache_evictions, inferred_mask_group, interpolation_group_key,
+    is_toolbar_visible, menu_content_rows, menu_geometry, menu_geometry_with_width, menu_hit,
+    menu_hit_rows, menu_scrollbar_geometry, picture_present_floor, should_interpolate_gal,
+    toolbar_contains, toolbar_hit, toolbar_in_reveal_strip, update_toolbar_open, waits_for_picture,
 };
 use crate::interpolation::InterpolationMode;
 use crate::lsb::{Prop, expr::Value};
 use crate::scene::{Kind, Scene};
 use std::collections::{HashMap, HashSet};
+
+#[test]
+fn cinema_text_texture_fits_content_without_using_animated_position() {
+    assert_eq!(cinema_text_dimensions(80, 24, 120.5, 24), (121, 24));
+    assert_eq!(cinema_text_dimensions(80, 24, 40.0, 24), (80, 24));
+    assert_eq!(cinema_text_dimensions(80, 24, 40.0, 32), (80, 32));
+}
+
+#[test]
+fn blind_clips_cover_the_viewport_and_preserve_translucent_box_geometry() {
+    let dest = FRect::new(0.0, 0.0, 800.0, 600.0);
+    let strips: Vec<_> = (0..30)
+        .map(|index| crate::vm::Strip {
+            x: 0,
+            y: index * 20,
+            w: 800,
+            h: 20,
+        })
+        .collect();
+    let clips = blind_clip_rects(dest, &strips);
+    assert_eq!(clips.len(), 30);
+    assert!(
+        clips
+            .iter()
+            .all(|rect| rect.x == 0.0 && rect.w == 800.0 && rect.h == 20.0)
+    );
+    assert_eq!(
+        clips.iter().map(|rect| rect.w * rect.h).sum::<f32>(),
+        800.0 * 600.0
+    );
+}
 
 #[test]
 fn scene_cut_waits_for_the_picture_not_the_map() {

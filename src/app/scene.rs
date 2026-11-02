@@ -90,6 +90,9 @@ fn interpolation_group_areas(
     {
         let (x, y) = scene.abs_pos(candidate);
         let source = candidate.str(Prop::SOURCE);
+        if Vm::is_vfs_image_source(&source) {
+            continue;
+        }
         let intrinsic_size = assets
             .data()
             .resolve(&source, IMAGE_EXTS)
@@ -217,7 +220,8 @@ pub(super) fn image_for(
     filter: ScaleMode,
 ) -> Option<String> {
     // mem:/save: (SaveScreen / CopyFile) — fuera del archivo del juego.
-    if let Some(img) = vm.vfs_image(src) {
+    if Vm::is_vfs_image_source(src) {
+        let img = vm.vfs_image(src)?;
         let name = src.to_string();
         if gfx.images.contains_key(&name) {
             touch_image_texture_source(gfx, &name);
@@ -332,6 +336,9 @@ pub(super) fn waits_for_picture(priority: i64, floor: i64) -> bool {
 
 pub(super) fn scene_images_ready(assets: &Assets, vm: &Vm, ordered_objects: &[Obj]) -> bool {
     let image_ready = |name: &str| {
+        if Vm::is_vfs_image_source(name) {
+            return vm.vfs_image(name).is_some();
+        }
         assets
             .data()
             .resolve(name, IMAGE_EXTS)
@@ -844,6 +851,60 @@ fn draw_message_text(
     "drawn"
 }
 
+fn blit_with_blinds(
+    canvas: &mut Canvas<Window>,
+    texture: &Texture,
+    dest: FRect,
+    texture_w: f32,
+    texture_h: f32,
+    strips: Option<&[crate::vm::Strip]>,
+) {
+    let Some(strips) = strips else {
+        let _ = canvas.copy(texture, None, dest);
+        return;
+    };
+    if dest.w <= 0.0 || dest.h <= 0.0 {
+        return;
+    }
+    for destination in blind_clip_rects(dest, strips) {
+        let sx = (destination.x - dest.x) / dest.w * texture_w;
+        let sy = (destination.y - dest.y) / dest.h * texture_h;
+        let sw = destination.w / dest.w * texture_w;
+        let sh = destination.h / dest.h * texture_h;
+        let source = FRect::new(sx, sy, sw, sh);
+        let _ = canvas.copy(texture, Some(source), destination);
+    }
+}
+
+pub(super) fn blind_clip_rects(dest: FRect, strips: &[crate::vm::Strip]) -> Vec<FRect> {
+    if dest.w <= 0.0 || dest.h <= 0.0 {
+        return Vec::new();
+    }
+    strips
+        .iter()
+        .filter_map(|strip| {
+            let x0 = dest.x.max(strip.x as f32);
+            let y0 = dest.y.max(strip.y as f32);
+            let x1 = (dest.x + dest.w).min(strip.x.saturating_add(strip.w) as f32);
+            let y1 = (dest.y + dest.h).min(strip.y.saturating_add(strip.h) as f32);
+            let (w, h) = (x1 - x0, y1 - y0);
+            (w > 0.0 && h > 0.0).then_some(FRect::new(x0, y0, w, h))
+        })
+        .collect()
+}
+
+pub(super) fn cinema_text_dimensions(
+    movie_width: u32,
+    movie_height: u32,
+    text_width: f32,
+    font_height: u32,
+) -> (u32, u32) {
+    (
+        movie_width.max(text_width.ceil().max(1.0) as u32).max(1),
+        movie_height.max(font_height).max(1),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_scene(
     canvas: &mut Canvas<Window>,
@@ -1070,6 +1131,22 @@ pub(super) fn draw_scene(
             }
             let mut rendered_text = 0;
             for (index, text) in texts.into_iter().enumerate() {
+                // La posición animada coloca el texto; no debe recortar la textura cacheada.
+                let font_px = font
+                    .as_deref_mut()
+                    .map(|renderer| renderer.size_for_cell_height(text.font_height as f32));
+                let text_width = font
+                    .as_deref_mut()
+                    .zip(font_px)
+                    .map(|(renderer, px)| {
+                        text.value
+                            .split(['\r', '\n'])
+                            .map(|line| renderer.measure_text_width(line, px))
+                            .fold(1.0_f32, f32::max)
+                    })
+                    .unwrap_or(1.0);
+                let (width, height) =
+                    cinema_text_dimensions(movie_w, movie_h, text_width, text.font_height);
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 (
                     text.value.as_str(),
@@ -1079,21 +1156,21 @@ pub(super) fn draw_scene(
                     movie_w,
                     movie_h,
                     text_scale.to_bits(),
+                    width,
+                    height,
                 )
                     .hash(&mut hasher);
                 let style = hasher.finish() as usize;
                 let key = format!("{}::lcm-text-{index}", o.name);
-                let width = (movie_w as f32 - text.x.max(0.0)).ceil().max(1.0) as u32;
-                let height = (movie_h as f32 - text.y.max(0.0))
-                    .ceil()
-                    .max(text.font_height as f32) as u32;
                 let stale = gfx
                     .texts
                     .get(&key)
                     .is_none_or(|(revision, old_style, _)| *revision != 0 || *old_style != style);
                 if stale {
                     let rendered = font.as_deref_mut().map(|renderer| {
-                        let px = renderer.size_for_cell_height(text.font_height as f32);
+                        let px = font_px.unwrap_or_else(|| {
+                            renderer.size_for_cell_height(text.font_height as f32)
+                        });
                         let raster = outline_raster(
                             renderer.is_pixel_font(),
                             text_scale,
@@ -1162,7 +1239,12 @@ pub(super) fn draw_scene(
                     st!() = "no source";
                     continue;
                 }
-                if assets.data().resolve(&src, IMAGE_EXTS).is_none() {
+                if Vm::is_vfs_image_source(&src) {
+                    if vm.vfs_image(&src).is_none() {
+                        st!() = "loading: VFS image not written yet";
+                        continue;
+                    }
+                } else if assets.data().resolve(&src, IMAGE_EXTS).is_none() {
                     st!() = "missing: source not in archive";
                     continue;
                 }
@@ -1182,11 +1264,20 @@ pub(super) fn draw_scene(
                     .get(&current_key)
                     .map(|(_, w, h)| (*w, *h))
                     .unwrap();
+                let (layout_w, layout_h) = vm.savescreen_layout(&src).unwrap_or((iw, ih));
                 if ow <= 0 || oh <= 0 {
-                    sizes.push((o.name.clone(), iw, ih));
+                    sizes.push((o.name.clone(), layout_w, layout_h));
                 }
-                let base_w = if ow > 0 { ow as f64 } else { f64::from(iw) };
-                let base_h = if oh > 0 { oh as f64 } else { f64::from(ih) };
+                let base_w = if ow > 0 {
+                    ow as f64
+                } else {
+                    f64::from(layout_w)
+                };
+                let base_h = if oh > 0 {
+                    oh as f64
+                } else {
+                    f64::from(layout_h)
+                };
                 // Tile: el zoom escala el mosaico, no la superficie (graphic.html).
                 let (x, y, dw, dh) = if o.kind == Kind::Tile {
                     (x, y, base_w as f32, base_h as f32)
@@ -1199,12 +1290,13 @@ pub(super) fn draw_scene(
                     .get(&o.name)
                     .copied()
                     .unwrap_or(f64::from(dw) * f64::from(dh));
-                let blend = if should_interpolate_gal(
-                    interpolation_mode,
-                    o.kind,
-                    interpolation_area,
-                    f64::from(lw) * f64::from(lh),
-                ) {
+                let blend = if !Vm::is_vfs_image_source(&src)
+                    && should_interpolate_gal(
+                        interpolation_mode,
+                        o.kind,
+                        interpolation_area,
+                        f64::from(lw) * f64::from(lh),
+                    ) {
                     match assets.try_get(&key) {
                         Some(Asset::Image(image)) => {
                             vm.animation_frame_blend(&o.name, &image.delays)
@@ -1226,6 +1318,7 @@ pub(super) fn draw_scene(
                     && progress > 0.0
                     && next_frame != current_frame;
                 let crossfade_safe = crossfade_active
+                    && !Vm::is_vfs_image_source(&src)
                     && alpha == u8::MAX
                     && *gfx
                         .crossfade_safety
@@ -1273,7 +1366,15 @@ pub(super) fn draw_scene(
                             ty += ih as f32;
                         }
                     } else {
-                        let _ = canvas.copy(texture, None, FRect::new(x as f32, y as f32, dw, dh));
+                        let blind_strips = vm.wipe_blind_strips(&o.name, lw, lh);
+                        blit_with_blinds(
+                            canvas,
+                            texture,
+                            FRect::new(x as f32, y as f32, dw, dh),
+                            iw as f32,
+                            ih as f32,
+                            blind_strips.as_deref(),
+                        );
                     }
                     texture.set_color_mod(255, 255, 255);
                     if crossfade_safe {
@@ -1585,7 +1686,14 @@ pub(super) fn draw_scene(
                 );
                 canvas.set_blend_mode(BlendMode::Blend);
                 canvas.set_draw_color(Color::RGBA(c[0], c[1], c[2], c[3]));
-                let _ = canvas.fill_rect(FRect::new(x as f32, y as f32, ow as f32, oh as f32));
+                let rect = FRect::new(x as f32, y as f32, ow as f32, oh as f32);
+                if let Some(strips) = vm.wipe_blind_strips(&o.name, lw, lh) {
+                    for clip in blind_clip_rects(rect, &strips) {
+                        let _ = canvas.fill_rect(clip);
+                    }
+                } else {
+                    let _ = canvas.fill_rect(rect);
+                }
             }
             Kind::Menu if vm.prevmenus.contains_key(&o.name) => {
                 let pm = vm.prevmenus[&o.name].clone();

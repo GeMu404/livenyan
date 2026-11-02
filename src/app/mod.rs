@@ -85,6 +85,33 @@ struct MenuCache {
     rows: Vec<FRect>,
 }
 
+fn read_scene_rgba(canvas: &mut Canvas<Window>) -> Result<(u32, u32, Vec<u8>), String> {
+    let shot = canvas
+        .read_pixels(None)
+        .map_err(|error| error.to_string())?;
+    let shot = shot
+        .convert_format(PixelFormat::RGBA32)
+        .map_err(|error| error.to_string())?;
+    let (w, h, pitch) = (shot.width(), shot.height(), shot.pitch() as usize);
+    if w == 0 || h == 0 {
+        return Err(format!("invalid readback size {w}x{h}"));
+    }
+    let row_bytes = (w as usize).saturating_mul(4);
+    if pitch < row_bytes {
+        return Err(format!(
+            "readback pitch {pitch} is smaller than {row_bytes}"
+        ));
+    }
+    let mut rgba = Vec::with_capacity(row_bytes.saturating_mul(h as usize));
+    shot.with_lock(|pixels: &[u8]| {
+        for y in 0..h as usize {
+            let start = y * pitch;
+            rgba.extend_from_slice(&pixels[start..start + row_bytes]);
+        }
+    });
+    Ok((w, h, rgba))
+}
+
 fn upload(
     tc: &TextureCreator<WindowContext>,
     w: u32,
@@ -942,7 +969,10 @@ pub fn run(
         let mut drawn = Vec::new();
         let mut ordered_objects: Vec<Obj> = vm.scene.draw_order().into_iter().cloned().collect();
         vm.append_wipe_incoming(&mut ordered_objects);
-        let savescreen_req = vm.take_pending_savescreen();
+        let savescreen_reqs = vm.take_pending_savescreen();
+        let savescreen_sources: Vec<String> =
+            savescreen_reqs.iter().map(|req| req.path.clone()).collect();
+        evict_image_texture_sources(&mut gfx, &savescreen_sources);
         let output_pixels = canvas.window().size_in_pixels();
         let target = scene_target_size(present_scale.external_upscale(), output_pixels, (lw, lh));
         if scene_frame.query().width != target.0 || scene_frame.query().height != target.1 {
@@ -966,9 +996,51 @@ pub fn run(
             (scene_frame.query().width, scene_frame.query().height),
             (lw, lh),
         );
-        if scene_images_ready(&assets, &vm, &ordered_objects) {
-            let mut captured_rgba: Option<Vec<u8>> = None;
-            let need_capture = savescreen_req.is_some();
+        let need_capture = !savescreen_reqs.is_empty();
+        let mut captured_rgba = None;
+        let mut capture_source = "current";
+        if need_capture && scene_frame_ready {
+            let mut readback_result = None;
+            match canvas.with_texture_canvas(&mut scene_frame, |scene_canvas| {
+                if let Err(error) = scene_canvas.set_logical_size(
+                    lw,
+                    lh,
+                    sdl3::sys::render::SDL_LOGICAL_PRESENTATION_STRETCH,
+                ) {
+                    log::warn!("scene target logical size: {error}");
+                }
+                readback_result = Some(read_scene_rgba(scene_canvas));
+            }) {
+                Ok(()) => match readback_result {
+                    Some(Ok(pixels)) => {
+                        captured_rgba = Some(pixels);
+                        capture_source = "presented";
+                    }
+                    Some(Err(error)) => {
+                        log::warn!("SaveScreen previous-frame readback failed: {error}");
+                    }
+                    None => {
+                        log::warn!("SaveScreen previous-frame target returned no readback");
+                    }
+                },
+                Err(error) => {
+                    log::warn!("SaveScreen previous-frame target failed: {error}");
+                }
+            }
+        }
+        let scene_ready = scene_images_ready(&assets, &vm, &ordered_objects)
+            || (!scene_frame_ready && need_capture);
+        if !scene_ready {
+            vm.hold_wipe_until_scene_ready();
+        }
+        if need_capture {
+            log::info!(
+                "SaveScreen scene_ready={scene_ready} objects={} cohort={}",
+                ordered_objects.len(),
+                vm.scene.cohort()
+            );
+        }
+        if scene_ready {
             canvas
                 .with_texture_canvas(&mut scene_frame, |scene_canvas| {
                     if let Err(error) = scene_canvas.set_logical_size(
@@ -995,6 +1067,14 @@ pub fn run(
                         interpolation_mode,
                         text_scale,
                     );
+                    let presented: Vec<String> = drawn
+                        .iter()
+                        .filter(|object| {
+                            object.status == "drawn" || object.status == "debug layout"
+                        })
+                        .map(|object| object.name.clone())
+                        .collect();
+                    vm.scene.mark_presented(&presented);
                     if let Some((name, choices)) = vm.modal_menu() {
                         // interface.html: FONTHOVERCOLOR solo con el cursor sobre el ítem.
                         let menu_hover = menu_hit_cached(
@@ -1026,40 +1106,44 @@ pub fn run(
                     } else {
                         gfx.menu = None;
                     }
-                    // SaveScreen: un solo readback GPU→CPU cuando hay pedido (no cada frame).
-                    if need_capture
-                        && let Ok(shot) = scene_canvas.read_pixels(None)
-                        && let Ok(shot) = shot.convert_format(PixelFormat::RGBA32)
-                    {
-                        let (w, h, pitch) = (shot.width(), shot.height(), shot.pitch() as usize);
-                        if w > 0 && h > 0 {
-                            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                            shot.with_lock(|px: &[u8]| {
-                                for y in 0..h as usize {
-                                    rgba.extend_from_slice(
-                                        &px[y * pitch..y * pitch + w as usize * 4],
-                                    );
-                                }
-                            });
-                            captured_rgba = Some(if w == lw && h == lh {
-                                rgba
-                            } else {
-                                crate::vm::resample_nearest(&rgba, w, h, lw, lh)
-                            });
+                    if need_capture && captured_rgba.is_none() {
+                        match read_scene_rgba(scene_canvas) {
+                            Ok(pixels) => captured_rgba = Some(pixels),
+                            Err(error) => {
+                                log::warn!("SaveScreen current-frame readback failed: {error}");
+                            }
                         }
                     }
                 })
                 .map_err(|e| format!("cannot render scene frame: {e}"))?;
-            if let (Some(req), Some(rgba)) = (savescreen_req, captured_rgba) {
-                let path = req.path.clone();
-                if !vm.complete_savescreen(&req, lw, lh, rgba) {
-                    log::warn!("SaveScreen: failed to write {path:?}");
-                }
-            }
             scene_frame_ready = true;
-        } else if let Some(req) = savescreen_req {
-            // Escena aún sin texturas: reencolar para el próximo frame listo.
-            vm.pending_savescreen = Some(req);
+        }
+        if need_capture {
+            let rendered = drawn
+                .iter()
+                .filter(|object| object.status == "drawn" || object.status == "debug layout")
+                .count();
+            log::info!("SaveScreen scene objects_drawn={rendered}/{}", drawn.len());
+            if let Some((w, h, rgba)) = captured_rgba {
+                let n = (w as usize).saturating_mul(h as usize).max(1);
+                let sum: u64 = rgba
+                    .chunks_exact(4)
+                    .map(|px| px[0] as u64 + px[1] as u64 + px[2] as u64)
+                    .sum();
+                let avg_rgb = sum / (3 * n as u64);
+                for req in savescreen_reqs {
+                    log::info!(
+                        "SaveScreen {} {w}x{h} avg rgb {avg_rgb} source={capture_source}",
+                        req.path
+                    );
+                    if !vm.complete_savescreen(&req, w, h, rgba.clone()) {
+                        log::warn!("SaveScreen: failed to write {:?}", req.path);
+                    }
+                }
+            } else {
+                log::warn!("SaveScreen readback produced no pixels; retrying next frame");
+                vm.pending_savescreen.extend(savescreen_reqs);
+            }
         }
         let scene_render_ms = scene_render_started.elapsed().as_secs_f64() * 1000.0;
         let toolbar_visible = snapshot.is_none()

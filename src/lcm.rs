@@ -749,8 +749,13 @@ mod tests {
             }
             out.extend_from_slice(&[0; 3]);
             push_point(&mut out, [0, 0]);
-            push_point(&mut out, [16, 0]);
-            push_point(&mut out, [16, 0]);
+            let (position_start, position_end) = if start == 0 {
+                ([80, 0], [-40, 0])
+            } else {
+                ([16, 0], [16, 0])
+            };
+            push_point(&mut out, position_start);
+            push_point(&mut out, position_end);
             out.extend_from_slice(&[0; 2]);
             push_real(&mut out, 0.0);
             if version >= 112 {
@@ -872,7 +877,9 @@ mod tests {
         let movie = parse(&text_movie()).unwrap();
         assert!(movie.sprites_at(0.0).is_empty());
         assert_eq!(movie.texts_at(0.0)[0].value, "scene A");
+        assert_eq!(movie.texts_at(0.0)[0].x, 80.0);
         assert_eq!(movie.texts_at(1000.0 / 60.0)[0].value, "scene A");
+        assert_eq!(movie.texts_at(1000.0 / 60.0)[0].x, -40.0);
         assert_eq!(movie.texts_at(2.0 * 1000.0 / 60.0)[0].value, "scene B");
     }
 

@@ -168,8 +168,39 @@ impl Env for Vm {
             Func::GETCHECK => {
                 Value::Bool(self.menu_item_flag(&self.checked, &s(0), a.get(1), false))
             }
-            // InPrimary: no documentada; se asume "ventana principal activa" -> verdadero.
-            Func::INPRIMARY => Value::Bool(true),
+            // docs/livenovel/calc.html: el componente pertenece a la superficie delantera.
+            Func::INPRIMARY => {
+                let name = s(0);
+                Value::Bool(
+                    self.scene
+                        .names()
+                        .iter()
+                        .any(|component| component == &name),
+                )
+            }
+            Func::DELETESTACK => {
+                let Some(index) = a
+                    .first()
+                    .map(Value::as_int)
+                    .and_then(|i| usize::try_from(i).ok())
+                else {
+                    return Some(Value::Bool(false));
+                };
+                if index >= self.frames.len() {
+                    Value::Bool(false)
+                } else {
+                    let removed = self.frames.remove(index);
+                    if self.frames.is_empty() {
+                        self.state = State::Ended;
+                    } else if index == self.frames.len()
+                        && let Some(saved) = removed.saved_state
+                    {
+                        self.state = saved;
+                        self.reapply_modal_menu();
+                    }
+                    Value::Bool(true)
+                }
+            }
             Func::GETHISTORYMAXCOUNT => Value::Int(self.history_max),
             Func::SETHISTORYMAXCOUNT => {
                 self.history_max = a.first().map(|v| v.as_int()).unwrap_or(0).max(0);
@@ -333,6 +364,8 @@ pub(crate) fn resample_nearest(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) 
 }
 
 pub(super) fn write_vfs_bytes(vm: &mut Vm, path: &str, data: &[u8]) -> bool {
+    vm.vfs_layout
+        .retain(|known_path, _| !known_path.eq_ignore_ascii_case(path));
     if let Some(name) = strip_vfs_prefix(path, "mem:") {
         if name.is_empty() {
             return false;
