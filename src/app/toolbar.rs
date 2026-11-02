@@ -152,6 +152,40 @@ pub(super) fn estimated_texture_bytes(width: u32, height: u32) -> usize {
         .saturating_mul(4)
 }
 
+pub(super) fn language_flag_image(code: &str) -> Option<&'static [u8]> {
+    match code.to_ascii_lowercase().as_str() {
+        "es" => Some(include_bytes!("../../assets/flags/96x64/es.png")),
+        "ja" => Some(include_bytes!("../../assets/flags/96x64/ja.png")),
+        _ => None,
+    }
+}
+
+pub(super) fn load_language_flag_textures(
+    tc: &TextureCreator<WindowContext>,
+    languages: &[crate::text_export::LanguageCatalog],
+) -> Result<HashMap<String, Texture>, String> {
+    let mut flags = HashMap::new();
+    for language in languages {
+        let Some(bytes) = language_flag_image(&language.code) else {
+            continue;
+        };
+        let image = image::load_from_memory(bytes)
+            .map_err(|error| format!("cannot decode {} language flag: {error}", language.code))?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        if (width, height) != (96, 64) {
+            return Err(format!(
+                "{} language flag must be 96x64, found {width}x{height}",
+                language.code
+            ));
+        }
+        let texture = upload_with_error(tc, width, height, image.as_raw(), ScaleMode::Linear)
+            .map_err(|error| format!("cannot load {} language flag: {error}", language.code))?;
+        flags.insert(language.code.clone(), texture);
+    }
+    Ok(flags)
+}
+
 pub(super) fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> TextureMemoryStats {
     let mut stats = TextureMemoryStats {
         image_bytes: gfx
@@ -163,6 +197,7 @@ pub(super) fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> Textu
         ui_count: gfx.texts.len()
             + gfx.debug_labels.len()
             + gfx.toolbar_texts.len()
+            + gfx.language_flags.len()
             + gfx
                 .menu
                 .as_ref()
@@ -190,6 +225,7 @@ pub(super) fn texture_memory_stats(gfx: &Gfx, logical_size: (u32, u32)) -> Textu
         .map(|(_, _, texture)| texture)
         .chain(gfx.debug_labels.values().map(|(_, texture, _, _)| texture))
         .chain(gfx.toolbar_texts.values().map(|(_, texture)| texture))
+        .chain(gfx.language_flags.values())
         .chain(
             gfx.menu
                 .iter()
@@ -383,11 +419,30 @@ fn draw_toolbar_text_styled(
     color: [u8; 4],
     align: u8,
 ) {
+    draw_toolbar_text_styled_size(
+        canvas, tc, gfx, font, text, x, y, width, height, 16.0, color, align,
+    );
+}
+
+fn draw_toolbar_text_styled_size(
+    canvas: &mut Canvas<Window>,
+    tc: &TextureCreator<WindowContext>,
+    gfx: &mut Gfx,
+    font: Option<&mut TextRenderer>,
+    text: &str,
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+    font_size: f32,
+    color: [u8; 4],
+    align: u8,
+) {
     let Some(font) = font else {
         return;
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (text, width, height, 16_u32, color, align).hash(&mut hasher);
+    (text, width, height, font_size.to_bits(), color, align).hash(&mut hasher);
     let style = hasher.finish() as usize;
     let stale = gfx
         .toolbar_texts
@@ -398,7 +453,7 @@ fn draw_toolbar_text_styled(
             .chars()
             .map(|character| TextItem::Char(character.to_string()))
             .collect::<Vec<_>>();
-        let image = font.render_aligned(&items, width, height, 16.0, color, false, align);
+        let image = font.render_aligned(&items, width, height, font_size, color, false, align);
         if let Some(texture) = upload(tc, image.w, image.h, &image.rgba, ScaleMode::Linear) {
             gfx.toolbar_texts.insert(text.to_string(), (style, texture));
         }
@@ -443,47 +498,77 @@ fn draw_toolbar_chip_label(
     );
 }
 
-pub(super) fn language_picker_rects(
-    (width, height): (u32, u32),
-    language_count: usize,
-    selection: usize,
-) -> (FRect, Vec<(usize, FRect)>) {
-    let total_rows = language_count + 1;
-    let row_height = 30.0;
-    let max_rows = ((height.saturating_sub(144)) / row_height as u32)
-        .max(1)
-        .min(total_rows as u32) as usize;
-    let offset = selection
-        .saturating_add(1)
-        .saturating_sub(max_rows)
-        .min(total_rows.saturating_sub(max_rows));
-    let visible_rows = max_rows.min(total_rows);
-    let panel_width = width.saturating_sub(32).min(500) as f32;
-    let panel_height = 112.0 + visible_rows as f32 * row_height;
+#[derive(Clone, Copy)]
+pub(super) struct LanguagePickerRects {
+    pub panel: FRect,
+    pub flag: FRect,
+    pub previous: FRect,
+    pub next: FRect,
+    pub confirm: FRect,
+}
+
+pub(super) fn language_picker_rects((width, height): (u32, u32)) -> LanguagePickerRects {
+    let panel_width = width.saturating_sub(32).min(560) as f32;
+    let panel_height = height.saturating_sub(32).min(440) as f32;
     let panel = FRect::new(
         (width as f32 - panel_width) / 2.0,
         (height as f32 - panel_height) / 2.0,
         panel_width,
         panel_height,
     );
-    let rows = (offset..offset + visible_rows)
-        .map(|index| {
-            (
-                index,
-                FRect::new(
-                    panel.x + 12.0,
-                    panel.y + 60.0 + (index - offset) as f32 * row_height,
-                    panel.w - 24.0,
-                    row_height - 2.0,
-                ),
-            )
-        })
-        .collect();
-    (panel, rows)
+    let flag_height = (panel_height * 0.44).min((panel_width - 180.0).max(64.0) / 1.5);
+    let flag_width = flag_height * 1.5;
+    let flag = FRect::new(
+        panel.x + (panel.w - flag_width) / 2.0,
+        panel.y + panel_height * 0.24,
+        flag_width,
+        flag_height,
+    );
+    let arrow_size = 48.0_f32.min(panel_height * 0.18);
+    let arrow_y = flag.y + (flag.h - arrow_size) / 2.0;
+    let previous = FRect::new(panel.x + 18.0, arrow_y, arrow_size, arrow_size);
+    let next = FRect::new(
+        panel.x + panel.w - arrow_size - 18.0,
+        arrow_y,
+        arrow_size,
+        arrow_size,
+    );
+    let confirm_size = 48.0_f32.min(panel_height * 0.18);
+    let confirm = FRect::new(
+        panel.x + (panel.w - confirm_size) / 2.0,
+        panel.y + panel.h - 72.0,
+        confirm_size,
+        confirm_size,
+    );
+    LanguagePickerRects {
+        panel,
+        flag,
+        previous,
+        next,
+        confirm,
+    }
+}
+
+pub(super) fn language_picker_step(selection: usize, language_count: usize, delta: i8) -> usize {
+    let total = language_count + 1;
+    match delta {
+        -1 => selection.checked_sub(1).unwrap_or(total - 1),
+        1 => (selection + 1) % total,
+        _ => selection.min(total - 1),
+    }
 }
 
 pub(super) fn default_language_selection(language_count: usize) -> usize {
     usize::from(language_count > 0)
+}
+
+pub(super) fn language_display_name<'a>(code: &'a str, name: &'a str) -> &'a str {
+    match code.to_ascii_lowercase().as_str() {
+        "es" => "Spanish",
+        "ja" => "Japanese",
+        _ if !name.eq_ignore_ascii_case(code) => name,
+        _ => code,
+    }
 }
 
 pub(super) fn apply_language_selection(
@@ -518,7 +603,7 @@ pub(super) fn draw_language_picker(
     selection: usize,
     mouse: (f32, f32),
 ) {
-    let (panel, rows) = language_picker_rects(dimensions, languages.len(), selection);
+    let rects = language_picker_rects(dimensions);
     let mut font = font;
     canvas.set_blend_mode(BlendMode::Blend);
     canvas.set_draw_color(Color::RGBA(0, 0, 0, 190));
@@ -528,64 +613,178 @@ pub(super) fn draw_language_picker(
         dimensions.0 as f32,
         dimensions.1 as f32,
     ));
-    canvas.set_draw_color(Color::RGBA(16, 18, 26, 250));
-    let _ = canvas.fill_rect(panel);
-    canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-    let _ = canvas.draw_rect(panel);
-    draw_toolbar_text(
+    fill_round_rect(
+        canvas,
+        FRect::new(
+            rects.panel.x + 3.0,
+            rects.panel.y + 5.0,
+            rects.panel.w,
+            rects.panel.h,
+        ),
+        [12.0; 4],
+        Color::RGBA(0, 0, 0, 100),
+    );
+    fill_round_rect(
+        canvas,
+        rects.panel,
+        [12.0; 4],
+        Color::RGBA(214, 170, 104, 96),
+    );
+    fill_round_rect(
+        canvas,
+        FRect::new(
+            rects.panel.x + 1.0,
+            rects.panel.y + 1.0,
+            rects.panel.w - 2.0,
+            rects.panel.h - 2.0,
+        ),
+        [11.0; 4],
+        Color::RGBA(15, 13, 20, 248),
+    );
+    draw_toolbar_text_styled_size(
         canvas,
         tc,
         gfx,
         font.as_deref_mut(),
-        "Selecciona idioma",
-        panel.x + 16.0,
-        panel.y + 12.0,
-        panel.w as u32 - 32,
-        28,
+        &format!("{:02} / {:02}", selection + 1, languages.len() + 1),
+        rects.panel.x + 16.0,
+        rects.panel.y + 24.0,
+        (rects.panel.w - 32.0).max(1.0) as u32,
+        20,
+        15.0,
+        [176, 164, 146, 255],
+        1,
     );
-    for (index, rect) in rows {
-        let hovered = mouse.0 >= rect.x
-            && mouse.0 < rect.x + rect.w
-            && mouse.1 >= rect.y
-            && mouse.1 < rect.y + rect.h;
-        canvas.set_draw_color(if index == selection {
-            Color::RGBA(55, 112, 84, 255)
-        } else if hovered {
-            Color::RGBA(73, 99, 145, 255)
-        } else {
-            Color::RGBA(43, 47, 61, 255)
-        });
-        let _ = canvas.fill_rect(rect);
-        canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
-        let _ = canvas.draw_rect(rect);
-        let label = if index == 0 {
-            "Original (sin traducción)"
-        } else {
-            languages[index - 1].name.as_str()
-        };
-        draw_toolbar_text(
+    fill_round_rect(
+        canvas,
+        FRect::new(
+            rects.flag.x - 8.0,
+            rects.flag.y - 8.0,
+            rects.flag.w + 16.0,
+            rects.flag.h + 16.0,
+        ),
+        [8.0; 4],
+        Color::RGBA(33, 38, 52, 255),
+    );
+    canvas.set_draw_color(Color::RGBA(35, 40, 54, 255));
+    let _ = canvas.fill_rect(rects.flag);
+    canvas.set_draw_color(Color::RGBA(126, 137, 160, 255));
+    let _ = canvas.draw_rect(rects.flag);
+    let label = if selection == 0 {
+        draw_toolbar_text_styled_size(
             canvas,
             tc,
             gfx,
             font.as_deref_mut(),
-            label,
-            rect.x + 10.0,
-            rect.y,
-            rect.w as u32 - 20,
-            rect.h as u32,
+            "ORIGINAL",
+            rects.flag.x + 8.0,
+            rects.flag.y + rects.flag.h / 2.0 - 20.0,
+            (rects.flag.w - 16.0) as u32,
+            40,
+            26.0,
+            [203, 214, 231, 255],
+            1,
         );
-    }
-    draw_toolbar_text(
+        "Original"
+    } else {
+        let language = &languages[selection - 1];
+        if let Some(flag) = gfx.language_flags.get(&language.code) {
+            let _ = canvas.copy(flag, None, rects.flag);
+        } else {
+            draw_toolbar_text_styled_size(
+                canvas,
+                tc,
+                gfx,
+                font.as_deref_mut(),
+                &language.code.to_ascii_uppercase(),
+                rects.flag.x + 8.0,
+                rects.flag.y + rects.flag.h / 2.0 - 20.0,
+                (rects.flag.w - 16.0) as u32,
+                40,
+                26.0,
+                [203, 214, 231, 255],
+                1,
+            );
+        }
+        language_display_name(&language.code, &language.name)
+    };
+    canvas.set_draw_color(Color::RGBA(220, 224, 232, 210));
+    let _ = canvas.draw_rect(rects.flag);
+    draw_toolbar_text_styled_size(
         canvas,
         tc,
         gfx,
-        font,
-        "Flechas + Enter · Esc: original",
-        panel.x + 16.0,
-        panel.y + panel.h - 32.0,
-        panel.w as u32 - 32,
-        22,
+        font.as_deref_mut(),
+        label,
+        rects.panel.x + 48.0,
+        rects.flag.y + rects.flag.h + 14.0,
+        (rects.panel.w - 96.0).max(1.0) as u32,
+        44,
+        30.0,
+        [255, 255, 255, 255],
+        1,
     );
+
+    for (rect, direction) in [(rects.previous, -1.0_f32), (rects.next, 1.0_f32)] {
+        let hovered = mouse.0 >= rect.x
+            && mouse.0 < rect.x + rect.w
+            && mouse.1 >= rect.y
+            && mouse.1 < rect.y + rect.h;
+        let (fill, rim, icon_color) = super::chrome_chip_colors(if hovered {
+            super::ChromeChip::Hover
+        } else {
+            super::ChromeChip::Idle
+        });
+        fill_round_chip(canvas, rect, fill, rim);
+        canvas.set_draw_color(Color::RGBA(
+            icon_color[0],
+            icon_color[1],
+            icon_color[2],
+            icon_color[3],
+        ));
+        let center_x = rect.x + rect.w / 2.0;
+        let center_y = rect.y + rect.h / 2.0;
+        let tip_x = center_x + direction * 5.0;
+        let base_x = center_x - direction * 3.0;
+        let _ = canvas.draw_line(
+            FPoint::new(base_x, center_y - 7.0),
+            FPoint::new(tip_x, center_y),
+        );
+        let _ = canvas.draw_line(
+            FPoint::new(tip_x, center_y),
+            FPoint::new(base_x, center_y + 7.0),
+        );
+    }
+    let confirm_hovered = mouse.0 >= rects.confirm.x
+        && mouse.0 < rects.confirm.x + rects.confirm.w
+        && mouse.1 >= rects.confirm.y
+        && mouse.1 < rects.confirm.y + rects.confirm.h;
+    let (fill, rim, icon_color) = super::chrome_chip_colors(if confirm_hovered {
+        super::ChromeChip::On
+    } else {
+        super::ChromeChip::Idle
+    });
+    fill_round_chip(canvas, rects.confirm, fill, rim);
+    canvas.set_draw_color(Color::RGBA(
+        icon_color[0],
+        icon_color[1],
+        icon_color[2],
+        icon_color[3],
+    ));
+    let check_left = FPoint::new(
+        rects.confirm.x + rects.confirm.w * 0.32,
+        rects.confirm.y + rects.confirm.h * 0.52,
+    );
+    let check_mid = FPoint::new(
+        rects.confirm.x + rects.confirm.w * 0.46,
+        rects.confirm.y + rects.confirm.h * 0.66,
+    );
+    let check_right = FPoint::new(
+        rects.confirm.x + rects.confirm.w * 0.70,
+        rects.confirm.y + rects.confirm.h * 0.36,
+    );
+    let _ = canvas.draw_line(check_left, check_mid);
+    let _ = canvas.draw_line(check_mid, check_right);
 }
 
 pub(super) fn draw_toolbar(

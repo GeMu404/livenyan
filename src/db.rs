@@ -66,9 +66,20 @@ fn typed(f: u8, v: Value) -> Value {
     match f {
         Func::DBGETINT | Func::DBDIRECTGETINT => Value::Int(v.as_int()),
         Func::DBGETFLOAT | Func::DBDIRECTGETFLOAT => Value::Float(v.as_f64()),
-        Func::DBGETBOOL | Func::DBDIRECTGETBOOL => Value::Bool(v.truthy()),
+        Func::DBGETBOOL | Func::DBDIRECTGETBOOL => Value::Bool(db_bool(&v)),
         _ => Value::Str(v.as_str()),
     }
+}
+
+fn db_bool(value: &Value) -> bool {
+    if let Value::Str(text) = value {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => return true,
+            "false" | "0" => return false,
+            _ => {}
+        }
+    }
+    value.truthy()
 }
 
 impl Db {
@@ -83,14 +94,22 @@ impl Db {
         (self.active.clone(), a)
     }
 
-    /// Carga TSV: primera línea = nombres de campo.
+    /// Carga TSV: primera línea = especificaciones `nombre tipo [ancho]`.
     pub fn load_tsv(&mut self, table: &str, text: &str) -> usize {
         let t = self.tables.entry(table.to_string()).or_default();
         let mut lines = text.lines().filter(|l| !l.is_empty());
         if t.fields.is_empty()
             && let Some(h) = lines.next()
         {
-            t.fields = h.split('\t').map(|s| s.to_string()).collect();
+            t.fields = h
+                .split('\t')
+                .map(|spec| {
+                    spec.split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect();
         }
         for l in lines {
             let mut row: Vec<Value> = l.split('\t').map(|s| Value::Str(s.to_string())).collect();
@@ -113,9 +132,7 @@ impl Db {
             Func::DBCREATETABLE => {
                 let name = s(a, 0);
                 self.tables.insert(name.clone(), Table::default());
-                if self.active.is_empty() {
-                    self.active = name;
-                }
+                self.active = name;
                 Value::Bool(true)
             }
             Func::DBDELETETABLE => Value::Bool(self.tables.remove(&s(a, 0)).is_some()),
@@ -287,7 +304,7 @@ mod tests {
     #[test]
     fn tsv_and_find() {
         let mut db = Db::default();
-        let load = |_: &str| Some("id\tname\n1\ta\n2\tb\n".to_string());
+        let load = |_: &str| Some("id int\tname char 10\n1\ta\n2\tb\n".to_string());
         db.call(Func::DBCREATETABLE, &[Value::Str("t".into())], &load);
         assert_eq!(
             db.call(
@@ -328,6 +345,49 @@ mod tests {
                 &load
             ),
             Some(Value::Str("a".into()))
+        );
+    }
+
+    #[test]
+    fn create_table_activates_it_for_tsv_load_and_grid_queries() {
+        let mut db = Db::default();
+        let load = |_: &str| Some("0 int\t1 int\t11 int\t12 int\n1\t0\t1\t0\n".to_string());
+        db.call(Func::DBCREATETABLE, &[Value::Str("other".into())], &load);
+        db.call(Func::DBCREATETABLE, &[Value::Str("map".into())], &load);
+        assert_eq!(db.active, "map");
+        assert_eq!(
+            db.call(Func::DBLOADTSVFILE, &[Value::Str("map.txt".into())], &load),
+            Some(Value::Int(1))
+        );
+        assert!(db.tables["other"].rows.is_empty());
+        db.call(Func::DBSETRECNO, &[Value::Int(0)], &load);
+        assert_eq!(
+            db.call(Func::DBGETINT, &[Value::Str("11".into())], &load),
+            Some(Value::Int(1))
+        );
+        assert_eq!(
+            db.call(Func::DBGETINT, &[Value::Str("12".into())], &load),
+            Some(Value::Int(0))
+        );
+    }
+
+    #[test]
+    fn db_get_bool_parses_tsv_boolean_literals() {
+        assert_eq!(
+            typed(Func::DBGETBOOL, Value::Str("FALSE".into())),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            typed(Func::DBGETBOOL, Value::Str(" TRUE ".into())),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            typed(Func::DBGETBOOL, Value::Str("0".into())),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            typed(Func::DBGETBOOL, Value::Str("1".into())),
+            Value::Bool(true)
         );
     }
 }

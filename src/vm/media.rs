@@ -68,6 +68,16 @@ fn estimate_message_pen(text: &str, draw_h: f64, line_step: f64, max_w: f64) -> 
 }
 
 impl Vm {
+    fn finish_visual_playback(&mut self, name: &str) {
+        let auto_scrap = self.scene.get(name).is_some_and(|object| {
+            object.get(Prop::AUTOSCRAP).is_some_and(Value::truthy)
+                && !object.get(Prop::REPEAT).is_some_and(Value::truthy)
+        });
+        if !self.fire(name, Prop::ONPLAYEND, vec![]) && auto_scrap {
+            self.scrap_component(name);
+        }
+    }
+
     /// La flecha del mensaje usa CARETX/CARETY. Tiene que coincidir con la pluma
     /// del raster, incluido el corte de línea; si no, queda fuera del cuadro.
     pub(crate) fn sync_message_text_prop(&mut self, name: &str) {
@@ -274,7 +284,7 @@ impl Vm {
         if let Some(obj) = self.scene.get_mut(name) {
             obj.props.insert(Prop::PLAYING, Value::Bool(false));
         }
-        self.fire(name, Prop::ONPLAYEND, vec![]);
+        self.finish_visual_playback(name);
     }
     /// Animación, fundido o vídeo de una sola pasada todavía en curso.
     /// Misma condición que la espera de `CREATECG WAIT` / `WAITPLAY`.
@@ -683,7 +693,7 @@ impl Vm {
                 }
             }
             if done {
-                self.fire(&n, Prop::ONPLAYEND, vec![]);
+                self.finish_visual_playback(&n);
             }
         }
     }
@@ -716,7 +726,7 @@ impl Vm {
             if let Some(o) = self.scene.get_mut(&n) {
                 o.props.insert(Prop::PLAYING, Value::Bool(false));
             }
-            self.fire(&n, Prop::ONPLAYEND, vec![]);
+            self.finish_visual_playback(&n);
         }
     }
 
@@ -793,7 +803,7 @@ impl Vm {
                 if let Some(o) = self.scene.get_mut(&name) {
                     o.props.insert(Prop::PLAYING, Value::Bool(false));
                 }
-                self.fire(&name, Prop::ONPLAYEND, vec![]);
+                self.finish_visual_playback(&name);
             }
         }
     }
@@ -1060,6 +1070,18 @@ mod tests {
             vm.cinema("once").unwrap().texts_at(vm.now)[0].value,
             "10:42"
         );
+
+        vm.scene.create(
+            "autoscrap",
+            Kind::Image,
+            HashMap::from([(Prop::AUTOSCRAP, Value::Bool(true))]),
+        );
+        vm.now = 7_000.0;
+        vm.start_lcm_movie("autoscrap", digit_movie());
+        vm.now = 7_000.0 + duration + frame;
+        vm.update_cinemas();
+        assert!(vm.scene.get("autoscrap").is_none());
+        assert!(vm.cinema("autoscrap").is_none());
     }
 
     #[test]

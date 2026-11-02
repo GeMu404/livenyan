@@ -1510,6 +1510,10 @@ impl Vm {
             }
             let auto_scrap_sender = match ev.prop {
                 Prop::ONSELECT => self.component_auto_scrap(&ev.obj),
+                Prop::ONPLAYEND => self.scene.get(&ev.obj).is_some_and(|object| {
+                    object.get(Prop::AUTOSCRAP).is_some_and(Value::truthy)
+                        && !object.get(Prop::REPEAT).is_some_and(Value::truthy)
+                }),
                 Prop::ONRBTNUP => self
                     .scene
                     .get(&ev.obj)

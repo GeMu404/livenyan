@@ -41,7 +41,8 @@ Saves: `$XDG_DATA_HOME/livenyan/<juego>/`. Los archivos del juego no se modifica
 
 Traducciones: carpeta `translations/*.toml` junto al juego (exportar con
 `--dump-texts DIR` o desde Opciones). Detalle de marcadores `{{LV:…}}` en el
-comentario del catálogo exportado.
+comentario del catálogo exportado. El selector incluye banderas PNG de 96×64
+en `assets/flags/96x64/`: `es.png` para `es.toml` y `ja.png` para `ja.toml`.
 
 ### Depuración
 

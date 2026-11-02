@@ -90,7 +90,7 @@ Ids: `src/lsb/names.rs`. Parse: `src/lsb/mod.rs`.
 | 20 | TextIns | `ok` | Insertar texto TpWord | Plan Pending + plays | `<PG>` coalesce: `script.html` |
 | 21 | MovieStop | `ok` | Parar película | | |
 | 22 | ClrHist | `ok` | Limpiar historial | | |
-| 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. El ancho del raster de texto se mide por su contenido, independiente de la posición animada del clip, para que la caché no recorte la marquesina al entrar. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT; **experimento** test2, clip = un ciclo del GAL |
+| 23 | Cinema | `partial` | LiveCinema | LCM de imágenes: cada clip dura lo que marca el archivo (60 fps). `CHANGECG … REPEAT` no rebobina al primer clip: los anteriores se ven una vez y el último GAL sigue con las duraciones del propio archivo. Un LCM de texto sí repite la línea entera. `AUTOSCRAP` elimina el objeto al terminar una reproducción no repetida, después de su `ONPLAYEND`. El ancho del raster de texto se mide por su contenido, independiente de la posición animada del clip, para que la caché no recorte la marquesina al entrar. Sin LCM usable, placeholder en ms | `graphic.html` PR_REPEAT/PR_AUTOSCRAP; **experimento** test2, clip = un ciclo del GAL |
 | 24 | Caption | `ok` | Caption | | |
 | 25–26 | Menu / MenuClose | `ok` / `partial` | Menús | El script sigue tras el comando (SetCheck, Flip). El menú queda modal hasta cerrarlo; el clic dispara ONSELECT en el acto. Handlers de botón derecho en su rama visual (incluido el fondo padre) pueden ejecutarse durante la modalidad; eventos ajenos quedan retenidos. `PR_IGNOREMOUSE` deja pasar el clic al panel. livenyan interpreta 0–4 como los modos `IM_NONE`, `IM_ALL`, `IM_CLICK`, `IM_LCLICK`, `IM_RCLICK` (enumeración, no máscara); por eso 4 recibe clic izquierdo y omite el derecho. El texto se dibuja en el orden de la escena: un hermano con más prioridad (el deslizador) queda encima | interface.html; `graphic.html` マウス透過; el handler del fondo de sistema usa ONRBTNDOWN para cerrar |
 | 27 | Comment | `ok` | Ignorar | | |
@@ -207,7 +207,7 @@ Diseño estable: **no** son bugs ni “hasta que haya 1:1”.
 | ADDDELIMITER | `ok` | Si la cadena no está vacía, añade el separador al final (**fuente primaria** calc.html) |
 | INDEXOFMENU | `ok` | Índice del texto en el menú, o -1 (**fuente primaria** calc.html) |
 | GETDISPLAYMODE | `ok` | Siempre 0 (**I10**) |
-| DB* | `ok` / `partial` | Subset en `src/db.rs` |
+| DB* | `ok` / `partial` | Subset en `src/db.rs`; `DBCreateTable` activa la tabla creada y `DBLoadTsvFile` carga en la activa (`calc.html`). La fila TSV inicial declara `nombre tipo [ancho]`; getters tipados convierten sus valores y `DBGetBool` reconoce `TRUE`/`FALSE` y `1`/`0` |
 | Resto unimpl | `unimpl` | `unimpl:func …` en `--trace` |
 
 ---

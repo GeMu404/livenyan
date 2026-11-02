@@ -171,6 +171,47 @@ fn language_picker_defaults_to_first_translation_when_available() {
 }
 
 #[test]
+fn language_picker_carousel_wraps_and_centers_its_flag_and_controls() {
+    use super::language_picker_step;
+
+    assert_eq!(language_picker_step(0, 2, -1), 2);
+    assert_eq!(language_picker_step(2, 2, 1), 0);
+    assert_eq!(language_picker_step(1, 2, -1), 0);
+    assert_eq!(language_picker_step(1, 2, 1), 2);
+    assert_eq!(language_picker_step(usize::MAX, 2, 0), 2);
+
+    let rects = super::language_picker_rects((800, 600));
+    assert_eq!(rects.panel.w, 560.0);
+    assert_eq!(rects.panel.h, 440.0);
+    assert!(rects.flag.w > 250.0);
+    assert!((rects.flag.x + rects.flag.w / 2.0 - 400.0).abs() < 0.1);
+    assert!(rects.previous.x + rects.previous.w < rects.flag.x);
+    assert!(rects.next.x > rects.flag.x + rects.flag.w);
+    assert!(rects.confirm.y > rects.flag.y + rects.flag.h);
+}
+
+#[test]
+fn language_picker_shows_human_readable_names_when_catalog_name_is_its_code() {
+    assert_eq!(super::language_display_name("es", "es"), "Spanish");
+    assert_eq!(super::language_display_name("JA", "ja"), "Japanese");
+    assert_eq!(super::language_display_name("es", "Español"), "Spanish");
+    assert_eq!(super::language_display_name("es", "Castellano"), "Spanish");
+    assert_eq!(super::language_display_name("fr", "fr"), "fr");
+}
+
+#[test]
+fn language_flags_match_catalog_codes_and_use_the_expected_dimensions() {
+    use image::GenericImageView;
+
+    for code in ["es", "ja", "ES", "JA"] {
+        let bytes = super::language_flag_image(code).expect("known language flag");
+        let image = image::load_from_memory(bytes).expect("valid flag PNG");
+        assert_eq!(image.dimensions(), (96, 64));
+    }
+    assert!(super::language_flag_image("fr").is_none());
+}
+
+#[test]
 fn image_texture_cache_evicts_lru_sources_but_protects_used_sources() {
     let cache = HashMap::from([
         (

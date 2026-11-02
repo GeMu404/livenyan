@@ -21,7 +21,7 @@ use sdl3::keyboard::Mod;
 use sdl3::mouse::{MouseButton, MouseWheelDirection};
 use sdl3::pixels::{Color, PixelFormat};
 
-use sdl3::render::{BlendMode, Canvas, FRect, ScaleMode, Texture, TextureCreator};
+use sdl3::render::{BlendMode, Canvas, FPoint, FRect, ScaleMode, Texture, TextureCreator};
 use sdl3::video::{Window, WindowContext};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -44,6 +44,7 @@ const IMAGE_TEXTURE_CACHE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
 struct Gfx {
     images: HashMap<String, (Texture, u32, u32)>,
+    language_flags: HashMap<String, Texture>,
     image_texture_cache: HashMap<String, ImageTextureCacheEntry>,
     image_texture_cache_clock: u64,
     image_texture_used_this_frame: HashSet<String>,
@@ -368,6 +369,7 @@ pub fn run(
     let mut pump = sdl.event_pump().map_err(|e| e.to_string())?;
     let mut gfx = Gfx {
         images: HashMap::new(),
+        language_flags: load_language_flag_textures(&tc, &languages)?,
         image_texture_cache: HashMap::new(),
         image_texture_cache_clock: 0,
         image_texture_used_this_frame: HashSet::new(),
@@ -476,11 +478,13 @@ pub fn run(
                 } => {
                     if language_picker_open {
                         match k {
-                            sdl3::keyboard::Keycode::Up => {
-                                language_selection = language_selection.saturating_sub(1);
+                            sdl3::keyboard::Keycode::Left | sdl3::keyboard::Keycode::Up => {
+                                language_selection =
+                                    language_picker_step(language_selection, languages.len(), -1);
                             }
-                            sdl3::keyboard::Keycode::Down => {
-                                language_selection = (language_selection + 1).min(languages.len());
+                            sdl3::keyboard::Keycode::Right | sdl3::keyboard::Keycode::Down => {
+                                language_selection =
+                                    language_picker_step(language_selection, languages.len(), 1);
                             }
                             sdl3::keyboard::Keycode::Return | sdl3::keyboard::Keycode::KpEnter => {
                                 apply_language_selection(&mut vm, &languages, language_selection);
@@ -608,17 +612,15 @@ pub fn run(
                     log::debug!("click at logical ({x:.0},{y:.0})");
                     mouse = (x, y);
                     if language_picker_open {
-                        let (_, rows) =
-                            language_picker_rects((lw, lh), languages.len(), language_selection);
-                        if let Some(index) = rows.iter().find_map(|(index, rect)| {
-                            (x >= rect.x
-                                && x < rect.x + rect.w
-                                && y >= rect.y
-                                && y < rect.y + rect.h)
-                                .then_some(*index)
-                        }) {
-                            apply_language_selection(&mut vm, &languages, index);
-                            language_selection = index;
+                        let rects = language_picker_rects((lw, lh));
+                        if rect_contains(rects.previous, x, y) {
+                            language_selection =
+                                language_picker_step(language_selection, languages.len(), -1);
+                        } else if rect_contains(rects.next, x, y) {
+                            language_selection =
+                                language_picker_step(language_selection, languages.len(), 1);
+                        } else if rect_contains(rects.confirm, x, y) {
+                            apply_language_selection(&mut vm, &languages, language_selection);
                             language_picker_open = false;
                         }
                         continue;
